@@ -1,0 +1,64 @@
+[project]
+name = "kort-backend"
+version = "0.1.0"
+description = "KORT — управленческий учёт компании: API"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "alembic>=1.18.4",
+    # Пароли учёток (argon2id).
+    "argon2-cffi>=23.1.0",
+    # Сканы выписок: облачное распознавание, если задан ключ.
+    "azure-ai-documentintelligence>=1.0.2",
+    "fastapi>=0.135.3",
+    # Книги Google: перенос в учёт и «Оплачено (сводка)» реестра договоров.
+    "google-auth>=2.26.0",
+    "gspread>=6.1.0",
+    "openpyxl>=3.1.5",
+    "orjson>=3.11.8",
+    "psycopg[binary]>=3.3.3",
+    "pydantic-settings>=2.13.1",
+    # PDF-выписки.
+    "pymupdf>=1.27.2.2",
+    "python-multipart>=0.0.22",
+    "sqlalchemy>=2.0.49",
+    "tenacity>=9.1.4",
+    "uvicorn[standard]>=0.43.0",
+    # Старые .xls выписок и выгрузка журнала в .xlsx.
+    "xlrd>=2.0.1",
+    "xlsxwriter>=3.2.9",
+]
+
+[project.optional-dependencies]
+# Сканы выписок без облака: локальное распознавание.
+ocr_local = [
+    "rapidocr>=3.7.0",
+    "onnxruntime>=1.24.4",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "mypy>=1.20.0",
+    "pytest>=9.0.2",
+    "pytest-asyncio>=1.3.0",
+    "ruff>=0.15.9",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = [
+    # Проверки схемы: нужен живой Postgres, без него набор пропускается.
+    "migrations: требует Postgres (TEST_DATABASE_URL / DATABASE_URL)",
+]
+
+[tool.mypy]
+python_version = "3.12"
+warn_unused_configs = true
+warn_return_any = true
+strict_optional = true

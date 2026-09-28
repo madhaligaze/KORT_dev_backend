@@ -1,0 +1,80 @@
+# Зависимости API KORT для контейнера (Linux), закреплены точно.
+#
+# Прямые — те же, что в pyproject.toml; версии — те, на которых прошли тесты
+# (288 + 3 на Postgres, 28.09.2026). Без закрепления Railway на каждой сборке
+# брал последние версии: 28.09 это дало FastAPI 0.141 / Starlette 1.7, и
+# проверка «каждый маршрут объявляет раздел» перестала видеть зависимости.
+#
+# Пересобрать после смены зависимостей:
+#   uv pip compile <прямые> --python-version 3.12 \
+#     --python-platform x86_64-unknown-linux-gnu --no-header --no-annotate -o requirements-prod.txt
+
+alembic==1.18.4
+annotated-doc==0.0.4
+annotated-types==0.7.0
+antlr4-python3-runtime==4.9.3
+anyio==4.13.0
+argon2-cffi==25.1.0
+argon2-cffi-bindings==25.1.0
+azure-ai-documentintelligence==1.0.2
+azure-core==1.39.0
+certifi==2026.2.25
+cffi==2.0.0
+charset-normalizer==3.4.7
+click==8.3.2
+colorlog==6.12.0
+cryptography==49.0.0
+et-xmlfile==2.0.0
+fastapi==0.135.3
+flatbuffers==25.12.19
+google-auth==2.55.0
+google-auth-oauthlib==1.4.0
+greenlet==3.3.2
+gspread==6.2.1
+h11==0.16.0
+httptools==0.7.1
+idna==3.11
+isodate==0.7.2
+mako==1.3.10
+markupsafe==3.0.3
+numpy==2.5.3
+oauthlib==3.3.1
+omegaconf==2.3.1
+onnxruntime==1.30.0
+opencv-python==5.0.0.93
+openpyxl==3.1.5
+orjson==3.11.8
+packaging==26.0
+pillow==12.3.0
+protobuf==7.36.2
+psycopg==3.3.3
+psycopg-binary==3.3.3
+pyasn1==0.6.3
+pyasn1-modules==0.4.2
+pyclipper==1.4.0
+pycparser==3.0
+pydantic==2.12.5
+pydantic-core==2.41.5
+pydantic-settings==2.13.1
+pymupdf==1.27.2.2
+python-dotenv==1.2.2
+python-multipart==0.0.22
+pyyaml==6.0.3
+rapidocr==3.9.2
+requests==2.33.1
+requests-oauthlib==2.0.0
+shapely==2.1.2
+six==1.17.0
+sqlalchemy==2.0.49
+starlette==1.0.0
+tenacity==9.1.4
+tqdm==4.70.1
+typing-extensions==4.15.0
+typing-inspection==0.4.2
+urllib3==2.6.3
+uvicorn==0.43.0
+uvloop==0.22.1
+watchfiles==1.1.1
+websockets==16.0
+xlrd==2.0.2
+xlsxwriter==3.2.9
