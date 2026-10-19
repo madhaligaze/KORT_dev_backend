@@ -31,7 +31,7 @@ class StatementMetadata(BaseModel):
     # Как адаптивный разбор решил, какие колонки складывать в приход и расход.
     reading_note: str | None = None
     # Чей счёт: "legal" (ТОО, АО, ИП) или "personal". От этого зависит вид
-    # таблицы — см. app/services/legal_statement.py. None — признаков не нашлось.
+    # таблицы - см. app/services/legal_statement.py. None - признаков не нашлось.
     holder_kind: str | None = None
 
 
@@ -281,7 +281,7 @@ class TransformationTemplate(BaseModel):
     base_variant_key: str
     columns: list[TemplateColumnConfig]
     is_default: bool = False
-    # Normalised tokens of the source statement's columns — used to auto-match this
+    # Normalised tokens of the source statement's columns - used to auto-match this
     # template to a freshly parsed statement with the same column structure.
     source_signature: list[str] = Field(default_factory=list)
     # Presentation snapshot for the Web-Excel view (column widths, number formats,

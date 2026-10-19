@@ -1,7 +1,7 @@
 """Автоправила и чтение банковских выписок.
 
 Два куска одной задачи: выписка приносит две тысячи строк «Покупка · Magnum»,
-правила раскладывают их по статьям. Без второго первое бесполезно — отчёт
+правила раскладывают их по статьям. Без второго первое бесполезно - отчёт
 покажет один столбец «Без категории».
 """
 from __future__ import annotations
@@ -238,7 +238,7 @@ def test_podskazki_nazyvayut_mesto_tselikom(workspace_id) -> None:
 
     Подсказка называет место целиком («Magnum Cash&Carry»), а не одно слово из
     комментария. Первая версия брала самое длинное слово и на «Пополнение · С
-    карты другого банка» предлагала правило по слову «другого» — правило по
+    карты другого банка» предлагала правило по слову «другого» - правило по
     случайному слову ловит что попало.
     """
     with finance_session() as session:
@@ -253,14 +253,14 @@ def test_podskazki_nazyvayut_mesto_tselikom(workspace_id) -> None:
         found = rules_module.suggest(session, workspace_id, min_count=2)
     keywords = [item["keyword"] for item in found]
     assert "Magnum Cash&Carry" in keywords, keywords
-    assert all(item["count"] >= 2 for item in found), "предложения из одной операции — шум"
+    assert all(item["count"] >= 2 for item in found), "предложения из одной операции - шум"
 
 
 # ── Перевод банковской выписки в строки импорта ──────────────────────────────
 
 
 def _fake_statement(monkeypatch, transactions):
-    """Подделываем разбор: свой перевод проверяем, чужой разбор — не наш код."""
+    """Подделываем разбор: свой перевод проверяем, чужой разбор - не наш код."""
     statement = SimpleNamespace(
         metadata=SimpleNamespace(parser_key="kaspi_gold_statement"),
         transactions=transactions,

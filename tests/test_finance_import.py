@@ -3,7 +3,7 @@
 Набор написан по протоколу проверки чужого импортёра (17 сентября 2026,
 `docs/finmap-audit.md`): каждый тест здесь закрывает случай, на котором тот
 ошибался. Это не «проверим, что парсер работает», а «проверим, что он не
-повторяет известных ошибок» — и потому тесты названы по симптому.
+повторяет известных ошибок» - и потому тесты названы по симптому.
 """
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ def finance_db(tmp_path, monkeypatch):
     """Своя база на прогон.
 
     Отдельным файлом, а не общим: имя таблицы `workspaces` объявлено в трёх
-    модулях (`books`, `finance`, плюс своё у web-excel), и на SQLite схем нет —
+    модулях (`books`, `finance`, плюс своё у web-excel), и на SQLite схем нет -
     первый, кто создаст таблицу, определит её вид для остальных. Урок из
     `test_books_rows.py`, где это уже стоило падения на «нет колонки».
     """
@@ -126,15 +126,15 @@ def test_minus_i_skobki_eto_rashod_a_ne_dohod(workspace):
 
 
 def test_poryadok_chastey_daty_odin_na_ves_fayl():
-    """Порядок частей даты — свойство файла, а не отдельной строки.
+    """Порядок частей даты - свойство файла, а не отдельной строки.
 
     Симптом у чужого импортёра: в одном файле «12/25/2026» читалось как
-    25 декабря (месяц-день), а «08/03/2026» — как 8 марта (день-месяц). Решение
+    25 декабря (месяц-день), а «08/03/2026» - как 8 марта (день-месяц). Решение
     принималось по каждой строке отдельно, поэтому даты с числом до 12 молча
     уезжали на другой месяц, а ошибки не было.
 
     Здесь «12/25/2026» доказывает, что файл записан как месяц-день, и это
-    чтение применяется ко всем строкам: «08/03/2026» — 3 августа. Важно не
+    чтение применяется ко всем строкам: «08/03/2026» - 3 августа. Важно не
     какое именно чтение выбрано, а что оно одно на весь файл.
     """
     reading = decide_date_order(["12/25/2026", "08/03/2026", "01/13/2026"])
@@ -143,7 +143,7 @@ def test_poryadok_chastey_daty_odin_na_ves_fayl():
     assert parse_date("12/25/2026", reading) == date(2026, 12, 25)
     assert parse_date("08/03/2026", reading) == date(2026, 8, 3)
 
-    # Тот же текст в файле, доказавшем обратный порядок, читается иначе — и это
+    # Тот же текст в файле, доказавшем обратный порядок, читается иначе - и это
     # решение файла, а не догадка строки.
     other = decide_date_order(["25/12/2026", "08/03/2026"])
     assert other.order == "dmy"
@@ -151,7 +151,7 @@ def test_poryadok_chastey_daty_odin_na_ves_fayl():
 
 
 def test_dvusmyslennyy_fayl_ne_ugadyvaetsya_a_sprashivaet(workspace):
-    """Все даты подходят под оба чтения — парсер обязан спросить."""
+    """Все даты подходят под оба чтения - парсер обязан спросить."""
     data = book(
         [
             ["08/03/2026", 111000, None, "Касса", "Выручка", "Клиент", "раз"],
@@ -161,14 +161,14 @@ def test_dvusmyslennyy_fayl_ne_ugadyvaetsya_a_sprashivaet(workspace):
     preview = analyze(data, "выписка.xlsx", ACCOUNTS)
     assert preview.question is not None
     assert preview.question["kind"] == "date_order"
-    # В вопросе показано, как будет прочитан пример при каждом выборе, —
+    # В вопросе показано, как будет прочитан пример при каждом выборе, -
     # иначе выбор делается наугад, и мы всего лишь переложили догадку.
     assert preview.question["options"][0]["example"].endswith("2026-03-08")
     assert preview.question["options"][1]["example"].endswith("2026-08-03")
 
 
 def test_protivorechivyy_fayl_nazyvaet_prichinu():
-    """Файл записан двумя способами сразу — это отдельный разговор."""
+    """Файл записан двумя способами сразу - это отдельный разговор."""
     reading = decide_date_order(["13/01/2026", "01/25/2026"])
     assert reading.ambiguous
     assert "двумя разными способами" in reading.evidence
@@ -178,7 +178,7 @@ def test_protivorechivyy_fayl_nazyvaet_prichinu():
 
 
 def test_lishnyaya_kolonka_ne_lomaet_razbor(workspace):
-    """Незнакомая колонка — не ошибка.
+    """Незнакомая колонка - не ошибка.
 
     Симптом: одна лишняя колонка в шаблоне давала «Cannot read properties of
     undefined» без номера строки и без объяснения.
@@ -191,7 +191,7 @@ def test_lishnyaya_kolonka_ne_lomaet_razbor(workspace):
 
 
 def test_shapka_otcheta_nad_zagolovkami_ne_meshaet(workspace):
-    """Две строки шапки сверху — обычный вид любой выгрузки."""
+    """Две строки шапки сверху - обычный вид любой выгрузки."""
     data = book(
         [row(3, 250000, comment="первая")],
         lead_rows=[["Отчёт по кассе за август 2026"], ["ТОО «Тест»", None, "стр. 1"]],
@@ -202,7 +202,7 @@ def test_shapka_otcheta_nad_zagolovkami_ne_meshaet(workspace):
 
 
 def test_perestavlennye_i_pereimenovannye_kolonki(workspace):
-    """Колонку назвали «Дата», а не «Дата платежа», и подвинули — всё равно наша."""
+    """Колонку назвали «Дата», а не «Дата платежа», и подвинули - всё равно наша."""
     head = ["Комментарий", "Сумма", "На счёт", "Дата", "Категория"]
     rows = [["оплата", 50000, "Касса", date(2026, 8, 3), "Выручка"]]
     preview = analyze(book(rows, head=head), "книга.xlsx", ACCOUNTS)
@@ -211,9 +211,9 @@ def test_perestavlennye_i_pereimenovannye_kolonki(workspace):
 
 
 def test_stroka_itogo_propuskaetsya_a_ne_otvergaet_fayl(workspace):
-    """«Итого» снизу — не операция и не ошибка.
+    """«Итого» снизу - не операция и не ошибка.
 
-    Симптом: файл с итоговой строкой отвергался целиком сообщением «Итого —
+    Симптом: файл с итоговой строкой отвергался целиком сообщением «Итого -
     неверный формат даты».
     """
     rows = [row(3, 250000), row(5, 80000), ["Итого", 330000, None, None, None, None, None]]
@@ -225,7 +225,7 @@ def test_stroka_itogo_propuskaetsya_a_ne_otvergaet_fayl(workspace):
 
 
 def test_dvuhkolonochnaya_vypiska_prihod_rashod(workspace):
-    """«Приход» и «Расход» двумя колонками — самый частый вид банковской выписки."""
+    """«Приход» и «Расход» двумя колонками - самый частый вид банковской выписки."""
     head = ["Дата операции", "Приход", "Расход", "Счёт", "Назначение платежа"]
     rows = [
         [date(2026, 8, 3), 250000, None, "Касса", "поступление"],
@@ -236,7 +236,7 @@ def test_dvuhkolonochnaya_vypiska_prihod_rashod(workspace):
     assert [r.values["kind"] for r in preview.rows[:2]] == ["income", "expense"]
     assert preview.rows[0].values["account_to"] == "Касса"
     assert preview.rows[1].values["account_from"] == "Касса"
-    # Обе колонки заполнены — угадывать нельзя, строка откладывается.
+    # Обе колонки заполнены - угадывать нельзя, строка откладывается.
     assert preview.rows[2].state == "failed"
 
 
@@ -253,7 +253,7 @@ def test_neizvestnyy_schet_otkladyvaet_stroku_no_ne_fayl(workspace):
 def test_pustaya_data_zhaluetsya_na_svoyu_stroku(workspace):
     """Замечание обязано указывать на ту строку и на то поле, где беда.
 
-    Симптом у чужого импортёра: строка без даты давала сообщение «25000 —
+    Симптом у чужого импортёра: строка без даты давала сообщение «25000 -
     неверный формат числа» про СОСЕДНЮЮ строку, где всё было правильно.
     Человек уходил чинить исправное.
     """
@@ -267,7 +267,7 @@ def test_pustaya_data_zhaluetsya_na_svoyu_stroku(workspace):
 
 
 def test_fayl_bez_shapki_otkazyvaetsya_s_obyasneniem(workspace):
-    """Нет ни даты, ни суммы в заголовках — читать нечего, и это честный отказ."""
+    """Нет ни даты, ни суммы в заголовках - читать нечего, и это честный отказ."""
     with pytest.raises(ImportError_) as exc:
         analyze(book([[1, 2, 3]], head=["Раз", "Два", "Три"]), "непонятно.xlsx", ACCOUNTS)
     assert "заголовков" in str(exc.value)
@@ -279,7 +279,7 @@ def test_fayl_bez_shapki_otkazyvaetsya_s_obyasneniem(workspace):
 def test_odna_plohaya_stroka_iz_dvuhsot_ne_otmenyaet_ostalnye(workspace):
     """Главный тест набора.
 
-    Симптом: двести строк, испорчена 137-я — не завелось ни одной. Здесь
+    Симптом: двести строк, испорчена 137-я - не завелось ни одной. Здесь
     заводится 199, а 137-я остаётся в партии с объяснением.
     """
     rows = [row(1 + (i % 28), 1000 + i, comment=f"строка {i + 1}") for i in range(200)]
@@ -337,9 +337,9 @@ def test_otlozhennuyu_stroku_pravyat_bez_perezagruzki_fayla(workspace):
 
 
 def test_import_zavodit_spravochniki_no_ne_scheta(workspace):
-    """Категория и контрагент создаются сами, счёт — никогда.
+    """Категория и контрагент создаются сами, счёт - никогда.
 
-    Счёт — это место, где лежат деньги; появиться из опечатки в выписке он не
+    Счёт - это место, где лежат деньги; появиться из опечатки в выписке он не
     должен. Категория, наоборот, появляется в работе постоянно.
     """
     rows = [[date(2026, 8, 3), 250000, None, "Касса", "Новая статья", "Новый клиент", "оплата"]]
@@ -365,11 +365,11 @@ def test_csv_s_tochkoy_s_zapyatoy_i_cp1251(workspace):
     assert preview.rows[0].values["amount"] == "120500.45"
 
 def test_dva_odinakovyh_platezha_v_odin_den_zavodyatsya_oba(workspace):
-    """Повтор внутри файла — не дубль.
+    """Повтор внутри файла - не дубль.
 
-    Два раза по 77 ₸ в одном магазине за день — обычное дело. Первая версия
+    Два раза по 77 ₸ в одном магазине за день - обычное дело. Первая версия
     считала их одной операцией: в выписке Kaspi Gold за год так молча потерялись
-    219 строк из 2050, а сообщение выглядело буднично — «повторов 219».
+    219 строк из 2050, а сообщение выглядело буднично - «повторов 219».
     """
     rows = [row(3, 77, comment="Magnum"), row(3, 77, comment="Magnum")]
     with finance_session() as session:
@@ -399,12 +399,12 @@ def test_povtornaya_zagruzka_faila_s_odinakovymi_strokami_ne_dvoit(workspace):
 
 
 def test_data_s_dnem_nedeli_chitaetsya_kak_data(workspace):
-    """«пн 01.06.26» — так пишет дату книга, которую ведут руками.
+    """«пн 01.06.26» - так пишет дату книга, которую ведут руками.
 
     Найдено живым переносом «Копии Журнала ГК BBC»: все 1999 строк уходили в
     отложенные с «не понял дату», потому что ячейка начинается не с цифры.
-    Причём порядок частей при этом объявлялся решённым — «даты пришли из Excel
-    датами», — то есть экран уверял, что с датами всё в порядке.
+    Причём порядок частей при этом объявлялся решённым - «даты пришли из Excel
+    датами», - то есть экран уверял, что с датами всё в порядке.
     """
     reading = decide_date_order(["пн 01.06.26", "вт 15.06.26", "ср 16.06.26"])
     assert reading.order == "dmy"
@@ -423,7 +423,7 @@ def test_povtornyy_razbor_ne_ostavlyaet_broshennyh_partiy(workspace):
     """Ответ на вопрос раздела не должен плодить «разобрано, не заведено».
 
     Найдено живым прогоном: на вопрос «на какой счёт?» человек отвечает, раздел
-    разбирает файл заново — и в истории повисали две записи на один файл. Какую
+    разбирает файл заново - и в истории повисали две записи на один файл. Какую
     из них продолжать, узнать было нельзя.
     """
     from app.finance.models import ImportBatch

@@ -1,12 +1,12 @@
 """Способ заполнения поля: закрытый список не заводит новое из опечатки.
 
-На проде 26.09.2026 в статусах висело «им», в видах — «Взыскание», оба ни в
+На проде 26.09.2026 в статусах висело «им», в видах - «Взыскание», оба ни в
 одном договоре: ячейка листа принимала любой текст и молча заводила из него
 значение справочника. Лист показывал людей коротко
 («Наталья П.»), и та же ячейка, скопированная в соседнюю строку, заводила
 нового сотрудника «Наталья П.». Набор держит поведение по «Настройкам
-реестра» BBC: статус, ответственный, отдел и исполнитель — из списка; вид и
-предмет — список или своё.
+реестра» BBC: статус, ответственный, отдел и исполнитель - из списка; вид и
+предмет - список или своё.
 """
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ def finance_db(tmp_path, monkeypatch):
 
 @pytest.fixture
 def space(finance_db):
-    """BBC и Omar Development — наши; три сотрудника и отдел ЮО."""
+    """BBC и Omar Development - наши; три сотрудника и отдел ЮО."""
     with finance_session() as session:
         workspace = finance_service.ensure_workspace(session)
         setup.add_entity(session, workspace, name="BBC", code="BBC")
@@ -99,7 +99,7 @@ def test_odnoznachnoe_nachalo_prinimaetsya_neskolko_kandidatov_net(space):
         _patch(session, space, contract, status="дейст")
         registry = service.Registry(session, _ws(session, space))
         assert registry.values[contract.status_id].value == "Действующий"
-        # «Н» — «На исполнении», «Недействующий», «Не состоялся»: наугад не выбираем.
+        # «Н» - «На исполнении», «Недействующий», «Не состоялся»: наугад не выбираем.
         with pytest.raises(service.NotInList, match="подходит несколько"):
             _patch(session, space, contract, status="н")
 
@@ -112,7 +112,7 @@ def test_novaya_stroka_s_opechatkoy_zavoditsya_a_opechatka_vidna(space):
         assert contract.number == "17-7" and contract.status_id is None
         assert any(issue["code"] == "unread_status" and issue["text"] == "«им» нет в списке «Текущее состояние»" for issue in issues)
         assert "им" not in _values(session, space, "status")
-        # Выбрали из списка — замечание уходит.
+        # Выбрали из списка - замечание уходит.
         _patch(session, space, contract, status="Действующий")
         issues = service.issues_of(contract, registry, service.NumberIndex(), {})
         assert not any(issue["code"] == "unread_status" for issue in issues)
@@ -124,10 +124,10 @@ def test_ispolnitel_tolko_nashe_yurlico_i_otkaz_do_voprosa_o_rezhime(space):
         contract.created_at = datetime.now(timezone.utc) - timedelta(days=3)
         session.flush()
         # Договор не сегодняшний: смена исполнителя спросила бы «опечатка или с
-        # даты». Не наше юрлицо — отказ сразу, без вопроса.
+        # даты». Не наше юрлицо - отказ сразу, без вопроса.
         with pytest.raises(service.NotInList, match="не наше юрлицо"):
             _patch(session, space, contract, executor="ТОО Левый")
-        # Наше юрлицо по началу имени — дальше обычный вопрос о режиме.
+        # Наше юрлицо по началу имени - дальше обычный вопрос о режиме.
         with pytest.raises(service.ModeRequired):
             _patch(session, space, contract, executor="Omar")
     with finance_session() as session:
@@ -139,7 +139,7 @@ def test_ispolnitel_tolko_nashe_yurlico_i_otkaz_do_voprosa_o_rezhime(space):
 
 def test_pokupka_ispolnitel_chuzhoy_esli_zakazchik_nash(space):
     # «Заказчик ГК / КУПЛЯ-ПРОДАЖА» в файле BBC: BBCA покупает у «Халык Актив».
-    # Наша сторона здесь — заказчик; исполнитель чужой законно.
+    # Наша сторона здесь - заказчик; исполнитель чужой законно.
     with finance_session() as session:
         workspace = _ws(session, space)
         purchase = _make(session, space, executor="Халык Актив", customer="BBC")
@@ -150,7 +150,7 @@ def test_pokupka_ispolnitel_chuzhoy_esli_zakazchik_nash(space):
             for issue in service.issues_of(purchase, registry, service.NumberIndex(), {})
         )
         _patch(session, space, purchase, executor="ТОО Другой поставщик")
-        # Сменили заказчика на чужого вместе с исполнителем — нашей стороны нет.
+        # Сменили заказчика на чужого вместе с исполнителем - нашей стороны нет.
         with pytest.raises(service.NotInList, match="не наше юрлицо"):
             _patch(session, space, purchase, executor="ТОО Третий", customer="ТОО Четвёртый")
 
@@ -189,7 +189,7 @@ def test_otvetstvennyy_v_otkrytom_spiske_zavoditsya_no_ne_dubliruetsya(space):
 def test_otdel_iz_spiska(space):
     with finance_session() as session:
         contract = _make(session, space, executor="BBC", customer="ТОО А", department="юо")
-        assert contract.department_id is not None
+        assert len(contract.department_ids) == 1
         with pytest.raises(service.NotInList, match="Отдела «ЮОО» нет в списке"):
             _patch(session, space, contract, department="ЮОО")
 
@@ -202,13 +202,13 @@ def test_vid_spisok_ili_svoe(space):
 
 
 def test_zagruzka_fayla_ne_ogranichena(space):
-    # У файла свой протокол: незнакомый статус — как написан, смысл ему
-    # назначает человек. `_set_field` без `strict` — дорога загрузки.
+    # У файла свой протокол: незнакомый статус - как написан, смысл ему
+    # назначает человек. `_set_field` без `strict` - дорога загрузки.
     with finance_session() as session:
         workspace = _ws(session, space)
         registry = service.Registry(session, workspace)
         scratch = Contract(attrs={}, provenance={}, file_snapshot={})
-        service._set_field(scratch, "status", "нужно закрыть по бух", registry, people_out={})
+        service._set_field(scratch, "status", "нужно закрыть по бух", registry, lists_out={})
         assert "нужно закрыть по бух" in _values(session, space, "status")
 
 
@@ -242,7 +242,7 @@ def test_obyazatelnoe_pole_daet_zamechanie(space):
         codes = {issue["code"]: issue["text"] for issue in service.issues_of(empty, registry, service.NumberIndex(), {}, [])}
         assert codes["required_number"] == "Не заполнено: «№ Договора»"
         assert "required_people" in codes
-        # Исполнитель пустым уже назван своим замечанием — второй раз не говорим.
+        # Исполнитель пустым уже назван своим замечанием - второй раз не говорим.
         setup.update_field(session, workspace, "executor", {"required": True})
         bare = _make(session, space, customer="ТОО Б", number="1")
         codes = {issue["code"] for issue in service.issues_of(bare, registry, service.NumberIndex(), {}, [])}

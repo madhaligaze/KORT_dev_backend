@@ -16,7 +16,7 @@ def _strip_wrapping_quotes(value: str) -> str:
 
 
 class Settings(BaseSettings):
-    """Настройки процесса. Настройки учёта — `app/finance/config.py` (префикс FINANCE_)."""
+    """Настройки процесса. Настройки учёта - `app/finance/config.py` (префикс FINANCE_)."""
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     app_host: str = Field(default="0.0.0.0", validation_alias=AliasChoices("APP_HOST"))
     app_port: int = Field(default=8080, validation_alias=AliasChoices("PORT", "APP_PORT"))
-    # Перезапуск uvicorn по правке файлов. Не задано — по окружению: development
+    # Перезапуск uvicorn по правке файлов. Не задано - по окружению: development
     # ⇒ да. В контейнере его выключают явно: исходников снаружи там нет, а
     # перезапуск стоит двух лишних процессов и постоянной слежки за файлами.
     app_reload: bool | None = Field(default=None, validation_alias=AliasChoices("APP_RELOAD"))
@@ -39,11 +39,20 @@ class Settings(BaseSettings):
         default="http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001",
         validation_alias=AliasChoices("ALLOWED_ORIGINS"),
     )
+    # Общий секрет между прокси Next и этим API. Прокси ставит его заголовком
+    # `x-proxy-auth`, и только при совпадении API верит присланному адресу
+    # (`x-client-ip`). Пусто (локальный запуск, тесты) - адресу верим как
+    # прежде: прямого доступа из интернета там нет. На проде он обязателен -
+    # иначе любой прямой запрос к API подделывал бы адрес в журнале и обходил
+    # ограничитель перебора по адресу (см. client_ip в routes/finance.py).
+    proxy_shared_secret: str = Field(
+        default="", validation_alias=AliasChoices("PROXY_SHARED_SECRET")
+    )
     database_url: str = Field(
         default="postgresql+psycopg://postgres:postgres@localhost:5432/kort",
         validation_alias=AliasChoices("DATABASE_URL"),
     )
-    # Распознавание сканов выписок (app/services/ocr_service.py). Без ключа —
+    # Распознавание сканов выписок (app/services/ocr_service.py). Без ключа -
     # локальный RapidOCR.
     azure_document_intelligence_endpoint: str | None = None
     azure_document_intelligence_key: str | None = None
@@ -55,6 +64,7 @@ class Settings(BaseSettings):
         "log_level",
         "app_host",
         "allowed_origins",
+        "proxy_shared_secret",
         "database_url",
         "azure_document_intelligence_endpoint",
         "azure_document_intelligence_key",

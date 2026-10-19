@@ -1,7 +1,7 @@
 """Листы-отборы: правило блока и принадлежность договора к листам.
 
-Лист ничего не хранит — он показывает договоры, подходящие под правило одного
-из его блоков. Правило — группы условий «и», соединённые «или»:
+Лист ничего не хранит - он показывает договоры, подходящие под правило одного
+из его блоков. Правило - группы условий «и», соединённые «или»:
 
     {"any": [{"all": [{"field": "type", "op": "in", "value": ["<id>", "<id>"]},
                       {"field": "executor_is_own", "op": "is", "value": true}]},
@@ -18,21 +18,21 @@
 
 Почему одной колонки мало: в реестре BBC «Агентский» и «Финансовая помощь»
 лежат в **предмете** при виде «Иное», и отбор «по виду» не поймал бы ни одной
-строки этих листов. Поэтому поле в условии — любое: вид, предмет, стороны,
+строки этих листов. Поэтому поле в условии - любое: вид, предмет, стороны,
 статус, свои поля и виртуальные признаки ниже.
 
 Принадлежность считает только сервер. Клиент предсказывает её на секунду для
-только что сделанной правки, но отдельной реализации правил на клиенте нет —
+только что сделанной правки, но отдельной реализации правил на клиенте нет -
 две реализации однажды разошлись бы, и лист показывал бы не то, что в правиле.
 
 Подсветка строки
 ────────────────
-У блока может быть `paint` — условное форматирование, как в книге юротдела
+У блока может быть `paint` - условное форматирование, как в книге юротдела
 BBC «Разовые» (`=TRIM($E2)="исполнен"` красит строку целиком):
-`[{"when": {"field": "status", "op": "in", "value": ["<id>"]}, "tone": "done"}]`.
-Условие — то же, что в правиле листа, и считает его тоже только сервер: тон
-едет в принадлежности договора (`{"view", "block", "tone"}`), лист лишь
-красит строку.
+`[{"filter": {"any": [{"all": [{"field": "status", "op": "in", "value": ["<id>"]}]}]}, "tone": "done"}]`.
+Условие - такое же правило, как у листа (и правится той же фразой), и
+считает его тоже только сервер: тон едет в принадлежности договора
+(`{"view", "block", "tone"}`), лист лишь красит строку.
 """
 from __future__ import annotations
 
@@ -43,13 +43,13 @@ from app.finance.layout import norm
 
 #: Виртуальные поля: их нет колонкой, они выводятся из сторон и смыслов.
 VIRTUAL_FIELDS = {
-    "executor_is_own": "Исполнитель — наше юрлицо",
-    "customer_is_own": "Заказчик — наше юрлицо",
-    "intra_group": "Обе стороны — наши юрлица",
+    "executor_is_own": "Исполнитель - наше юрлицо",
+    "customer_is_own": "Заказчик - наше юрлицо",
+    "intra_group": "Обе стороны - наши юрлица",
     "phase": "Фаза статуса",
     "economic": "Системный смысл",
 }
-#: `lt`/`lte`/`gt`/`gte` — числа: «Срок, мес < 2», «Остаток (сводка) > 0».
+#: `lt`/`lte`/`gt`/`gte` - числа: «Срок, мес < 2», «Остаток (сводка) > 0».
 NUMBER_OPS = ("lt", "lte", "gt", "gte")
 OPS = ("in", "not_in", "eq", "neq", "empty", "not_empty", "contains", "is", *NUMBER_OPS)
 
@@ -119,7 +119,7 @@ def _check(condition: dict[str, Any], facts: dict[str, Any]) -> bool:
     field, op, value = condition["field"], condition["op"], condition.get("value")
     if op in NUMBER_OPS:
         # Пустое не больше и не меньше ничего: договор без даты не стоит ни в
-        # «до 2 мес», ни в «6+ мес», а без суммы из сводки — не в «Остатках».
+        # «до 2 мес», ни в «6+ мес», а без суммы из сводки - не в «Остатках».
         have_number, want = _number(facts.get(field)), _number(value)
         if have_number is None or want is None:
             return False
@@ -138,7 +138,7 @@ def _check(condition: dict[str, Any], facts: dict[str, Any]) -> bool:
         return bool(facts.get(field)) is bool(value)
     if op == "contains":
         # У полей-ссылок (вид, предмет, стороны, свои списки) в фактах лежит
-        # идентификатор; текст — рядом, в «<поле>__text». Сравнивать с id
+        # идентификатор; текст - рядом, в «<поле>__text». Сравнивать с id
         # значит не отобрать ничего: «предмет содержит „аренд“» молчал.
         needle = norm(value)
         text = facts.get(f"{field}__text")
@@ -166,10 +166,10 @@ def matches(rule: dict[str, Any] | None, facts: dict[str, Any]) -> bool:
 
 
 def place(view: Any, facts: dict[str, Any]) -> int | None:
-    """Блок листа, в котором стоит договор, или `None` — договора в листе нет.
+    """Блок листа, в котором стоит договор, или `None` - договора в листе нет.
 
     Договор встаёт в первый подходящий блок: в двух блоках одного листа одна
-    запись не показывается — в Excel она и стояла бы в одном месте. Главный
+    запись не показывается - в Excel она и стояла бы в одном месте. Главный
     лист держит все договоры: первый блок с подходящим правилом, иначе первый
     блок без правила, иначе первый блок.
     """
@@ -185,13 +185,16 @@ def place(view: Any, facts: dict[str, Any]) -> int | None:
     return 0
 
 
-#: Тоны подсветки строки. Один — «сделано»: строку «исполнен» книга
-#: юротдела красила зелёным. Новый тон — только с решением владельца продукта.
+#: Тоны подсветки строки. Один - «сделано»: строку «исполнен» книга
+#: юротдела красила зелёным. Новый тон - только с решением владельца продукта.
 TONES = ("done",)
 
 
 def validate_paint(paint: Any) -> list[dict[str, Any]]:
-    """Подсветка блока: список `{when: условие, tone}` или отказ словами."""
+    """Подсветка блока: список `{filter: правило, tone}` или отказ словами.
+
+    Подсветка без условий не хранится: она не красила бы ни одной строки.
+    """
     if paint in (None, [], {}):
         return []
     if not isinstance(paint, list):
@@ -203,20 +206,17 @@ def validate_paint(paint: Any) -> list[dict[str, Any]]:
         tone = item.get("tone") or "done"
         if tone not in TONES:
             raise FilterError(f"Такого цвета подсветки нет: «{tone}»")
-        rule = validate({"any": [{"all": [item.get("when")]}]}) if isinstance(item.get("when"), dict) else None
-        if rule is None:
-            raise FilterError("У подсветки нет условия")
-        out.append({"when": rule["any"][0]["all"][0], "tone": tone})
+        rule = validate(item.get("filter"))
+        if is_empty(rule):
+            continue
+        out.append({"filter": rule, "tone": tone})
     return out
 
 
 def tone_of(block: dict[str, Any] | None, facts: dict[str, Any]) -> str:
-    """Тон строки в блоке: первое подходящее условие подсветки, иначе пусто."""
+    """Тон строки в блоке: первое подходящее правило подсветки, иначе пусто."""
     for item in (block or {}).get("paint") or []:
-        when = item.get("when") if isinstance(item, dict) else None
-        if isinstance(when, dict) and when.get("field") and _check(
-            {"field": when["field"], "op": when.get("op", "in"), "value": when.get("value")}, facts
-        ):
+        if isinstance(item, dict) and matches(item.get("filter"), facts):
             return str(item.get("tone") or "done")
     return ""
 
@@ -224,7 +224,7 @@ def tone_of(block: dict[str, Any] | None, facts: dict[str, Any]) -> str:
 def membership(facts: dict[str, Any], views: Iterable[Any]) -> list[dict[str, Any]]:
     """В каких листах и блоках стоит договор: `[{"view": key, "block": i}]`.
 
-    `tone` — подсветка строки в этом блоке (`paint`), только если она есть.
+    `tone` - подсветка строки в этом блоке (`paint`), только если она есть.
     """
     out: list[dict[str, Any]] = []
     for view in views:
@@ -246,7 +246,57 @@ def fields_used(rule: dict[str, Any] | None) -> set[str]:
     }
 
 
+def book_department(views: Iterable[Any], book: str) -> str | None:
+    """Отдел, которым отобраны все листы книги, - его id.
+
+    «Разовые» с условием «отдел - ЮО» в каждой группе каждого блока - это
+    «Разовые ЮО», и сумма договора в них - доля ЮО (30.09.2026). Хоть один
+    блок без такого условия или отделы разные - `None`: книга не про один
+    отдел. То же правило у клиента (`bookDepartment` в `schema.ts`).
+    """
+    if not book:
+        return None
+    found: str | None = None
+    seen = False
+    for view in views:
+        if (getattr(view, "book", "") or "") != book:
+            continue
+        seen = True
+        for block in view.blocks or []:
+            groups = ((block or {}).get("filter") or {}).get("any") or []
+            if not groups:
+                return None
+            for group in groups:
+                hit = next(
+                    (
+                        condition
+                        for condition in group.get("all", [])
+                        if condition.get("field") == "department"
+                        and condition.get("op") == "in"
+                        and isinstance(condition.get("value"), list)
+                        and len(condition["value"]) == 1
+                    ),
+                    None,
+                )
+                department = str(hit["value"][0]) if hit else None
+                if department is None or (found is not None and found != department):
+                    return None
+                found = department
+    return found if seen else None
+
+
+def book_departments(views: Iterable[Any]) -> dict[str, str]:
+    """Книга → её отдел, у книг, отобранных одним отделом (`book_department`)."""
+    listed = list(views)
+    out: dict[str, str] = {}
+    for book in {(getattr(view, "book", "") or "") for view in listed} - {""}:
+        department = book_department(listed, book)
+        if department is not None:
+            out[book] = department
+    return out
+
+
 __all__ = [
-    "FilterError", "NUMBER_OPS", "OPS", "TONES", "VIRTUAL_FIELDS", "fields_used", "is_empty", "matches", "membership",
-    "place", "tone_of", "validate", "validate_paint",
+    "FilterError", "NUMBER_OPS", "OPS", "TONES", "VIRTUAL_FIELDS", "book_department", "book_departments", "fields_used",
+    "is_empty", "matches", "membership", "place", "tone_of", "validate", "validate_paint",
 ]

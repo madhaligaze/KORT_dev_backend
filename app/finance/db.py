@@ -1,4 +1,4 @@
-"""Схема `finance` — управленческий учёт внутри приложения.
+"""Схема `finance` - управленческий учёт внутри приложения.
 
 Отдельная схема по той же причине, что у `bbc`, `webexcel` и `books`: модуль
 должен сниматься одним `DROP SCHEMA finance CASCADE`, не задев ни одну чужую
@@ -6,7 +6,7 @@
 поменяется несколько раз, и выкинуть неудачную версию целиком должно быть
 дешевле, чем разбирать, какие из семнадцати таблиц чьи.
 
-Схемой владеет alembic. `create_all` ниже нужен ровно для одного — собрать
+Схемой владеет alembic. `create_all` ниже нужен ровно для одного - собрать
 таблицы в чистой временной базе теста, где SQLite схем не знает. Списка
 «колонки, которые надо досоздать руками», здесь нет и не будет: колонка,
 добавленная в модель, попадает в ревизию, другого пути нет (урок `bbc/db.py`,
@@ -28,7 +28,7 @@ log = logging.getLogger(__name__)
 
 FINANCE_SCHEMA = "finance"
 
-#: Единая схема имён ограничений и индексов — как в `books`, и по той же
+#: Единая схема имён ограничений и индексов - как в `books`, и по той же
 #: причине: без неё модели и ревизии называют индексы по-разному, и проверка
 #: «схема совпадает с моделями» не может пройти никогда.
 NAMING_CONVENTION = {
@@ -51,7 +51,7 @@ _initialized = False
 
 
 def finance_engine() -> Engine:
-    """Общий движок; на SQLite схема стирается — там её не существует."""
+    """Общий движок; на SQLite схема стирается - там её не существует."""
     engine = get_engine()
     if engine.dialect.name == "sqlite":
         return engine.execution_options(schema_translate_map={FINANCE_SCHEMA: None})
@@ -66,10 +66,11 @@ def init_finance_database() -> None:
 
     # Импорт моделей до `create_all`: таблица попадает в метаданные только
     # когда её модуль прочитан. Учётки лежат отдельным модулем, и забыть его
-    # здесь означало бы «вход не работает, а таблицы users нет» — без ошибки
+    # здесь означало бы «вход не работает, а таблицы users нет» - без ошибки
     # при старте.
     from app.finance import accounts_model as _accounts  # noqa: F401
     from app.finance import models as _models  # noqa: F401
+    from app.finance import support_model as _support  # noqa: F401
     from app.finance.contracts import models as _contracts  # noqa: F401
 
     engine = get_engine()
@@ -87,7 +88,7 @@ def get_finance_session_factory() -> sessionmaker[Session]:
         _session_factory = sessionmaker(
             bind=finance_engine(), autoflush=False, autocommit=False, future=True
         )
-        # Номер изменения у каждой записанной операции — для живого режима
+        # Номер изменения у каждой записанной операции - для живого режима
         # листа «Таблица» (см. `app/finance/live.py`).
         from app.finance import live
 

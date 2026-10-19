@@ -6,7 +6,7 @@
 ──────────────────────────
 Пароль владельца через API не сбрасывает никто: иначе администратор сбросил
 бы владельца, сам задал бы новый пароль в окне ожидания и стал бы
-владельцем. Остаётся тот, у кого есть доступ к серверу и базе, — он и так
+владельцем. Остаётся тот, у кого есть доступ к серверу и базе, - он и так
 может всё.
 
 Без `--password` команда печатает временный пароль: при входе его попросят
@@ -75,7 +75,7 @@ def main(argv: list[str] | None = None) -> int:
     commands = parser.add_subparsers(dest="command", required=True)
     reset = commands.add_parser("reset-password", help="сбросить пароль учётки (в том числе владельца)")
     reset.add_argument("login", help="почта или телефон учётки")
-    reset.add_argument("--password", help="новый пароль; без него — временный, со сменой при входе")
+    reset.add_argument("--password", help="новый пароль; без него - временный, со сменой при входе")
     args = parser.parse_args(argv)
     if args.command == "reset-password":
         new_password = reset_password(args.login, args.password)

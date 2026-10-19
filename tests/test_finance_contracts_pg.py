@@ -3,11 +3,11 @@
 Зачем отдельный набор
 ─────────────────────
 Конфликт правок считается по полю: второй, кто правит то же поле по
-устаревшему номеру, получает 409. На SQLite эта проверка проходит всегда —
+устаревшему номеру, получает 409. На SQLite эта проверка проходит всегда -
 там нет ни настоящей параллельности, ни `SELECT … FOR UPDATE`. Прогон двух
 окон на стенде показал, что без блокировки строки оба запроса читали старый
 номер поля, оба проходили проверку, и правка первого пропадала молча. Ловить
-это можно только на Postgres, поэтому набор пропускается без него — как
+это можно только на Postgres, поэтому набор пропускается без него - как
 `test_migrations.py`.
 
     TEST_DATABASE_URL=postgresql+psycopg://postgres@127.0.0.1:5434/pdf_converter_dev \\
@@ -160,7 +160,7 @@ def _small_registry(rows: int = 30) -> bytes:
                   "Дата заключения Договора", "Вид услуги", "Предмет Договора", "Сумма Договора"])
     for n in range(1, rows + 1):
         # Второе наше ТОО, которого ещё нет в компании: «Завести» заведёт его до
-        # строк — это сдвиг номера схемы, который раньше держался всю загрузку.
+        # строк - это сдвиг номера схемы, который раньше держался всю загрузку.
         executor = "BBC" if n % 2 else "BBCA"
         sheet.append([n, "действующий", executor, f"ТОО Клиент {n}", f"№ П-{n}", datetime(2025, 1, 1 + n % 27),
                       "Абонентское обслуживание", "Бухгалтерское сопровождение", 1000 * n])
@@ -173,7 +173,7 @@ def test_zavedenie_ne_derzhit_schetchik_i_stavit_odin_nomer(pg, monkeypatch):
     """Пока «Завести» собирает договоры, правка в той же компании не ждёт.
 
     Прежде номер изменения брался до заведения строк, и блокировка строки
-    счётчика держалась всю загрузку: на 20 000 строк — две минуты, в которые
+    счётчика держалась всю загрузку: на 20 000 строк - две минуты, в которые
     любая правка в компании висела. Теперь номер берётся последним.
     """
     import sqlalchemy as sa
@@ -225,7 +225,7 @@ def test_zavedenie_ne_derzhit_schetchik_i_stavit_odin_nomer(pg, monkeypatch):
             edited_seq = edited.seq
         waited = time.perf_counter() - began
         # Номер схемы: «Завести» уже завело юрлица и значения списков, но
-        # сдвинет схему только на выходе — коллега, заводящий новое значение
+        # сдвинет схему только на выходе - коллега, заводящий новое значение
         # списка, тоже не ждёт.
         began = time.perf_counter()
         with finance_session() as session:
@@ -244,7 +244,7 @@ def test_zavedenie_ne_derzhit_schetchik_i_stavit_odin_nomer(pg, monkeypatch):
     with finance_session() as session:
         seq = current(session, space_id, "contracts")
         imported = session.scalars(sa.select(Contract).where(Contract.import_id == batch_id)).all()
-        # Номер партии взят после правки — опрос с её номером увидит всю партию.
+        # Номер партии взят после правки - опрос с её номером увидит всю партию.
         assert seq == edited_seq + 1
         assert {item.seq for item in imported} == {seq}
         assert all(set(item.field_seq.values()) == {seq} and "number" in item.field_seq for item in imported)

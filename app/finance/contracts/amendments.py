@@ -1,14 +1,14 @@
 """Соглашения: «Разобрать» текст из файла и подтвердить по куску.
 
-В реестре BBC соглашения — свободный текст двух колонок: «№ 1 от 23.07.2024\\n
+В реестре BBC соглашения - свободный текст двух колонок: «№ 1 от 23.07.2024\\n
 №2 10.12.2025» и «1) внесен изменение в п. 1.2. а\\n2) увелечение цены на
 250 000». В одной ячейке бывает несколько соглашений, включая замену лиц.
 
 Разбор здесь **только предлагает**: режет текст на куски с границами (`start`,
-`end` — по ним карточка подчёркивает кусок в тексте), подсказывает номер, дату
+`end` - по ним карточка подчёркивает кусок в тексте), подсказывает номер, дату
 и что соглашение меняет. В базу пишется лишь подтверждённый человеком кусок,
 и только он влияет на значение договора на прошлый месяц. Сумму из «увеличение
-цены на 250 000» разбор не вычисляет: «на» — это прибавка или новая цена, из
+цены на 250 000» разбор не вычисляет: «на» - это прибавка или новая цена, из
 текста не следует, и цифра, посчитанная наугад, выглядела бы как цифра.
 """
 from __future__ import annotations
@@ -74,7 +74,7 @@ class Piece:
     summary_end: int | None
     effect: str
     effective_from: str | None
-    #: Подсказка значения: «BBC» для замены лиц; для суммы — текст, не число.
+    #: Подсказка значения: «BBC» для замены лиц; для суммы - текст, не число.
     value_hint: str
     #: Какие изменения этого куска уже подтверждены.
     confirmed: list[str] | None = None
@@ -106,7 +106,7 @@ def _summaries_of(text: str) -> list[tuple[int, int, str]]:
 
 
 def _effect_of(head: str, summary: str) -> tuple[str, str]:
-    """Что соглашение меняет — подсказка, а не решение."""
+    """Что соглашение меняет - подсказка, а не решение."""
     whole = f"{head} {summary}"
     if _REPLACE.search(whole):
         found = _TO_PARTY.search(whole)
@@ -133,7 +133,7 @@ def parse(session: Session, workspace: Workspace, contract_id: uuid.UUID) -> lis
     heads = _pieces_of(contract.amendments_text or "")
     summaries = _summaries_of(contract.amendments_summary_text or "")
     # Пункты сопоставляются по порядку, только если их столько же, сколько
-    # номеров. Иначе пара «номер ↔ пункт» — догадка; предмет остаётся общим.
+    # номеров. Иначе пара «номер ↔ пункт» - догадка; предмет остаётся общим.
     paired = len(heads) == len(summaries)
     confirmed: dict[str, list[str]] = {}
     for row in session.scalars(
@@ -188,8 +188,8 @@ def confirm(
     """Подтвердить кусок: он становится соглашением договора.
 
     Если соглашение меняет сторону или сумму и указано новое значение с датой,
-    оно действует так же, как «изменение с даты»: дата прошла — значение
-    договора становится новым, дата впереди — ждёт своего дня.
+    оно действует так же, как «изменение с даты»: дата прошла - значение
+    договора становится новым, дата впереди - ждёт своего дня.
     """
     if not access.edit:
         raise PermissionError("Подтверждать соглашения вам не открыто")
@@ -203,7 +203,7 @@ def confirm(
     if not text:
         raise FinanceError("Пустой кусок текста")
     # Один кусок может нести два изменения («замена лиц на BBC и увеличение
-    # суммы») — подтверждается каждое отдельно, но одно и то же дважды нельзя.
+    # суммы») - подтверждается каждое отдельно, но одно и то же дважды нельзя.
     exists = session.scalar(
         sa.select(ContractAmendment.id).where(
             ContractAmendment.contract_id == contract.id,
@@ -234,7 +234,7 @@ def confirm(
         else:
             resolved = registry.resolve_party(value, slot=effect)
             if resolved.ambiguous or resolved.party is None:
-                raise FinanceError("Сторона не найдена однозначно — выберите в карточке")
+                raise FinanceError("Сторона не найдена однозначно - выберите в карточке")
             after = {effect: str(resolved.party.id)}
     amendment = ContractAmendment(
         workspace_id=workspace.id,
@@ -318,7 +318,7 @@ def listing(session: Session, workspace: Workspace, contract_id: uuid.UUID) -> l
 def remove_amendment(
     session: Session, workspace: Workspace, access: Access, actor: Actor, contract_id: uuid.UUID, amendment_id: uuid.UUID
 ) -> None:
-    """Убрать соглашение. Применённое значение договора не откатывается —
+    """Убрать соглашение. Применённое значение договора не откатывается -
     откат делается правкой «опечатка», и это видно в истории."""
     if not access.edit:
         raise PermissionError("Убирать соглашения вам не открыто")

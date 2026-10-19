@@ -1,11 +1,11 @@
-"""Клиент Google для переноса книг в учёт — только значения, без оформления.
+"""Клиент Google для переноса книг в учёт - только значения, без оформления.
 
 Жил в разделе «Таблицы» (`app.webexcel.google`) и переехал сюда, когда «Таблицы»
 отказались от сервисного аккаунта: раздел открыт без входа, и читать чужие
 книги от имени программы он больше не должен. Здесь остались ровно три вызова,
 которыми пользуются «Финансы»: список книг, вкладки книги и значения вкладки.
 
-Права — только чтение (`spreadsheets.readonly`): учёт книгу не правит, правка
+Права - только чтение (`spreadsheets.readonly`): учёт книгу не правит, правка
 живёт в учёте, а книга остаётся источником.
 """
 from __future__ import annotations
@@ -28,7 +28,7 @@ GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/drive.readonly",
 ]
 
-#: Потолок колонок вкладки. Строки ограничивает `FINANCE_IMPORT_MAX_ROWS` — тот
+#: Потолок колонок вкладки. Строки ограничивает `FINANCE_IMPORT_MAX_ROWS` - тот
 #: же, что у загруженного файла: одна книга не должна читаться по-разному в
 #: зависимости от того, скачали её или открыли.
 MAX_COLS = 60
@@ -45,13 +45,13 @@ def humanize(exc: Exception) -> str:
     text = str(exc)
     if "429" in text or "Quota exceeded" in text or "RATE_LIMIT" in text:
         return (
-            "Google временно ограничил чтение — слишком много обращений подряд. "
+            "Google временно ограничил чтение - слишком много обращений подряд. "
             "Это проходит само за минуту"
         )
     if "403" in text and "PERMISSION" in text.upper():
-        return "У сервисного аккаунта нет доступа к этой книге — её нужно открыть ему"
+        return "У сервисного аккаунта нет доступа к этой книге - её нужно открыть ему"
     if "404" in text:
-        return "Книга не найдена — проверьте ссылку или id"
+        return "Книга не найдена - проверьте ссылку или id"
     return text
 
 
@@ -81,7 +81,7 @@ def _client() -> gspread.Client:
 
 # ── Кэш ─────────────────────────────────────────────────────────────────────
 #
-# Квота Google — 60 чтений в минуту на сервисный аккаунт. Повторное открытие той
+# Квота Google - 60 чтений в минуту на сервисный аккаунт. Повторное открытие той
 # же вкладки в мастере переноса не должно идти в Google заново. Кэш ограничен и
 # по сроку, и по числу записей: просроченное выбрасывается при каждой записи, а
 # не лежит до перезапуска.
@@ -101,7 +101,7 @@ def _remember(cache: dict[Any, tuple[float, Any]], key: Any, value: Any) -> None
     now = time.monotonic()
     for stale in [k for k, (stamp, _) in cache.items() if now - stamp >= _CACHE_TTL_SECONDS]:
         del cache[stale]
-    cache.pop(key, None)  # переложить в конец: порядок словаря — порядок записи
+    cache.pop(key, None)  # переложить в конец: порядок словаря - порядок записи
     cache[key] = (now, value)
     while len(cache) > _MAX_ENTRIES:
         cache.pop(next(iter(cache)))
@@ -126,7 +126,7 @@ def list_spreadsheets() -> list[dict[str, Any]]:
         raw = _client().list_spreadsheet_files()
     except GoogleError:
         raise
-    except Exception as exc:  # noqa: BLE001 — gspread бросает много типов
+    except Exception as exc:  # noqa: BLE001 - gspread бросает много типов
         raise GoogleError(humanize(exc)) from exc
 
     files = [
@@ -155,7 +155,7 @@ def _open(spreadsheet_id: str) -> gspread.Spreadsheet:
 
 
 def spreadsheet_meta(spreadsheet_id: str) -> dict[str, Any]:
-    """Название книги и её вкладки — без грида, один дешёвый запрос."""
+    """Название книги и её вкладки - без грида, один дешёвый запрос."""
     with _lock:
         hit = _meta_cache.get(spreadsheet_id)
         if hit and _fresh(hit[0]):
@@ -209,14 +209,14 @@ def _quote_tab(title: str) -> str:
 
 
 def fetch_tab_values(spreadsheet_id: str, tab_title: str, *, fresh: bool = False) -> list[list[str]]:
-    """Значения вкладки строками — как их видит человек.
+    """Значения вкладки строками - как их видит человек.
 
     Запрашиваются **форматированные** значения: «18.09.2026» и «95 323,00», а не
-    46 271 и 95323. Разбор в «Финансах» читает человеческий текст — он для того и
+    46 271 и 95323. Разбор в «Финансах» читает человеческий текст - он для того и
     написан, чтобы понимать выписки. Сырые значения пришлось бы переводить
     обратно через эпоху дат, и на этом переводе теряется день.
 
-    `fresh` — мимо кэша: у сводки оплат свой срок (`contracts/summary.py`), и
+    `fresh` - мимо кэша: у сводки оплат свой срок (`contracts/summary.py`), и
     десятиминутный кэш мастера переноса держал бы её оплаты дольше него.
     """
     key = (spreadsheet_id, tab_title)

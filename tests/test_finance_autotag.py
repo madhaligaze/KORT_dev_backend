@@ -1,4 +1,4 @@
-"""Авторазметка: что по тексту ясно наверняка — размечается, остальное нет.
+"""Авторазметка: что по тексту ясно наверняка - размечается, остальное нет.
 
 Ловушки взяты из прогона таксономии «Анализа выписок» по настоящей выписке
 Kaspi Gold 21 сентября 2026: там подстроки давали уверенные и неверные статьи.
@@ -65,8 +65,8 @@ def test_statya_po_tekstu(comment, kind, expected):
     ("comment", "kind"),
     [
         ("Оплата за продукцию по счёту 15", "expense"),  # не «Продукты»
-        ("Возврат налога", "income"),  # налог на поступлении — не угадываем
-        ("Kaspi Business · оплата", "expense"),  # «bus» — не автобус
+        ("Возврат налога", "income"),  # налог на поступлении - не угадываем
+        ("Kaspi Business · оплата", "expense"),  # «bus» - не автобус
         ("Перевод между своими счетами", "transfer"),
     ],
 )
@@ -109,7 +109,7 @@ def test_razmetka_i_otmena_celikom(finance_db):
 
         done = autotag.apply(session, space, [("expense", "Такси и каршеринг")])
         assert done["updated"] == 2
-        # новая статья расходов — операционная, это обычная трата
+        # новая статья расходов - операционная, это обычная трата
         taxi_category = session.get(type(rent), session.get(type(taxi), taxi.id).category_id)
         assert taxi_category.nature == "operating"
         assert session.get(type(vague), vague.id).category_id is None
@@ -118,7 +118,7 @@ def test_razmetka_i_otmena_celikom(finance_db):
         entry = history.write(
             session, space, kind="autotag.apply", entity="operations", after={"items": done["items"]}
         )
-        # человек поправил одну строку после разметки — отмена её не трогает
+        # человек поправил одну строку после разметки - отмена её не трогает
         service.update_operation(session, space, taxi.id, {"category_id": rent.id})
         undone = history.undo(session, space, entry.id)
         assert undone["cleared"] == 1
@@ -129,7 +129,7 @@ def test_razmetka_i_otmena_celikom(finance_db):
 
 
 def test_postupleniya_razmetki_ne_vyruchka(finance_db):
-    """Внесение наличных и переводы от людей — не выручка в «Показателях»."""
+    """Внесение наличных и переводы от людей - не выручка в «Показателях»."""
     from app.finance import reports
 
     with finance_session() as session:

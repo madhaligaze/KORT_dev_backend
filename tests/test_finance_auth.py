@@ -1,6 +1,6 @@
 """Учётки «Финансов»: регистрация компании, вход, роли, границы компаний.
 
-Главная проверка набора — предпоследняя: **данные одной компании не видны
+Главная проверка набора - предпоследняя: **данные одной компании не видны
 другой**. Всё остальное (пароли, роли, переключатель) существует ради неё.
 """
 from __future__ import annotations
@@ -8,7 +8,10 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
+import uuid
+
 import pytest
+import sqlalchemy as sa
 
 from app.finance import auth, service
 from app.finance.auth import AuthError
@@ -136,7 +139,7 @@ def test_dve_kompanii_odnogo_cheloveka_ne_smeshivayutsya(finance_db) -> None:
         created = auth.add_company(session, member, title="Вторая")
         second_id = created["id"]
 
-    # В первой компании — поступление, во второй ничего.
+    # В первой компании - поступление, во второй ничего.
     with finance_session() as session:
         workspace = service.get_workspace(session, first_id)
         cash = next(a for a in service.list_accounts(session, first_id) if a.name == "Касса")
@@ -201,3 +204,75 @@ def test_smena_parolya_trebuet_starogo(finance_db) -> None:
         auth.set_password(session, member, old="pass-12345", new="new-password-1")
     with finance_session() as session:
         assert auth.login(session, email="owner@example.com", password="new-password-1")
+
+
+def test_svoya_pochta_menyaetsya_s_parolem_i_vkhod_po_novoy(finance_db) -> None:
+    """29.09.2026: «одну почту поставили, и её никак не изменить». Почта - логин:
+    меняется только с паролем, занятая - отказ, после смены вход по новой, по
+    старой - нет; запись сотрудника, названная почтой, получает новую."""
+    from app.finance import people
+    from app.finance.accounts_model import FinanceUser
+    from app.finance.contracts.models import Employee
+
+    register(email="old@bbc.kz")
+    register(email="taken@bbc.kz", company="Другая")
+    with finance_session() as session:
+        member, _token = auth.login(session, email="old@bbc.kz", password="pass-12345")
+        people.ensure_employee(session, member.workspace_id, session.get(FinanceUser, member.user_id))
+        with pytest.raises(AuthError, match="Пароль"):
+            auth.set_email(session, member, email="new@bbc.kz", password="не тот")
+        with pytest.raises(AuthError, match="занята"):
+            auth.set_email(session, member, email=" TAKEN@bbc.kz ", password="pass-12345")
+        with pytest.raises(AuthError):
+            auth.set_email(session, member, email="не почта", password="pass-12345")
+        auth.set_email(session, member, email="New@bbc.kz", password="pass-12345")
+        names = [row.full_name for row in session.scalars(sa.select(Employee).where(Employee.user_id == member.user_id))]
+        assert names == ["New@bbc.kz"], names
+    with finance_session() as session:
+        with pytest.raises(AuthError):
+            auth.login(session, email="old@bbc.kz", password="pass-12345")
+        again, _token = auth.login(session, email="new@bbc.kz", password="pass-12345")
+        assert again.role == "owner"
+
+
+def test_peredacha_vladeniya_tolko_vladelcem_s_parolem_i_deystvuyushchemu(finance_db) -> None:
+    """29.09.2026: «владельцем может стать другой, а я - администратором».
+    Исключительное право: только владелец, только с паролем, только тому,
+    кто уже входит сам; прежний владелец остаётся администратором."""
+    from app.finance.accounts_model import FinanceMembership, FinanceUser
+
+    _owner, workspace_id, _token = register(email="boss@bbc.kz")
+    with finance_session() as session:
+        boss, _t = auth.login(session, email="boss@bbc.kz", password="pass-12345")
+        heir = auth.invite(session, boss, email="heir@bbc.kz", password="heir-pass-1", role="admin", full_name="Наследник Дел")
+        target = uuid.UUID(str(heir["id"]))
+    with finance_session() as session:
+        heir_member, _t = auth.login(session, email="heir@bbc.kz", password="heir-pass-1")
+        with pytest.raises(AuthError, match="только владелец"):
+            auth.transfer_ownership(session, heir_member, user_id=boss.user_id, password="heir-pass-1")
+        with pytest.raises(AuthError, match="Пароль"):
+            auth.transfer_ownership(session, boss, user_id=target, password="не тот")
+    with finance_session() as session:
+        pending = session.get(FinanceUser, target)
+        pending.status = "pending"
+    with finance_session() as session:
+        with pytest.raises(AuthError, match="входит сам"):
+            auth.transfer_ownership(session, boss, user_id=target, password="pass-12345")
+    with finance_session() as session:
+        session.get(FinanceUser, target).status = "active"
+    with finance_session() as session:
+        auth.transfer_ownership(session, boss, user_id=target, password="pass-12345")
+        roles = {
+            row.user_id: row.role
+            for row in session.scalars(sa.select(FinanceMembership).where(FinanceMembership.workspace_id == workspace_id))
+        }
+    assert roles[target] == "owner" and roles[boss.user_id] == "admin", roles
+    # Вернуть может только новый владелец.
+    with finance_session() as session:
+        again, _t = auth.login(session, email="heir@bbc.kz", password="heir-pass-1")
+        auth.transfer_ownership(session, again, user_id=boss.user_id, password="heir-pass-1", keep="admin")
+        back = {
+            row.user_id: row.role
+            for row in session.scalars(sa.select(FinanceMembership).where(FinanceMembership.workspace_id == workspace_id))
+        }
+    assert back[boss.user_id] == "owner" and back[target] == "admin", back

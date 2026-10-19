@@ -4,7 +4,7 @@ from app.core.config import settings
 
 
 def reload_enabled() -> bool:
-    """`APP_RELOAD`, если задан; иначе — перезапуск только в development."""
+    """`APP_RELOAD`, если задан; иначе - перезапуск только в development."""
     if settings.app_reload is not None:
         return settings.app_reload
     return settings.environment == "development"

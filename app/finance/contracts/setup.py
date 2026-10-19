@@ -1,7 +1,7 @@
 """Настройка реестра: наши юрлица, поля, списки со смыслом, листы с блоками.
 
 Каждое изменение здесь двигает счётчик `schema`: клиент видит новый
-`schema_rev` в очередном опросе и перечитывает схему — лист перестраивается,
+`schema_rev` в очередном опросе и перечитывает схему - лист перестраивается,
 если поменялись колонки или отборы.
 """
 from __future__ import annotations
@@ -49,7 +49,7 @@ from app.finance.contracts.service import Access, Registry, today
 from app.finance.models import POSITION_STEP, Account, Counterparty, Workspace
 from app.finance.service import FinanceError
 
-#: Типы, которые можно дать своему полю. `choice` и `party` — системные.
+#: Типы, которые можно дать своему полю. `choice` и `party` - системные.
 CUSTOM_TYPES = ("text", "number", "money", "date", "bool", "list", "multi_list", "url", "person", "department")
 
 
@@ -67,7 +67,7 @@ def schema(session: Session, workspace: Workspace, access: Access) -> dict[str, 
     for item in registry.fields:
         if item.key in access.hidden:
             continue
-        # «Как было в файле» и «по выписке» — только чтение у всех.
+        # «Как было в файле» и «по выписке» - только чтение у всех.
         readonly = item.system and item.key in FIELD_BY_KEY and FIELD_BY_KEY[item.key].readonly
         fields.append(
             FieldView(
@@ -87,7 +87,7 @@ def schema(session: Session, workspace: Workspace, access: Access) -> dict[str, 
     # нужно: иначе карточка показала бы вместо «Аренда» голый идентификатор.
     archived_values: dict[str, list[dict[str, Any]]] = {}
     # Двойники в списке («Абонентское обслуживаниее» рядом с
-    # «Абонентское обслуживание») — подсказка «похоже на …» во вкладке
+    # «Абонентское обслуживание») - подсказка «похоже на …» во вкладке
     # «Списки»; сводит человек.
     by_field: dict[str, list[ListValue]] = {}
     for value in registry.values.values():
@@ -138,7 +138,7 @@ def schema(session: Session, workspace: Workspace, access: Access) -> dict[str, 
         "views": [view_out(view) for view in registry.views],
         "books": list(BOOKS),
         # Откуда «Оплачено (сводка)»: книга, лист, когда прочитана. Без
-        # похода в Google — схему перечитывают на каждую настройку.
+        # похода в Google - схему перечитывают на каждую настройку.
         "summary": summary_module.status(session, workspace.id),
         "own_entities": own,
         "mode_fields": list(MODE_FIELDS),
@@ -147,7 +147,15 @@ def schema(session: Session, workspace: Workspace, access: Access) -> dict[str, 
         "economic_roles": list(ECONOMIC_ROLES),
         "status_phases": list(STATUS_PHASES),
         "today": today().isoformat(),
-        "access": {"edit": access.edit, "setup": access.setup},
+        # `payments` - открыты ли «Оплачено/Остаток по выписке» (нужен журнал):
+        # без флага лист спрашивал их у каждого юриста и получал 403 в консоль.
+        # `admin` - владелец или администратор: убрать отдел из договора может только он.
+        "access": {
+            "edit": access.edit,
+            "setup": access.setup,
+            "admin": access.admin,
+            "payments": access.view and "paid" not in access.hidden,
+        },
     }
 
 
@@ -179,7 +187,7 @@ def add_entity(
 ) -> GroupEntity:
     """Отметить контрагента нашим юрлицом (или завести его).
 
-    Если контрагент с таким именем уже есть — он и становится нашим: иначе
+    Если контрагент с таким именем уже есть - он и становится нашим: иначе
     договоры, уже записанные на него, остались бы на двойнике.
     """
     ensure_registry(session, workspace)
@@ -189,13 +197,13 @@ def add_entity(
         raise FinanceError("У юрлица должно быть имя")
     resolved = registry.resolve_party(clean, slot="executor")
     if resolved.ambiguous:
-        raise FinanceError(f"Под «{clean}» подходит несколько контрагентов — уточните имя")
+        raise FinanceError(f"Под «{clean}» подходит несколько контрагентов - уточните имя")
     party = resolved.party
     assert party is not None
     existing = session.get(GroupEntity, party.id)
     if existing is not None:
         if existing.archived_at is not None:
-            # Юрлицо из архива заводят снова — возвращаем его, а не двойника.
+            # Юрлицо из архива заводят снова - возвращаем его, а не двойника.
             existing.archived_at = None
             session.flush()
             _schema_changed(session, workspace)
@@ -231,7 +239,7 @@ def update_entity(session: Session, workspace: Workspace, party_id: uuid.UUID, d
     if "archived" in data:
         from datetime import datetime, timezone
 
-        # Юрлицо с договорами тоже удаляется — в корзину (27.09.2026: ошибочно
+        # Юрлицо с договорами тоже удаляется - в корзину (27.09.2026: ошибочно
         # заведённое «ИП WE make» с одним договором не удалялось никак). Что
         # его договоры перестанут считаться «нашими» (уйдут из «Исполнитель
         # ГК», получат «ни одна сторона не наша»), говорит вопрос «Удалить?»
@@ -276,8 +284,8 @@ def merge_parties(
 ) -> None:
     """Свести двух контрагентов в одного: договоры и написания переезжают.
 
-    Операции журнала тоже переезжают — иначе один клиент остался бы в отчёте
-    двумя строками. Сводит только человек: похожесть — повод спросить, а не
+    Операции журнала тоже переезжают - иначе один клиент остался бы в отчёте
+    двумя строками. Сводит только человек: похожесть - повод спросить, а не
     решить.
     """
     from app.finance.contracts.models import Contract
@@ -394,7 +402,7 @@ def update_field(session: Session, workspace: Workspace, key: str, data: dict[st
         item.hidden = bool(data["hidden"])
     if "required" in data and bool(data["required"]) != bool(item.required):
         item.required = bool(data["required"])
-        # «Не заполнено» — замечание договора, а договоры клиент берёт опросом по
+        # «Не заполнено» - замечание договора, а договоры клиент берёт опросом по
         # номеру изменения: без сдвига номера новое правило проявилось бы у
         # каждого договора только после его следующей правки.
         _touch_all_contracts(session, workspace)
@@ -411,7 +419,7 @@ def update_field(session: Session, workspace: Workspace, key: str, data: dict[st
         wanted = str(data["fill"] or "")
         options = FILL_OPTIONS.get(item.type, ())
         if not options:
-            raise FinanceError(f"«{item.title}» заполняется как есть — выбора из списка у этого типа нет")
+            raise FinanceError(f"«{item.title}» заполняется как есть - выбора из списка у этого типа нет")
         if wanted not in options:
             raise FinanceError("Такого способа заполнения у этого поля нет")
         item.fill = wanted
@@ -431,6 +439,142 @@ def update_field(session: Session, workspace: Workspace, key: str, data: dict[st
     return item
 
 
+#: Тип поля словами - для журнала («тип: текст → список»). Те же слова, что
+#: у настройки на фронте (`setup/words.ts`).
+TYPE_WORDS = {
+    "text": "текст", "number": "число", "money": "деньги", "date": "дата", "bool": "да или нет",
+    "list": "список", "multi_list": "несколько из списка", "url": "ссылка", "person": "сотрудник",
+    "party": "сторона", "department": "отдел", "choice": "выбор",
+}
+_FIELD_STATE = ("title", "hidden", "required", "type", "fill", "position", "archived")
+
+
+def field_state(session: Session, workspace: Workspace, key: str) -> dict[str, Any]:
+    """Что у поля можно поменять - для журнала «было → стало». Нет поля - пусто."""
+    item = session.scalar(
+        sa.select(EntityField).where(
+            EntityField.workspace_id == workspace.id, EntityField.entity == ENTITY, EntityField.key == key
+        )
+    )
+    if item is None:
+        return {}
+    return {
+        "key": item.key,
+        "title": item.title,
+        "hidden": bool(item.hidden),
+        "required": bool(item.required),
+        "type": item.type,
+        "fill": item.fill or "",
+        "position": item.position,
+        "archived": item.archived_at is not None,
+    }
+
+
+def field_change(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    """Запись журнала о правке поля: что сделано словами, что было и что стало.
+
+    В `before`/`after` - только поменявшееся и ключ поля: по ним журнал
+    отвечает «кто спрятал поле и каким оно было», а не одно «поле изменено».
+    """
+    changed = [name for name in _FIELD_STATE if before.get(name) != after.get(name)]
+    title = before.get("title") or after.get("title") or ""
+    words: list[str] = []
+    for name in changed:
+        if name == "hidden":
+            words.append("спрятано" if after["hidden"] else "снова в листе и карточке")
+        elif name == "required":
+            words.append("обязательное" if after["required"] else "необязательное")
+        elif name == "title":
+            words.append(f"переименовано в «{after['title']}»")
+        elif name == "type":
+            words.append(f"тип: {TYPE_WORDS.get(before['type'], before['type'])} → {TYPE_WORDS.get(after['type'], after['type'])}")
+        elif name == "fill":
+            words.append("заполнение: " + ("только из списка" if after["fill"] in ("list", "own") else "список или своё"))
+        elif name == "position":
+            words.append("передвинуто")
+        elif name == "archived":
+            words.append("удалено в корзину" if after["archived"] else "возвращено из корзины")
+    key = after.get("key") or before.get("key")
+    keyed = {"key": key} if key else {}
+    return {
+        "title": f"поле «{title}» - {', '.join(words)}" if words else f"поле «{title}» сохранено без изменений",
+        "before": {**keyed, **{name: before.get(name) for name in changed}},
+        "after": {**keyed, **{name: after.get(name) for name in changed}},
+    }
+
+
+def value_state(session: Session, workspace: Workspace, value_id: uuid.UUID) -> dict[str, Any]:
+    """Значение списка для журнала «было → стало». Нет значения - пусто."""
+    item = session.get(ListValue, value_id)
+    if item is None or item.workspace_id != workspace.id:
+        return {}
+    return {
+        "id": str(item.id),
+        "field": item.field_key,
+        "value": item.value,
+        "meaning": dict(item.meaning or {}),
+        "archived": item.archived_at is not None,
+    }
+
+
+def value_change(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    changed = [name for name in ("value", "meaning", "archived") if before.get(name) != after.get(name)]
+    words: list[str] = []
+    for name in changed:
+        if name == "value":
+            words.append(f"переименовано в «{after['value']}»")
+        elif name == "meaning":
+            words.append("смысл изменён")
+        elif name == "archived":
+            words.append("удалено в корзину" if after["archived"] else "возвращено из корзины")
+    title = before.get("value") or after.get("value") or ""
+    ids = {"id": after.get("id") or before.get("id"), "field": after.get("field") or before.get("field")}
+    return {
+        "title": f"значение «{title}» - {', '.join(words)}" if words else f"значение «{title}» сохранено без изменений",
+        "before": {**ids, **{name: before.get(name) for name in changed}},
+        "after": {**ids, **{name: after.get(name) for name in changed}},
+    }
+
+
+def view_state(session: Session, workspace: Workspace, view_id: uuid.UUID) -> dict[str, Any]:
+    """Лист для журнала: целиком, чтобы по записи его можно было вернуть."""
+    view = session.get(EntityView, view_id)
+    if view is None or view.workspace_id != workspace.id:
+        return {}
+    return {
+        "id": str(view.id),
+        "key": view.key,
+        "title": view.title,
+        "blocks": view.blocks or [],
+        "style": view.style or {},
+        "position": view.position,
+        "archived": view.archived_at is not None,
+    }
+
+
+def view_change(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    changed = [name for name in ("title", "blocks", "style", "position", "archived") if before.get(name) != after.get(name)]
+    words: list[str] = []
+    for name in changed:
+        if name == "title":
+            words.append(f"переименован в «{after['title']}»")
+        elif name == "blocks":
+            words.append("блоки изменены")
+        elif name == "style":
+            words.append("подсветка изменена")
+        elif name == "position":
+            words.append("передвинут")
+        elif name == "archived":
+            words.append("удалён в корзину" if after["archived"] else "возвращён из корзины")
+    title = before.get("title") or after.get("title") or ""
+    ids = {"id": after.get("id") or before.get("id"), "key": after.get("key") or before.get("key")}
+    return {
+        "title": f"лист «{title}» - {', '.join(words)}" if words else f"лист «{title}» сохранён без изменений",
+        "before": {**ids, **{name: before.get(name) for name in changed}},
+        "after": {**ids, **{name: after.get(name) for name in changed}},
+    }
+
+
 # ── Значения списков ─────────────────────────────────────────────────────────
 
 
@@ -446,10 +590,10 @@ def _check_meaning(field_key: str, meaning: dict[str, Any]) -> dict[str, Any]:
         if key in ("economic_role", "system") and value not in ECONOMIC_ROLES:
             raise FinanceError("Такого хозяйственного смысла нет")
         if key == "handover" and value not in ("accounting",):
-            raise FinanceError("Передача — только бухгалтеру")
+            raise FinanceError("Передача - только бухгалтеру")
         if key == "distinct":
             if not isinstance(value, list):
-                raise FinanceError("«Это разные» — список значений")
+                raise FinanceError("«Это разные» - список значений")
             clean[key] = [str(item) for item in value]
             continue
         if key == "roles":
@@ -493,14 +637,14 @@ def update_value(session: Session, workspace: Workspace, value_id: uuid.UUID, da
             )
         )
         if clash is not None:
-            raise FinanceError(f"«{clean}» в этом списке уже есть — сведите значения")
+            raise FinanceError(f"«{clean}» в этом списке уже есть - сведите значения")
         item.value, item.normalized = clean, norm(clean)
     base = _base_economic(session, workspace, item)
     if "meaning" in data:
         meaning = _check_meaning(item.field_key, data["meaning"] or {})
         if base and meaning.get("system") != (item.meaning or {}).get("system"):
-            raise FinanceError(f"«{item.value}» — системный смысл: по нему считаются выручка и порог НДС")
-        # «Это разные» — не смысл значения, а решение о паре: правка фазы или
+            raise FinanceError(f"«{item.value}» - системный смысл: по нему считаются выручка и порог НДС")
+        # «Это разные» - не смысл значения, а решение о паре: правка фазы или
         # начисления его не стирает.
         kept = (item.meaning or {}).get("distinct")
         if kept and "distinct" not in meaning:
@@ -519,11 +663,11 @@ def update_value(session: Session, workspace: Workspace, value_id: uuid.UUID, da
 
         if data["archived"]:
             if base:
-                raise FinanceError(f"«{item.value}» — системный смысл: по нему считаются выручка и порог НДС")
+                raise FinanceError(f"«{item.value}» - системный смысл: по нему считаются выручка и порог НДС")
             used = _contracts_with_value(session, workspace.id, item)
             if used:
                 raise FinanceError(
-                    f"«{item.value}» стоит в {used} {_contracts_word(used, case='loc')} — сведите его с другим значением"
+                    f"«{item.value}» стоит в {used} {_contracts_word(used, case='loc')} - сведите его с другим значением"
                 )
         item.archived_at = datetime.now(timezone.utc) if data["archived"] else None
     session.flush()
@@ -563,7 +707,7 @@ def _contracts_with_party(session: Session, workspace_id: uuid.UUID, party_id: u
 def _contracts_with_value(session: Session, workspace_id: uuid.UUID, value: ListValue) -> int:
     """Сколько живых договоров стоит на значении системного списка.
 
-    Свои списочные поля лежат в `attrs` — их значения в архив уходят
+    Свои списочные поля лежат в `attrs` - их значения в архив уходят
     свободно: подпись остаётся в `archived_values` схемы.
     """
     from app.finance.contracts.models import Contract
@@ -591,7 +735,7 @@ def _base_economic(session: Session, workspace: Workspace, value: ListValue) -> 
 
     По ним подстановки ставят смысл и будет считаться порог НДС: «Выручка»
     в архиве или со сменённым смыслом молча вывела бы продажи из порога.
-    Своё значение поверх системного («Агентский внутри ГК») — не базовое.
+    Своё значение поверх системного («Агентский внутри ГК») - не базовое.
     """
     if value.field_key != "economic_role":
         return False
@@ -635,7 +779,7 @@ def merge_values(session: Session, workspace: Workspace, *, keep: uuid.UUID, dro
     if kept is None or dropped is None or kept.field_key != dropped.field_key or kept.workspace_id != workspace.id:
         raise FinanceError("Сводить можно значения одного списка")
     if _base_economic(session, workspace, dropped):
-        raise FinanceError(f"«{dropped.value}» — системный смысл: сведите другое значение в него, а не его в другое")
+        raise FinanceError(f"«{dropped.value}» - системный смысл: сведите другое значение в него, а не его в другое")
     column = COLUMN_OF.get(kept.field_key)
     seq = bump(session, workspace.id, "contracts")
     if column:
@@ -700,8 +844,9 @@ def _clean_blocks(blocks: Any, registry: Registry) -> list[dict[str, Any]]:
         }
         paint = views_module.validate_paint(block.get("paint"))
         for item in paint:
-            if item["when"]["field"] not in keys:
-                raise FinanceError(f"В подсветке поле «{item['when']['field']}», которого нет в реестре")
+            for used in views_module.fields_used(item["filter"]):
+                if used not in keys:
+                    raise FinanceError(f"В подсветке поле «{used}», которого нет в реестре")
         clean = {
             "title": str(block.get("title") or ""),
             "filter": rule,
@@ -721,9 +866,9 @@ def _clean_blocks(blocks: Any, registry: Registry) -> list[dict[str, Any]]:
 def _clean_choices(raw: Any, registry: Registry) -> dict[str, list[str]]:
     """Что предлагает выбор поля в этом блоке: `{поле: [значения]}`.
 
-    В «Разовых» статус — только «на исполнении» и «исполнен», как в книге
+    В «Разовых» статус - только «на исполнении» и «исполнен», как в книге
     юротдела; в реестре у того же поля шесть значений. Значение договора это
-    не ограничивает — только то, что предлагают лист и карточка из этого блока.
+    не ограничивает - только то, что предлагают лист и карточка из этого блока.
     """
     if not raw:
         return {}
@@ -733,7 +878,7 @@ def _clean_choices(raw: Any, registry: Registry) -> dict[str, list[str]]:
     for key, ids in raw.items():
         field_def = registry.field_by_key.get(str(key))
         if field_def is None or field_def.type not in ("list", "multi_list"):
-            raise FinanceError(f"Ограничить выбор можно только у списка, а «{key}» — не список")
+            raise FinanceError(f"Ограничить выбор можно только у списка, а «{key}» - не список")
         if not isinstance(ids, list):
             raise FinanceError("Выбор значений блока записан неверно")
         clean: list[str] = []
@@ -802,7 +947,7 @@ def upsert_view(
 
 
 def preview_filter(session: Session, workspace: Workspace, access: Access, rule: Any) -> dict[str, Any]:
-    """Сколько договоров подходит под правило — для живого счётчика."""
+    """Сколько договоров подходит под правило - для живого счётчика."""
     from app.finance.contracts.models import Contract
     from app.finance.contracts.service import facts_of, people_of, visible_to
 
@@ -814,7 +959,7 @@ def preview_filter(session: Session, workspace: Workspace, access: Access, rule:
         )
     )
     people = people_of(session, [item.id for item in contracts])
-    # Счётчик правила пересчитывается на каждую правку условия — стороны
+    # Счётчик правила пересчитывается на каждую правку условия - стороны
     # одним запросом, а не по одному на договор внутри facts_of.
     registry.parties_for({pid for item in contracts for pid in (item.executor_id, item.customer_id)})
     count, sample = 0, []
@@ -826,7 +971,7 @@ def preview_filter(session: Session, workspace: Workspace, access: Access, rule:
             count += 1
             if len(sample) < 5:
                 party = registry.parties.get(item.customer_id) if item.customer_id else None
-                sample.append(f"{item.number or '—'} · {party.name if party else '—'}")
+                sample.append(f"{item.number or '-'} · {party.name if party else '-'}")
     return {"count": count, "sample": sample}
 
 

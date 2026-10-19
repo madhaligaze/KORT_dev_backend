@@ -1,9 +1,9 @@
 """Счета-фактуры, повторения, история с отменой, дробление, баланс, показатели.
 
 Набор проверяет не «функции работают», а то, ради чего они появились: долг
-должен возникать в момент выставления счёта, повторение — не удваиваться при
-повторном продлении, отмена — возвращать состояние, дробление — не терять и не
-удваивать платёж, показатели — не показывать красивый ноль там, где данных нет.
+должен возникать в момент выставления счёта, повторение - не удваиваться при
+повторном продлении, отмена - возвращать состояние, дробление - не терять и не
+удваивать платёж, показатели - не показывать красивый ноль там, где данных нет.
 """
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from app.finance.models import Category, Operation
 
 @pytest.fixture
 def finance_db(tmp_path, monkeypatch):
-    """Своя база на прогон — см. пояснение в test_finance_import.py."""
+    """Своя база на прогон - см. пояснение в test_finance_import.py."""
     from sqlalchemy import create_engine
 
     from app.finance import db as finance_db_module
@@ -75,12 +75,12 @@ def test_schet_srazu_stanovitsya_dolgom(space):
 
         operation = session.get(Operation, invoice.operation_id)
         assert operation.status == "plan", "счёт должен создавать ожидание, а не факт"
-        assert operation.paid_at == date(2026, 3, 15), "дата платежа ожидания — это срок счёта"
-        assert operation.accrued_at == date(2026, 3, 1), "дата сделки — дата счёта"
+        assert operation.paid_at == date(2026, 3, 15), "дата платежа ожидания - это срок счёта"
+        assert operation.accrued_at == date(2026, 3, 1), "дата сделки - дата счёта"
 
         debt = reports.debts(session, workspace.id, as_of=date(2026, 3, 20))
         assert debt["receivable"]["total"] == "336000.00"
-        assert Decimal(debt["receivable"]["overdue"]) > 0, "срок прошёл — значит просрочено"
+        assert Decimal(debt["receivable"]["overdue"]) > 0, "срок прошёл - значит просрочено"
 
 
 def test_summa_schyota_schitaetsya_po_pozitsiyam(space):
@@ -94,7 +94,7 @@ def test_summa_schyota_schitaetsya_po_pozitsiyam(space):
 
 
 def test_otmena_schyota_snimaet_i_dolg(space):
-    """Счёт, отменённый в одном месте и висящий долгом в другом, — расхождение."""
+    """Счёт, отменённый в одном месте и висящий долгом в другом, - расхождение."""
     with finance_session() as session:
         workspace = _workspace(session, space)
         invoice = invoices.create(
@@ -112,7 +112,7 @@ def test_otmena_schyota_snimaet_i_dolg(space):
 
 
 def test_oplachennyy_schyot_ne_otmenyaetsya_molcha(space):
-    """Оплата — это факт движения денег, и он не отменяется отменой счёта."""
+    """Оплата - это факт движения денег, и он не отменяется отменой счёта."""
     with finance_session() as session:
         workspace = _workspace(session, space)
         account = _account(session, workspace)
@@ -358,7 +358,7 @@ def test_pokazateli_schitayut_ebitda_po_prirode_statey(space):
         data = reports.indicators(session, workspace.id, date(2026, 8, 1), date(2026, 8, 31))
         assert Decimal(data["revenue"]) == Decimal("1000000.00")
         assert Decimal(data["gross_profit"]) == Decimal("600000.00")
-        # EBITDA не включает ни проценты, ни амортизацию — в этом весь смысл.
+        # EBITDA не включает ни проценты, ни амортизацию - в этом весь смысл.
         assert Decimal(data["ebitda"]) == Decimal("400000.00")
         assert Decimal(data["operating_profit"]) == Decimal("370000.00")
         assert Decimal(data["net_profit"]) == Decimal("320000.00")

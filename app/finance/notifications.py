@@ -2,14 +2,14 @@
 
 Два вида, и они различаются не цветом, а тем, нужно ли действие:
 
-* **просьбы** (`password_reset_requested`, `login_locked`) — висят, пока их не
-  решат: сброс пароля закрывает их сам, остальное — «Решено». Их число —
+* **просьбы** (`password_reset_requested`, `login_locked`) - висят, пока их не
+  решат: сброс пароля закрывает их сам, остальное - «Решено». Их число -
   «N запросов» в раме администратора;
-* **сведения** (`password_set`) — строка «Недавно» за сутки; действия не
+* **сведения** (`password_set`) - строка «Недавно» за сутки; действия не
   требуют и в число запросов не входят.
 
 Повтор одной и той же просьбы не плодит строк: «забыл пароль» дважды за час
-— это одна просьба с новым временем, а не две. Иначе список «Ждут решения»
+- это одна просьба с новым временем, а не две. Иначе список «Ждут решения»
 вырос бы от нетерпения человека, а не от числа дел.
 """
 from __future__ import annotations
@@ -49,7 +49,7 @@ def notify(
     audience: str = "admins",
     recipient_id: uuid.UUID | None = None,
 ) -> Notification:
-    """Завести уведомление; открытая просьба того же вида о том же — обновляется."""
+    """Завести уведомление; открытая просьба того же вида о том же - обновляется."""
     if kind in ACTIONABLE and subject_user_id is not None:
         existing = session.scalar(
             sa.select(Notification)
@@ -85,7 +85,7 @@ def notify(
 
 
 def last_request_at(session: Session, kind: str, subject_user_id: uuid.UUID) -> datetime | None:
-    """Когда последний раз просили о том же — для «не чаще раза в 10 минут»."""
+    """Когда последний раз просили о том же - для «не чаще раза в 10 минут»."""
     return _aware(
         session.scalar(
             sa.select(sa.func.max(Notification.created_at)).where(
@@ -95,25 +95,46 @@ def last_request_at(session: Session, kind: str, subject_user_id: uuid.UUID) -> 
     )
 
 
-def pending_count(session: Session, workspace_id: uuid.UUID) -> int:
-    """Число открытых просьб к администраторам — «N запросов» в раме."""
-    return int(
-        session.scalar(
-            sa.select(sa.func.count())
-            .select_from(Notification)
-            .where(
-                Notification.workspace_id == workspace_id,
-                Notification.audience == "admins",
-                Notification.kind.in_(ACTIONABLE),
-                Notification.resolved_at.is_(None),
-            )
+def _about_department(workspace_id: uuid.UUID, department: tuple[uuid.UUID | None] | None):
+    """Условие «просьба о человеке этого отдела» - для начальника отдела.
+
+    `department` - кортеж из одного отдела (`(None,)` - отдела нет, и просьб
+    не видно), `None` - отбора нет.
+    """
+    from app.finance.contracts.models import Employee
+
+    if department is None:
+        return None
+    return Notification.subject_user_id.in_(
+        sa.select(Employee.user_id).where(
+            Employee.workspace_id == workspace_id,
+            Employee.department_id == department[0],
+            Employee.user_id.is_not(None),
         )
-        or 0
     )
 
 
+def pending_count(
+    session: Session, workspace_id: uuid.UUID, *, department: tuple[uuid.UUID | None] | None = None
+) -> int:
+    """Число открытых просьб к администраторам - «N запросов» в раме.
+
+    `department` - у начальника отдела только просьбы его людей.
+    """
+    conditions = [
+        Notification.workspace_id == workspace_id,
+        Notification.audience == "admins",
+        Notification.kind.in_(ACTIONABLE),
+        Notification.resolved_at.is_(None),
+    ]
+    about = _about_department(workspace_id, department)
+    if about is not None:
+        conditions.append(about)
+    return int(session.scalar(sa.select(sa.func.count()).select_from(Notification).where(*conditions)) or 0)
+
+
 def open_about(session: Session, workspace_id: uuid.UUID, user_ids: list[uuid.UUID]) -> dict[uuid.UUID, list[dict[str, Any]]]:
-    """Открытые просьбы по людям — для списка сотрудников одним запросом."""
+    """Открытые просьбы по людям - для списка сотрудников одним запросом."""
     if not user_ids:
         return {}
     out: dict[uuid.UUID, list[dict[str, Any]]] = {}
@@ -145,14 +166,20 @@ def listing(
     viewer_id: uuid.UUID,
     include_resolved: bool = False,
     limit: int = 100,
+    department: tuple[uuid.UUID | None] | None = None,
 ) -> dict[str, Any]:
-    """Открытые просьбы, сведения за сутки и адресованное лично смотрящему."""
+    """Открытые просьбы, сведения за сутки и адресованное лично смотрящему.
+
+    `department` - у начальника отдела: просьбы только о людях его отдела.
+    """
     from app.finance.contracts.models import Employee
 
     since = _now() - RECENT
     conditions = [Notification.workspace_id == workspace_id]
+    about = _about_department(workspace_id, department)
+    admins = Notification.audience == "admins"
     audience = sa.or_(
-        Notification.audience == "admins",
+        sa.and_(admins, about) if about is not None else admins,
         sa.and_(Notification.audience == "user", Notification.recipient_id == viewer_id),
     )
     conditions.append(audience)
@@ -207,16 +234,27 @@ def listing(
                 ),
             }
         )
-    return {"items": out, "pending": pending_count(session, workspace_id)}
+    return {"items": out, "pending": pending_count(session, workspace_id, department=department)}
 
 
 class NotFound(LookupError):
-    """Уведомления нет в этой компании — ответ тот же, что «нет вовсе»."""
+    """Уведомления нет в этой компании - ответ тот же, что «нет вовсе»."""
 
 
-def resolve(session: Session, workspace_id: uuid.UUID, notification_id: uuid.UUID, *, by: uuid.UUID) -> Notification:
+def resolve(
+    session: Session,
+    workspace_id: uuid.UUID,
+    notification_id: uuid.UUID,
+    *,
+    by: uuid.UUID,
+    department: tuple[uuid.UUID | None] | None = None,
+) -> Notification:
     item = session.get(Notification, notification_id)
     if item is None or item.workspace_id != workspace_id:
+        raise NotFound("Уведомление не найдено")
+    about = _about_department(workspace_id, department)
+    if about is not None and not session.scalar(sa.select(Notification.id).where(Notification.id == item.id, about)):
+        # Просьба о человеке другого отдела: начальнику её и в списке не видно.
         raise NotFound("Уведомление не найдено")
     if item.resolved_at is None:
         item.resolved_at = _now()
@@ -228,7 +266,7 @@ def resolve(session: Session, workspace_id: uuid.UUID, notification_id: uuid.UUI
 def resolve_about(
     session: Session, workspace_id: uuid.UUID, subject_user_id: uuid.UUID, *, by: uuid.UUID | None
 ) -> int:
-    """Закрыть просьбы о человеке — после сброса пароля им решать больше нечего."""
+    """Закрыть просьбы о человеке - после сброса пароля им решать больше нечего."""
     result = session.execute(
         sa.update(Notification)
         .where(

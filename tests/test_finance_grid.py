@@ -1,6 +1,6 @@
 """Табличный вид журнала: поверхностей две, поведение одно.
 
-Главное свойство набора — правка ячейки обязана вести себя ровно так же, как
+Главное свойство набора - правка ячейки обязана вести себя ровно так же, как
 форма, и разбирать значения теми же функциями, что импорт. Иначе «1 500,50» в
 таблице однажды станет числом 150050, а в файле останется 1500.50, и объяснить
 расхождение будет нечем.
@@ -32,7 +32,7 @@ def finance_db(tmp_path, monkeypatch):
 
 @pytest.fixture
 def one_income(finance_db):
-    """Одно поступление в кассу — то, что дальше правят ячейками."""
+    """Одно поступление в кассу - то, что дальше правят ячейками."""
     with finance_session() as session:
         space = service.ensure_workspace(session)
         cash = next(a for a in service.list_accounts(session, space.id) if a.name == "Касса")
@@ -67,7 +67,7 @@ def test_list_pokazyvaet_operatsii_i_spravochniki(one_income):
 
 
 def test_summa_v_yacheike_razbiraetsya_kak_v_faile(one_income):
-    """«1 500,50» — это тысяча пятьсот, а не сто пятьдесят тысяч."""
+    """«1 500,50» - это тысяча пятьсот, а не сто пятьдесят тысяч."""
     space_id, operation_id = one_income
     with finance_session() as session:
         space = service.ensure_workspace(session)
@@ -104,7 +104,7 @@ def test_neponyatnoe_znachenie_eto_otkaz_a_ne_nol(one_income):
 
 
 def test_minus_v_yacheike_ne_menyaet_vid_operatsii(one_income):
-    """Смена вида — не правка ячейки: от вида зависят обязательные поля."""
+    """Смена вида - не правка ячейки: от вида зависят обязательные поля."""
     space_id, operation_id = one_income
     with finance_session() as session:
         space = service.ensure_workspace(session)
@@ -129,12 +129,12 @@ def test_neizvestnyy_schet_v_yacheike_otkaz(one_income):
         with pytest.raises(FinanceError) as exc:
             grid.apply_cell(session, space, operation_id, "account_to", "Kaspi Gold")
     text = str(exc.value)
-    # Отказ называет, что есть, — иначе за названием счёта шли в справочник.
+    # Отказ называет, что есть, - иначе за названием счёта шли в справочник.
     assert "Kaspi Gold" in text and "Касса" in text and "Справочник" in text
 
 
 def test_schet_po_nachalu_nazvaniya_esli_on_odin(one_income):
-    """«Кас» + Enter — это «Касса»: выпадающий список Univer не дополняет набор."""
+    """«Кас» + Enter - это «Касса»: выпадающий список Univer не дополняет набор."""
     space_id, operation_id = one_income
     with finance_session() as session:
         space = service.ensure_workspace(session)
@@ -144,7 +144,7 @@ def test_schet_po_nachalu_nazvaniya_esli_on_odin(one_income):
 
 
 def test_neodnoznachnoe_nachalo_scheta_otkaz(one_income):
-    """Два кандидата — не угадываем, а отказываем."""
+    """Два кандидата - не угадываем, а отказываем."""
     space_id, operation_id = one_income
     with finance_session() as session:
         space = service.ensure_workspace(session)
@@ -154,7 +154,7 @@ def test_neodnoznachnoe_nachalo_scheta_otkaz(one_income):
 
 
 def test_novaya_stroka_minus_pri_postuplenii_otkaz(one_income):
-    """Минус при счёте в «На счёт» — не повод молча завести поступление."""
+    """Минус при счёте в «На счёт» - не повод молча завести поступление."""
     with finance_session() as session:
         space = service.ensure_workspace(session)
         with pytest.raises(FinanceError) as exc:
@@ -166,7 +166,7 @@ def test_novaya_stroka_minus_pri_postuplenii_otkaz(one_income):
 
 
 def test_novaya_stroka_minus_pri_raskhode_prinyat(one_income):
-    """Минус при счёте в «Со счёта» с видом согласен — это расход на 5 000."""
+    """Минус при счёте в «Со счёта» с видом согласен - это расход на 5 000."""
     with finance_session() as session:
         space = service.ensure_workspace(session)
         operation = grid.append_row(
@@ -178,7 +178,7 @@ def test_novaya_stroka_minus_pri_raskhode_prinyat(one_income):
 
 
 def test_kategoriya_po_nachalu_ne_plodit_dvoynika(one_income):
-    """«Арен» в новой строке — это существующая «Аренда», а не вторая статья."""
+    """«Арен» в новой строке - это существующая «Аренда», а не вторая статья."""
     with finance_session() as session:
         space = service.ensure_workspace(session)
         before = len(service.list_categories(session, space.id))
@@ -192,7 +192,7 @@ def test_kategoriya_po_nachalu_ne_plodit_dvoynika(one_income):
 
 
 def test_kategoriya_v_yacheike_zavoditsya_srazu(one_income):
-    """Категория, наоборот, появляется в работе постоянно — создаём на месте."""
+    """Категория, наоборот, появляется в работе постоянно - создаём на месте."""
     space_id, operation_id = one_income
     with finance_session() as session:
         space = service.ensure_workspace(session)
@@ -202,7 +202,7 @@ def test_kategoriya_v_yacheike_zavoditsya_srazu(one_income):
 
 
 def test_pravka_po_ustarevshey_versii_otklonyaetsya(one_income):
-    """Двое правят одну строку — второй получает отказ, а не тихую перезапись."""
+    """Двое правят одну строку - второй получает отказ, а не тихую перезапись."""
     space_id, operation_id = one_income
     with finance_session() as session:
         space = service.ensure_workspace(session)
@@ -214,7 +214,7 @@ def test_pravka_po_ustarevshey_versii_otklonyaetsya(one_income):
 
 
 def test_novaya_stroka_snizu_stanovitsya_operatsiey(finance_db):
-    """Заполнили строку внизу листа — завелась операция.
+    """Заполнили строку внизу листа - завелась операция.
 
     Вид определяется по заполненным счетам, как в кассовой книге: сумма в графе
     «приход» и есть приход.
@@ -253,7 +253,7 @@ def test_stroka_s_dvumya_schetami_eto_perevod(finance_db):
 
 
 def test_stroka_s_datoy_v_budushchem_eto_plan(finance_db):
-    """Платёж с датой вперёд — ожидание, а не факт."""
+    """Платёж с датой вперёд - ожидание, а не факт."""
     future = (date.today() + timedelta(days=30)).strftime("%d.%m.%Y")
     with finance_session() as session:
         space = service.ensure_workspace(session)

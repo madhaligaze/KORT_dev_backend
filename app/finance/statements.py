@@ -8,7 +8,7 @@ Gold, Kaspi Business, Halyk, сканы через OCR и обобщённый �
 выписка Kaspi Gold на 47 страниц разобралась в 2050 операций с датами, суммами
 и деталями.
 
-Вторая копия этого разбора разъехалась бы с первой на первой же правке — как
+Вторая копия этого разбора разъехалась бы с первой на первой же правке - как
 уже случилось бы с привязкой колонок, если бы её не вынесли в общий модуль.
 Поэтому здесь только перевод: операции разбора → строки предпросмотра импорта.
 
@@ -17,12 +17,12 @@ Gold, Kaspi Business, Halyk, сканы через OCR и обобщённый �
 **Счёт.** В выписке его нет как названия: файл сам по себе и есть счёт.
 Поэтому счёт выбирает человек при загрузке, и он же попадает во все строки.
 Без этого каждая строка легла бы с замечанием «не указано, куда пришли деньги»,
-то есть файл на две тысячи строк отказался бы целиком — ровно то, за что мы
+то есть файл на две тысячи строк отказался бы целиком - ровно то, за что мы
 критикуем соседей по рынку.
 
 **Направление.** У разбора есть `direction` (`inflow`/`outflow`) и знак суммы.
 Берём направление, а сумму приводим к модулю: знак и вид операции
-одновременно — два источника правды об одном.
+одновременно - два источника правды об одном.
 
 **Комментарий.** Kaspi даёт пару «операция» + «детали»: «Покупка» и
 «Magnum Cash&Carry». В комментарий идут обе части, потому что по ним потом
@@ -39,7 +39,7 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 # Какие файлы сюда уходят, решает `importing.analyze` по содержимому
-# (`formats.sniff`): PDF — всегда, Excel — только если в нём нет таблицы с
+# (`formats.sniff`): PDF - всегда, Excel - только если в нём нет таблицы с
 # шапкой и файл узнаёт один из шаблонов выписок.
 
 _SPACES = re.compile(r"[\s ]+")
@@ -92,11 +92,11 @@ def read_statement(data: bytes, file_name: str, *, account: str | None) -> dict[
         statement, matches = parse_statement_with_diagnostics(file_name, data)
     except DocumentParseError as exc:
         raise StatementError(str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001 — чужой разбор, причина бывает любой
+    except Exception as exc:  # noqa: BLE001 - чужой разбор, причина бывает любой
         log.warning("finance: выписка «%s» не разобралась: %s", file_name, exc)
         raise StatementError(
             f"Не удалось прочитать выписку: {exc}. "
-            "Если файл — скан, попробуйте выгрузить из банка PDF с текстом."
+            "Если файл - скан, попробуйте выгрузить из банка PDF с текстом."
         ) from exc
 
     parser_key = getattr(statement.metadata, "parser_key", "") if statement.metadata else ""
@@ -112,7 +112,7 @@ def read_statement(data: bytes, file_name: str, *, account: str | None) -> dict[
         paid_at = _parse_date(tx.date)
         amount = Decimal(str(abs(tx.amount or 0)))
         kind = "income" if (tx.direction or "").lower() == "inflow" else "expense"
-        # Часть выписок не заполняет direction — тогда решает знак суммы.
+        # Часть выписок не заполняет direction - тогда решает знак суммы.
         if not tx.direction:
             kind = "expense" if (tx.amount or 0) < 0 else "income"
 
@@ -133,7 +133,7 @@ def read_statement(data: bytes, file_name: str, *, account: str | None) -> dict[
             "category": tx.category or None,
             "subcategory": None,
             # Контрагент из выписки берём осторожно: у Kaspi Gold в «деталях»
-            # лежит и магазин, и человек, и назначение — это комментарий, а не
+            # лежит и магазин, и человек, и назначение - это комментарий, а не
             # справочник. Тот, кто действительно назван контрагентом банком,
             # приходит в `raw_counterparty`.
             "counterparty": (tx.raw_counterparty or None),

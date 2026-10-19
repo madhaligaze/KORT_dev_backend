@@ -1,11 +1,11 @@
-"""Корзина «Финансов»: всё удалённое — одним списком, восстановить или удалить насовсем.
+"""Корзина «Финансов»: всё удалённое - одним списком, восстановить или удалить насовсем.
 
 Зачем
 ─────
 До 27.09.2026 удаление в разделе называлось по-разному и жило по-разному:
 операция «убиралась», договор «убирался», юрлицо и значение списка уходили «в
-архив», сотрудник — «в архив» с доступом. Где этот архив — не было видно
-нигде: «кнопка „Архив“ есть, а где архив — фиг пойми». Юрлицо с договором не
+архив», сотрудник - «в архив» с доступом. Где этот архив - не было видно
+нигде: «кнопка „Архив“ есть, а где архив - фиг пойми». Юрлицо с договором не
 удалялось вовсе (ошибочно заведённое «ИП WE make» так и висело в «Наших
 юрлицах»).
 
@@ -15,12 +15,12 @@
 
 «Удалить насовсем»
 ──────────────────
-Стирает запись из базы. Своё содержимое уходит вместе с ней (у договора —
-ответственные и соглашения, у операции — разбивки, у своего поля — значения в
+Стирает запись из базы. Своё содержимое уходит вместе с ней (у договора -
+ответственные и соглашения, у операции - разбивки, у своего поля - значения в
 договорах и колонки листов). А справочник, на который ещё ссылается живая
 запись (статус у договоров, счёт у операций, отдел у сотрудников), насовсем
 не удаляется: база либо отказала бы, либо молча стёрла бы значение у сотен
-договоров. Отказ — словами: «используется: договоров 12».
+договоров. Отказ - словами: «используется: договоров 12».
 """
 from __future__ import annotations
 
@@ -37,6 +37,7 @@ from app.finance.accounts_model import FinanceUser
 from app.finance.contracts.fields import bump
 from app.finance.contracts.models import (
     Contract,
+    ContractDepartment,
     ContractPerson,
     Department,
     Employee,
@@ -62,7 +63,7 @@ LIMIT = 300
 
 
 class TrashError(FinanceError):
-    """Восстановить или удалить насовсем нельзя — с причиной для человека."""
+    """Восстановить или удалить насовсем нельзя - с причиной для человека."""
 
 
 def _money(value: Any) -> str:
@@ -77,7 +78,7 @@ def _day(value: Any) -> str:
 
 
 def _aware(value: datetime) -> datetime:
-    """SQLite отдаёт время без пояса, Postgres — с поясом: сравниваем в UTC."""
+    """SQLite отдаёт время без пояса, Postgres - с поясом: сравниваем в UTC."""
     return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 
@@ -93,13 +94,13 @@ class Kind:
     key: str
     #: Как называется вид в корзине: «Договор», «Операция»…
     title: str
-    #: Где это жило — чтобы найти восстановленное: «Реестр», «Журнал»…
+    #: Где это жило - чтобы найти восстановленное: «Реестр», «Журнал»…
     where: str
     model: Any
     #: Колонка удаления: `deleted_at` или `archived_at`.
     column: str
     label: Callable[[Session, Any], str]
-    #: Почему нельзя удалить насовсем; пусто — можно.
+    #: Почему нельзя удалить насовсем; пусто - можно.
     blocked: Callable[[Session, Any], str] = lambda session, item: ""
     #: Что убрать вместе с записью (своё содержимое, не чужие ссылки).
     before_purge: Callable[[Session, Any], None] = lambda session, item: None
@@ -156,11 +157,15 @@ def _value_blocked(session: Session, item: ListValue) -> str:
         Contract.economic_role_id == item.id,
         sa.cast(Contract.attrs, sa.Text).contains(str(item.id)),
     )
-    return f"значение стоит в договорах: {used} — сначала замените его там или сведите с другим" if used else ""
+    return f"значение стоит в договорах: {used} - сначала замените его там или сведите с другим" if used else ""
 
 
 def _department_blocked(session: Session, item: Department) -> str:
-    contracts = _used_in_contracts(session, item.workspace_id, Contract.department_id == item.id)
+    contracts = _used_in_contracts(
+        session,
+        item.workspace_id,
+        Contract.id.in_(sa.select(ContractDepartment.contract_id).where(ContractDepartment.department_id == item.id)),
+    )
     staff = _count(
         session,
         sa.select(sa.func.count())
@@ -181,7 +186,7 @@ def _employee_blocked(session: Session, item: Employee) -> str:
         .where(ContractPerson.employee_id == item.id, Contract.deleted_at.is_(None)),
     )
     if contracts:
-        return f"сотрудник — ответственный в договорах: {contracts}; удалить насовсем значит стереть его из них"
+        return f"сотрудник - ответственный в договорах: {contracts}; удалить насовсем значит стереть его из них"
     return ""
 
 
@@ -234,7 +239,7 @@ def _tag_blocked(session: Session, item: Tag) -> str:
 
 
 def _field_purge(session: Session, item: EntityField) -> None:
-    """Своё поле насовсем: его значения в договорах и колонки листов — тоже."""
+    """Своё поле насовсем: его значения в договорах и колонки листов - тоже."""
     for contract in session.scalars(
         sa.select(Contract).where(Contract.workspace_id == item.workspace_id, sa.cast(Contract.attrs, sa.Text).contains(f'"{item.key}"'))
     ):
@@ -353,7 +358,7 @@ def _get(session: Session, workspace: Workspace, kind_key: str, item_id: uuid.UU
     item = session.get(kind.model, item_id)
     if item is None or item.workspace_id != workspace.id or getattr(item, kind.column) is None:
         raise TrashError("В корзине этого уже нет")
-    # Системное поле и главный лист не удаляются вовсе — в корзину они
+    # Системное поле и главный лист не удаляются вовсе - в корзину они
     # попасть не могли, но адрес можно набрать руками.
     if (kind.key == "field" and item.system) or (kind.key == "view" and item.main):
         raise TrashError("Это не удаляется")

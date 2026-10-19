@@ -180,8 +180,10 @@ _PERIOD_FROM_TO_RE = re.compile(
     r"с\s+(\d{2}[./]\d{2}[./]\d{2,4})\s+по\s+(\d{2}[./]\d{2}[./]\d{2,4})",
     re.IGNORECASE,
 )
+# Тире между датами периода в выписках любое: «-», «–» и длинное (\u2014) -
+# это текст банка, а не наш, поэтому длинное здесь остаётся (CLAUDE.md).
 _PERIOD_DASH_RE = re.compile(
-    r"(?:период|period)\s*[:\s]\s*(\d{2}[./]\d{2}[./]\d{2,4})\s*[-–—]\s*(\d{2}[./]\d{2}[./]\d{2,4})",
+    r"(?:период|period)\s*[:\s]\s*(\d{2}[./]\d{2}[./]\d{2,4})\s*[-–\u2014]\s*(\d{2}[./]\d{2}[./]\d{2,4})",
     re.IGNORECASE,
 )
 _IBAN_RE = re.compile(r"\bKZ[0-9A-Z]{18}\b", re.IGNORECASE)
@@ -447,7 +449,7 @@ def _for_holder(
 ) -> tuple[list[StatementTransaction], StatementTotals]:
     """У юрлица вид операции и итоги считаются так же, как у Kaspi Business.
 
-    Слова физлица здесь врут: «Оплата по счёту № 26» от клиента ТОО — это
+    Слова физлица здесь врут: «Оплата по счёту № 26» от клиента ТОО - это
     поступление, а не «Покупка», и «Пополнений» у счёта с миллионом прихода
     выходило ноль.
     """
@@ -686,7 +688,7 @@ def _merge_continuations(rows: list[list[object]], layout: Layout) -> list[list[
         # колонкой, туда её и дописываем. Раньше всё склеивалось в первую
         # текстовую колонку, и в PDF Halyk контрагент перемешивался с
         # назначением построчно: «Товарищество с ограниченной по аренде, счет
-        # на оплату № ответственностью "Алатау…». Числа в текстовой колонке —
+        # на оплату № ответственностью "Алатау…». Числа в текстовой колонке -
         # часть текста («№ 34», «481981.86(KZT)»), их тоже не выбрасываем.
         text_cols = sorted(layout.detail_cols)
         for index, cell in enumerate(row):
@@ -709,7 +711,7 @@ def _closes_table(row: list[object], layout: Layout) -> bool:
 
     «Обороты», «Итого» ищутся только под датой: в назначении платежа такие
     слова бывают. Слова в денежной колонке бывают только в шапке и в подвале
-    («Дебет», «Кредит» над оборотами) — но это верно, лишь когда колонки
+    («Дебет», «Кредит» над оборотами) - но это верно, лишь когда колонки
     известны по шапке.
     """
     under_date = _normalize(_cell(row, layout.date_col)).lower()
@@ -736,7 +738,7 @@ def _raw_row(row: list[object], layout: Layout) -> RawRow | None:
     if parsed_date is None:
         return None
     detail_parts = [_normalize(_cell(row, index)) for index in layout.detail_cols]
-    detail = " — ".join(part for part in detail_parts if part)
+    detail = " - ".join(part for part in detail_parts if part)
     operation_text = _normalize(_cell(row, layout.operation_col)) if layout.operation_col is not None else ""
     document = _normalize(_cell(row, layout.document_col)) if layout.document_col is not None else ""
     processing = None
@@ -941,7 +943,7 @@ def _make_transaction(raw: RawRow, income: float | None, expense: float | None) 
         document_number=raw.document_number,
         processing_date=raw.processing_date,
         # Контрагент, названный банком в своей колонке. «Финансы» берут его
-        # в справочник контрагентов, вид «Юр счёт» — в колонку «Контрагент».
+        # в справочник контрагентов, вид «Юр счёт» - в колонку «Контрагент».
         raw_counterparty=raw.counterparty or None,
         comment=raw.purpose or None,
         source="adaptive",
@@ -1009,7 +1011,7 @@ def _slot_label(slots: list[MoneySlot], index: int | None) -> str:
 def _compose_note(plan: Plan, opening: float | None, closing: float | None, headerless: bool) -> str:
     parts: list[str] = []
     if plan.mode == "debit_credit":
-        parts.append("Дебет посчитан как расход, кредит — как приход.")
+        parts.append("Дебет посчитан как расход, кредит - как приход.")
     elif plan.mode == "debit_credit_swapped":
         parts.append(
             "Колонки дебета и кредита поменяны местами: только так сходятся остаток на начало и на конец."
@@ -1019,11 +1021,11 @@ def _compose_note(plan: Plan, opening: float | None, closing: float | None, head
         if plan.income_label:
             bits.append(f"в приход взята колонка «{plan.income_label}»")
         if plan.expense_label:
-            bits.append(f"в расход — «{plan.expense_label}»")
+            bits.append(f"в расход - «{plan.expense_label}»")
         parts.append((", ".join(bits).capitalize() + ".") if bits else "Приход и расход взяты из подписанных колонок.")
     elif plan.mode == "signed":
         label = plan.amount_label or "Сумма"
-        parts.append(f"Колонка «{label}» со знаком: плюс — приход, минус — расход.")
+        parts.append(f"Колонка «{label}» со знаком: плюс - приход, минус - расход.")
     elif plan.mode == "balance_sign":
         parts.append(
             "Суммы без знака. Направление взято по изменению остатка, сама колонка остатка в обороты не входит."
@@ -1031,9 +1033,9 @@ def _compose_note(plan: Plan, opening: float | None, closing: float | None, head
     elif plan.mode == "balance_delta":
         parts.append("Сумма операции посчитана как изменение остатка от строки к строке.")
     elif plan.mode == "guess_sides":
-        parts.append("Левая денежная колонка посчитана как расход, правая — как приход.")
+        parts.append("Левая денежная колонка посчитана как расход, правая - как приход.")
     elif plan.mode == "guess_sides_swapped":
-        parts.append("Правая денежная колонка посчитана как расход, левая — как приход: так сходится остаток.")
+        parts.append("Правая денежная колонка посчитана как расход, левая - как приход: так сходится остаток.")
     if plan.ignores_balance and plan.mode not in {"balance_sign", "balance_delta"}:
         parts.append("Колонка остатка в обороты не входит.")
     if headerless:
@@ -1259,7 +1261,7 @@ def _coerce_amount(value: object) -> float | None:
             return None
         return round(float(value), 2)
     text = _normalize(value).replace("−", "-")
-    if not text or text in {"-", "—", "–"}:
+    if not text or text in {"-", "\u2014", "–"}:
         return None
     if _DATE_FULL_RE.match(text) or _DATE_ISO_RE.match(text):
         return None
@@ -1480,7 +1482,7 @@ def _vertical_rulings(page: fitz.Page) -> list[tuple[float, float, float]]:
                 if rect.width <= 2:
                     found.append(((rect.x0 + rect.x1) / 2, rect.y0, rect.y1))
                 else:
-                    # Ячейка, нарисованная прямоугольником: её края — те же линейки.
+                    # Ячейка, нарисованная прямоугольником: её края - те же линейки.
                     found.append((rect.x0, rect.y0, rect.y1))
                     found.append((rect.x1, rect.y0, rect.y1))
     return found
@@ -1493,7 +1495,7 @@ def _snap_bounds(
 ) -> list[tuple[float, float]]:
     """Границы колонок по линейкам таблицы, если они нарисованы.
 
-    Без линеек граница — середина между подписями шапки. Подписи стоят по
+    Без линеек граница - середина между подписями шапки. Подписи стоят по
     центру колонок, и длинный текст широкой колонки заезжал в соседнюю: в
     выписке Halyk «счет на оплату № 34» терял «34» в колонке НДС.
     """
@@ -1513,7 +1515,7 @@ def _snap_bounds(
         if not lefts or not rights:
             return bounds
         cells.append((lefts[-1], rights[0]))
-    # Две подписи в одной ячейке — шапка разбита не по колонкам, линейкам не верим.
+    # Две подписи в одной ячейке - шапка разбита не по колонкам, линейкам не верим.
     if any(right > next_left + 1 for (_, right), (next_left, _) in zip(cells, cells[1:])):
         return bounds
     snapped: list[tuple[float, float]] = []
@@ -1677,7 +1679,7 @@ def _read_pdf_lines(filename: str, content: bytes) -> ReadResult | None:
         if amount is None or abs(amount) < 0.005:
             continue
         description = _AMOUNT_TOKEN_RE.sub(" ", block)
-        description = _normalize(description).strip(" -—|")
+        description = _normalize(description).strip(" -\u2014|")
         raw_rows.append(
             RawRow(
                 date=parsed_date,
@@ -1699,7 +1701,7 @@ def _read_pdf_lines(filename: str, content: bytes) -> ReadResult | None:
     period_start, period_end = _period(text)
     bank = _bank_name(f"{filename}\n{text[:1500]}")
     # Уверенность остаётся осторожной: таблицы не было. В пояснении не пишем,
-    # что путались в заголовках, — их просто не было, строки читались по дате.
+    # что путались в заголовках, - их просто не было, строки читались по дате.
     note = "Строки выписки прочитаны по дате в начале строки. " + _compose_note(
         plan, opening, closing, headerless=False
     )

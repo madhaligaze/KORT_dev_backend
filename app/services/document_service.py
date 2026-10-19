@@ -84,7 +84,7 @@ def parse_statement_with_diagnostics(
 
 # Известные банки идут первыми, даже если их оценка чуть ниже адаптивной:
 # у Kaspi Business заголовок таблицы даёт 0.35, а адаптивный разбор уверенной
-# таблицы — около 0.64. Иначе выписка Kaspi уехала бы в общий разбор.
+# таблицы - около 0.64. Иначе выписка Kaspi уехала бы в общий разбор.
 _SPECIALIST_KEYS = frozenset({
     "kaspi_gold_statement",
     "kaspi_business_statement",
@@ -326,10 +326,10 @@ def _extract_pdf_metadata(
     if account_index > -1 and account_index + 1 < len(lines):
         account_number = lines[account_index + 1]
 
-    # Остатки — по дате в подписи, а не по порядку подписей.
+    # Остатки - по дате в подписи, а не по порядку подписей.
     #
-    # «Доступно на ДД.ММ.ГГ» в выписке Kaspi Gold встречается трижды: в шапке —
-    # на дату выдачи, с двоеточием, и в «Кратком содержании» — на начало и на
+    # «Доступно на ДД.ММ.ГГ» в выписке Kaspi Gold встречается трижды: в шапке -
+    # на дату выдачи, с двоеточием, и в «Кратком содержании» - на начало и на
     # конец периода. Остатком на начало раньше бралось первое из них, то есть
     # остаток на КОНЕЦ из шапки: в выписке за 18.09.25–18.09.26 «на старте»
     # стояло 21 439,09 вместо 28 012,68, и сверка с банком не могла сойтись.
@@ -434,7 +434,8 @@ def _extract_transactions(lines: list[str]) -> list[StatementTransaction]:
         next_index = index + 3
         while next_index < len(body) and not DATE_PATTERN.match(body[next_index]):
             candidate = body[next_index]
-            if candidate.startswith("- ") or candidate.startswith("• ") or candidate.startswith("—"):
+            # Пункт в документе начинают и длинным тире (\u2014) - это чужой текст.
+            if candidate.startswith("- ") or candidate.startswith("• ") or candidate.startswith("\u2014"):
                 note = candidate
                 flags.append("requires_attention")
             next_index += 1
@@ -707,7 +708,7 @@ def _value_exists(rows: list[list[object]], row_index: int, column_index: int) -
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# KASPI BUSINESS PARSER — lazy import, safe at startup
+# KASPI BUSINESS PARSER - lazy import, safe at startup
 # ─────────────────────────────────────────────────────────────────────────────
 
 

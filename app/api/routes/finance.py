@@ -5,7 +5,7 @@
 Раньше здесь стояли `require_block_user("finance")` и `require_admin` из
 `app.bbc.deps`, то есть в раздел пускали учётки BBC Dashboard. Это было неверно
 по существу: в «Финансах» каждая компания регистрируется сама и ведёт свой
-учёт, к BBC отношения не имея, — а BBC однажды может сам переехать сюда, и
+учёт, к BBC отношения не имея, - а BBC однажды может сам переехать сюда, и
 тогда зависимость смотрела бы от общего к частному.
 
 Теперь у раздела свои учётки (`app.finance.auth`), и `app.bbc` этот файл не
@@ -13,7 +13,7 @@
 человек ведёт несколько компаний, и переключатель в шапке меняет контекст
 сессии.
 
-Обработчики — обычный `def`, а не `async def`: внутри синхронные SQLAlchemy и
+Обработчики - обычный `def`, а не `async def`: внутри синхронные SQLAlchemy и
 openpyxl, разбор файла на двадцать тысяч строк считается секундами. В
 `async def` это встало бы колом в цикле событий и подвесило заодно дашборд;
 обычный `def` FastAPI уводит в пул потоков.
@@ -21,6 +21,7 @@ openpyxl, разбор файла на двадцать тысяч строк с
 from __future__ import annotations
 
 import calendar as calendar_module
+import hmac
 import logging
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
@@ -96,9 +97,9 @@ def _cookie_secure(request: Request) -> bool:
 
     Решает окружение, а схема запроса и `X-Forwarded-Proto` могут только
     добавить флаг, но не снять: браузер приходит на Next по HTTPS, Next
-    проксирует на API по HTTP, и бэкенд видит `http://api:8000` — то есть схема
+    проксирует на API по HTTP, и бэкенд видит `http://api:8000` - то есть схема
     здесь описывает внутреннюю сеть, а не то, как ходит человек. Ошибиться в
-    сторону `Secure` безопасно, в обратную — нет.
+    сторону `Secure` безопасно, в обратную - нет.
     """
     if request.url.scheme == "https":
         return True
@@ -122,13 +123,46 @@ def _set_cookie(request: Request, response: Response, token: str) -> None:
     )
 
 
-def client_ip(request: Request) -> str:
-    """Адрес человека. Справочно: его ставит прокси Next заголовком `x-client-ip`.
+def _set_device_cookie(request: Request, response: Response, token: str) -> None:
+    """Метка устройства для подтверждения слабых паролей. Живёт долго, как сессия."""
+    response.set_cookie(
+        auth.DEVICE_COOKIE,
+        token,
+        max_age=int(auth.DEVICE_TTL.total_seconds()),
+        httponly=True,
+        samesite="lax",
+        secure=_cookie_secure(request),
+        path="/",
+    )
 
-    Прямой запрос к API может прислать любой заголовок, поэтому адрес — это
-    подпись в журнале и ключ ограничителя перебора, но не доказательство.
+
+def _from_proxy(request: Request) -> bool:
+    """Запрос пришёл через прокси Next: он один знает общий секрет.
+
+    Без секрета в настройках (локальный запуск, тесты) - как прежде, верим:
+    прямого доступа из интернета там нет.
     """
-    value = (request.headers.get("x-client-ip") or "").split(",")[0].strip()
+    from app.core.config import settings
+
+    secret = settings.proxy_shared_secret
+    if not secret:
+        return True
+    return hmac.compare_digest(request.headers.get("x-proxy-auth") or "", secret)
+
+
+def client_ip(request: Request) -> str:
+    """Адрес человека: его ставит прокси Next заголовком `x-client-ip`.
+
+    Заголовку верим, только если запрос принёс секрет прокси. До 19.10.2026
+    верили всегда, а API открыт и напрямую: прямой запрос с выдуманным
+    `x-client-ip` оседал этим адресом в «Сеансах» и журнале и обходил
+    ограничитель перебора по адресу - на каждую попытку новый адрес (аудит,
+    проверено на проде). Чужой заголовок теперь не значит ничего: адрес -
+    тот, с которого пришло соединение.
+    """
+    value = ""
+    if _from_proxy(request):
+        value = (request.headers.get("x-client-ip") or "").split(",")[0].strip()
     if not value and request.client is not None:
         value = request.client.host or ""
     return value[:64]
@@ -139,7 +173,7 @@ def _agent(request: Request) -> str:
 
 
 def signed_in(request: Request) -> Member:
-    """Вошедший — любой, включая временный пароль. Нет сессии — 401 с текстом.
+    """Вошедший - любой, включая временный пароль. Нет сессии - 401 с текстом.
 
     Сама по себе не открывает ничего: маршруты берут одну из зависимостей
     ниже, и временный пароль пускают только к смене пароля.
@@ -161,7 +195,7 @@ TEMPORARY_PASSWORD = "Сначала смените временный паро�
 
 
 def _enter(member: Member) -> None:
-    """Автор, сеанс и адрес — в контекст запроса: их возьмёт каждая запись журнала."""
+    """Автор, сеанс и адрес - в контекст запроса: их возьмёт каждая запись журнала."""
     history.set_context(
         history.AuditContext(
             user_id=member.user_id,
@@ -187,11 +221,11 @@ def _denied(resources: tuple[str, ...], level: str, member: Member) -> str:
 
 
 def require_access(resource: str | tuple[str, ...], level: str = "view"):
-    """Зависимость «раздел открыт на этом уровне» — объявление права маршрута.
+    """Зависимость «раздел открыт на этом уровне» - объявление права маршрута.
 
-    Каждый маршрут `/finance/*` объявляет свой раздел: чтение — `view`,
-    изменение — `edit` (проверяет `tests/test_finance_access.py`, обходя все
-    маршруты приложения). Несколько разделов — «любой из них»: справочники
+    Каждый маршрут `/finance/*` объявляет свой раздел: чтение - `view`,
+    изменение - `edit` (проверяет `tests/test_finance_access.py`, обходя все
+    маршруты приложения). Несколько разделов - «любой из них»: справочники
     нужны формам и журнала, и счетов.
 
     Проверка асинхронная намеренно: только так автор, сеанс и адрес,
@@ -219,7 +253,7 @@ def require_access(resource: str | tuple[str, ...], level: str = "view"):
 
 
 def require_role(*roles: str):
-    """Только владелец (или владелец и администратор) — то, чего нет в правах разделов."""
+    """Только владелец (или владелец и администратор) - то, чего нет в правах разделов."""
 
     async def _dependency(member: Member = Depends(signed_in)) -> Member:
         if member.must_change_password:
@@ -253,14 +287,14 @@ async def _password_change(member: Member = Depends(signed_in)) -> Member:
 #: Своё: профиль, сеансы, свои действия. Права раздела не нужны, но временный
 #: пароль не пускает и сюда. Список таких маршрутов закрыт в тесте обхода.
 current_member = _declare(_self, "self", "own")
-#: Единственная дверь, открытая временному паролю, — сменить его.
+#: Единственная дверь, открытая временному паролю, - сменить его.
 password_member = _declare(_password_change, "self", "password")
 
 
 def _workspace(session, member: Member):
     """Компания текущей сессии.
 
-    Отсутствие выбранной компании — не ошибка сервера: так бывает у человека,
+    Отсутствие выбранной компании - не ошибка сервера: так бывает у человека,
     которого исключили из компании, пока он был в разделе. Отвечаем 409 и
     текстом, по которому фронт покажет выбор компании.
     """
@@ -273,7 +307,7 @@ def _workspace(session, member: Member):
 
 
 def _actor(member: Any) -> str:
-    """Подпись под операцией — логин (почта или телефон), а не имя: имя меняют."""
+    """Подпись под операцией - логин (почта или телефон), а не имя: имя меняют."""
     return getattr(member, "login", "") or getattr(member, "email", "") or ""
 
 
@@ -295,10 +329,10 @@ def _parse_date(value: str | None, *, field: str) -> date | None:
 def _money(value: Any, *, field: str) -> Decimal:
     """Сумма из тела запроса. Проверка та же, что у записи в базу.
 
-    Раньше здесь ловился только нечитаемый текст, а величина — нет: сорок
+    Раньше здесь ловился только нечитаемый текст, а величина - нет: сорок
     девяток доезжали до Postgres и возвращались пятисотой. Проверка живёт в
     `service.check_money`, чтобы ответ был одинаковым, откуда бы сумма ни
-    пришла — из формы, из ячейки таблицы или из файла.
+    пришла - из формы, из ячейки таблицы или из файла.
     """
     try:
         return service.check_money(value, field=field)
@@ -328,11 +362,11 @@ class LoginIn(BaseModel):
 
 
 def _me_payload(session, member: Member) -> dict[str, Any]:
-    """Кто вошёл и что ему открыто — `me` и ответ входа.
+    """Кто вошёл и что ему открыто - `me` и ответ входа.
 
-    `access` — все разделы с уровнем (`none` / `view` / `edit`), `role`,
+    `access` - все разделы с уровнем (`none` / `view` / `edit`), `role`,
     `contracts_scope` и `pending_requests` (число открытых просьб для рамы
-    того, кто правит людей). `abilities` — прежние способности для экранов,
+    того, кто правит людей). `abilities` - прежние способности для экранов,
     ещё не переведённых на `access`.
     """
     from app.finance.contracts.models import Department, Employee
@@ -342,7 +376,12 @@ def _me_payload(session, member: Member) -> dict[str, Any]:
     employee_out = None
     if member.workspace_id is not None:
         if rights.can("people", "edit"):
-            pending = notifications.pending_count(session, member.workspace_id)
+            # Начальнику отдела - просьбы только его людей.
+            pending = notifications.pending_count(
+                session,
+                member.workspace_id,
+                department=(rights.department_id,) if rights.people_department_only else None,
+            )
         row = session.execute(
             sa.select(Employee, Department)
             .outerjoin(Department, Department.id == Employee.department_id)
@@ -360,6 +399,21 @@ def _me_payload(session, member: Member) -> dict[str, Any]:
                     else None
                 ),
             }
+    # Привычки учётки (`app/finance/habits.py`) - вместе с «кто я»: вход сразу
+    # открывает раздел видом по привычке, и на новом компьютере тоже, не
+    # дожидаясь отдельного запроса.
+    prefer: dict[str, str] = {}
+    if member.workspace_id is not None:
+        from app.finance import habits
+        from app.finance.models import SheetLook
+
+        stored = session.get(SheetLook, (member.user_id, member.workspace_id, habits.KEY))
+        prefer = habits.prefer(stored.look) if stored is not None else {}
+    # Поддержка - вместе с «кто я»: ответ поддержки виден у значка в шапке с
+    # ближайшим опросом (раз в 20 с), без своего опроса у каждой вкладки.
+    from app.finance import support
+
+    support_state = support.state(session, member.user_id)
     return {
         "authenticated": True,
         "user": {
@@ -379,8 +433,14 @@ def _me_payload(session, member: Member) -> dict[str, Any]:
         "role": member.role or None,
         "access": rights.access_map(),
         "contracts_scope": rights.contracts_scope(),
+        "people_scope": rights.people_scope(),
         "pending_requests": pending,
+        "pending_devices": (
+            auth.pending_devices(session, member.user_id) if finance_settings.device_approval else []
+        ),
         "employee": employee_out,
+        "habits": prefer,
+        "support": support_state,
     }
 
 
@@ -390,14 +450,17 @@ def _auth_fail(exc: AuthError, status: int) -> HTTPException:
     if isinstance(exc, auth.NeedsPassword):
         # 409, а не 401: экран по нему переходит к «Придумайте пароль».
         return HTTPException(status_code=409, detail=str(exc))
+    if isinstance(exc, auth.WindowExpired):
+        # 410: окно задать пароль прошло - экран предлагает «Попросить администратора».
+        return HTTPException(status_code=410, detail=str(exc))
     return HTTPException(status_code=status, detail=str(exc))
 
 
 @router.post("/auth/register", status_code=201)
 def auth_register(body: RegisterIn, request: Request, response: Response) -> dict[str, Any]:
-    """Регистрация компании: почта, пароль, название, имя — и человек внутри.
+    """Регистрация компании: почта, пароль, название, имя - и человек внутри.
 
-    Имя обязательно: без него владелец везде подписан почтой — в раме, в
+    Имя обязательно: без него владелец везде подписан почтой - в раме, в
     списке сотрудников, автором каждой записи журнала.
     """
     _guard()
@@ -421,12 +484,23 @@ def auth_register(body: RegisterIn, request: Request, response: Response) -> dic
     return payload
 
 
+def _device_response(approval: auth.NeedsDeviceApproval, request: Request, response: Response) -> dict[str, Any]:
+    """Пароль подошёл, но устройство новое: 202 и метка, по которой экран ждёт."""
+    if approval.set_token:
+        _set_device_cookie(request, response, approval.set_token)
+    response.status_code = 202
+    return {"step": "approve_device"}
+
+
 @router.post("/auth/login")
 def auth_login(body: LoginIn, request: Request, response: Response) -> dict[str, Any]:
     _guard()
-    # Неудача пишет событие и счётчик — это должно сохраниться и при отказе,
-    # поэтому ошибка поднимается после выхода из транзакции.
+    # Неудача пишет событие и счётчик - это должно сохраниться и при отказе,
+    # поэтому ошибка поднимается после выхода из транзакции. «Ждёт
+    # подтверждения устройства» тоже ловится внутри: его запись обязана дойти
+    # до коммита (finance_session откатывает транзакцию на исключении).
     failure: AuthError | None = None
+    approval: auth.NeedsDeviceApproval | None = None
     with finance_session() as session:
         try:
             member, token = auth.login(
@@ -435,10 +509,15 @@ def auth_login(body: LoginIn, request: Request, response: Response) -> dict[str,
                 password=body.password,
                 user_agent=_agent(request),
                 ip=client_ip(request),
+                device_token=request.cookies.get(auth.DEVICE_COOKIE),
             )
             payload = _me_payload(session, member)
+        except auth.NeedsDeviceApproval as exc:
+            approval = exc
         except AuthError as exc:
             failure = exc
+    if approval is not None:
+        return _device_response(approval, request, response)
     if failure is not None:
         # 401, а не 400: фронт по коду решает, показывать форму входа снова
         # или сообщение о недостатке прав.
@@ -476,18 +555,24 @@ def auth_phone_start(body: PhoneIn, request: Request) -> dict[str, str]:
 
 @router.post("/auth/phone/login")
 def auth_phone_login(body: PhonePasswordIn, request: Request, response: Response) -> dict[str, Any]:
-    """Номер и пароль → сеанс. Ответ — как у `me`."""
+    """Номер и пароль → сеанс. Ответ - как у `me`."""
     _guard()
     failure: AuthError | None = None
+    approval: auth.NeedsDeviceApproval | None = None
     with finance_session() as session:
         try:
             member, token = auth.phone_login(
                 session, phone=body.phone, password=body.password,
                 user_agent=_agent(request), ip=client_ip(request),
+                device_token=request.cookies.get(auth.DEVICE_COOKIE),
             )
             payload = _me_payload(session, member)
+        except auth.NeedsDeviceApproval as exc:
+            approval = exc
         except AuthError as exc:
             failure = exc
+    if approval is not None:
+        return _device_response(approval, request, response)
     if failure is not None:
         raise _auth_fail(failure, 401) from failure
     _set_cookie(request, response, token)
@@ -496,7 +581,7 @@ def auth_phone_login(body: PhonePasswordIn, request: Request, response: Response
 
 @router.post("/auth/phone/set-password")
 def auth_phone_set_password(body: PhonePasswordIn, request: Request, response: Response) -> dict[str, Any]:
-    """Задать пароль в окне ожидания и сразу войти. Ответ — как у `me`."""
+    """Задать пароль в окне ожидания и сразу войти. Ответ - как у `me`."""
     _guard()
     failure: AuthError | None = None
     with finance_session() as session:
@@ -522,7 +607,80 @@ def auth_phone_forgot(body: PhoneIn, request: Request) -> dict[str, bool]:
         try:
             auth.phone_forgot(session, phone=body.phone, user_agent=_agent(request), ip=client_ip(request))
         except AuthError as exc:
-            # Неверный формат номера — не тайна: его видит и сама форма.
+            # Неверный формат номера - не тайна: его видит и сама форма.
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True}
+
+
+@router.post("/auth/device/claim")
+def device_claim(request: Request, response: Response) -> dict[str, Any]:
+    """Ждущий экран нового устройства забирает сеанс, когда вход подтвердили.
+
+    Экран опрашивает этот маршрут, пока не придёт ответ: 200 с `me` - вход
+    подтвердили, 202 `pending` - ещё ждём, 403 - отклонили. Охраняется меткой
+    устройства в cookie: её держит только тот браузер, что начал вход.
+    """
+    _guard()
+    token = request.cookies.get(auth.DEVICE_COOKIE)
+    opened: tuple[str, dict[str, Any]] | None = None
+    state = "none"
+    with finance_session() as session:
+        result = auth.claim_device(
+            session, token, ip=client_ip(request), user_agent=_agent(request)
+        )
+        if isinstance(result, tuple):
+            member, session_token = result
+            opened = (session_token, _me_payload(session, member))
+        else:
+            state = result
+    if opened is not None:
+        _set_cookie(request, response, opened[0])
+        return opened[1]
+    if state == "denied":
+        raise HTTPException(status_code=403, detail="Вход с этого устройства отклонён")
+    if state == "pending":
+        response.status_code = 202
+        return {"step": "pending"}
+    raise HTTPException(status_code=404, detail="Запрос не найден или устарел")
+
+
+@router.post("/auth/device/{device_id}/approve")
+def device_approve(device_id: UUID, member: Member = Depends(current_member)) -> dict[str, bool]:
+    """Подтвердить вход с нового устройства - с того, где человек уже вошёл."""
+    _guard()
+    with finance_session() as session:
+        try:
+            auth.decide_device(session, member, device_id, trust=True)
+        except AuthError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True}
+
+
+@router.post("/auth/device/{device_id}/deny")
+def device_deny(device_id: UUID, member: Member = Depends(current_member)) -> dict[str, bool]:
+    """Отклонить вход с нового устройства."""
+    _guard()
+    with finance_session() as session:
+        try:
+            auth.decide_device(session, member, device_id, trust=False)
+        except AuthError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True}
+
+
+class ForgotIn(BaseModel):
+    email: str
+
+
+@router.post("/auth/forgot")
+def auth_email_forgot(body: ForgotIn, request: Request) -> dict[str, bool]:
+    """«Забыли?» у входа по почте: просьба администраторам. Ответ одинаковый, есть почта или нет."""
+    _guard()
+    with finance_session() as session:
+        try:
+            auth.email_forgot(session, email=body.email, user_agent=_agent(request), ip=client_ip(request))
+        except AuthError as exc:
+            # Не похоже на почту - не тайна: это видно и по самому полю.
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"ok": True}
 
@@ -543,7 +701,7 @@ def auth_me(request: Request) -> dict[str, Any]:
     """Кто вошёл. Отдаёт `authenticated: false` вместо 401.
 
     Этот маршрут спрашивают при открытии страницы, и 401 в консоли браузера на
-    каждом заходе гостя — шум, из которого потом не видно настоящих ошибок.
+    каждом заходе гостя - шум, из которого потом не видно настоящих ошибок.
     """
     _guard()
     with finance_session() as session:
@@ -585,7 +743,7 @@ class CompanyIn(BaseModel):
 def auth_add_company(
     body: CompanyIn, member: Member = Depends(current_member)
 ) -> dict[str, Any]:
-    """Ещё одна компания тому же человеку — он её владелец."""
+    """Ещё одна компания тому же человеку - он её владелец."""
     _guard()
     with finance_session() as session:
         try:
@@ -681,6 +839,26 @@ def auth_remove_member(
         return {"ok": True}
 
 
+class OwnerIn(BaseModel):
+    user_id: UUID
+    #: Пароль владельца - передача владения необратима без нового владельца.
+    password: str
+    #: Кем остаться: `admin` | `employee`.
+    keep: str = "admin"
+
+
+@router.post("/auth/owner")
+def auth_transfer_owner(body: OwnerIn, member: Member = Depends(require_role("owner"))) -> dict[str, Any]:
+    """Передать владение компанией - исключительное право владельца."""
+    _guard()
+    with finance_session() as session:
+        try:
+            auth.transfer_ownership(session, member, user_id=body.user_id, password=body.password, keep=body.keep)
+        except AuthError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"ok": True, "owner": str(body.user_id), "role": body.keep}
+
+
 class PasswordIn(BaseModel):
     old_password: str
     new_password: str
@@ -692,7 +870,7 @@ def auth_password(
 ) -> dict[str, Any]:
     """Смена своего пароля. Доступна и тем, у кого пароль временный.
 
-    Остальные сеансы закрываются: `sessions_closed` — сколько.
+    Остальные сеансы закрываются: `sessions_closed` - сколько.
     """
     _guard()
     with finance_session() as session:
@@ -703,9 +881,27 @@ def auth_password(
         return {"ok": True, "sessions_closed": closed}
 
 
+class EmailIn(BaseModel):
+    email: str
+    #: Текущий пароль - почта это логин, и без пароля её не меняют.
+    password: str
+
+
+@router.post("/auth/email")
+def auth_email(body: EmailIn, member: Member = Depends(current_member)) -> dict[str, Any]:
+    """Сменить свою почту для входа. Сеансы остаются: пароль тот же."""
+    _guard()
+    with finance_session() as session:
+        try:
+            user = auth.set_email(session, member, email=body.email, password=body.password)
+        except AuthError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"id": str(user.id), "email": user.email or ""}
+
+
 @router.get("/auth/sessions")
 def auth_sessions(member: Member = Depends(current_member)) -> dict[str, Any]:
-    """Свои открытые сессии — чтобы увидеть чужой вход и отозвать его.
+    """Свои открытые сессии - чтобы увидеть чужой вход и отозвать его.
 
     У каждой: `user_agent`, `ip`, `created_at`, `last_seen_at`, `current`.
     """
@@ -749,7 +945,7 @@ class ProfileIn(BaseModel):
 
 @router.patch("/auth/profile")
 def auth_profile(body: ProfileIn, member: Member = Depends(require_role("owner", "admin"))) -> dict[str, Any]:
-    """Свои ФИО и телефон — владельцу и администратору; сотруднику их задаёт администратор."""
+    """Свои ФИО и телефон - владельцу и администратору; сотруднику их задаёт администратор."""
     _guard()
     with finance_session() as session:
         try:
@@ -813,9 +1009,9 @@ def overview(member: Member = Depends(require_access("reports.summary"))) -> dic
 
 @router.get("/dictionaries")
 def dictionaries(member: Member = Depends(require_access(access_module.MONEY_RESOURCES))) -> dict[str, Any]:
-    """Все справочники разом — ими наполняются выпадающие списки форм.
+    """Все справочники разом - ими наполняются выпадающие списки форм.
 
-    Начальный остаток счёта — только тем, кому остатки открыты: вместе с
+    Начальный остаток счёта - только тем, кому остатки открыты: вместе с
     журналом он даёт остаток на сегодня, то есть ту же сводку, которую
     закрывает право «Остатки и долги». Формам журнала нужно только имя счёта.
     """
@@ -897,7 +1093,7 @@ def create_account(body: AccountIn, member: Member = Depends(require_access("dic
 
 class EntryIn(BaseModel):
     name: str
-    #: Для категорий — сторона учёта, для контрагентов — роль.
+    #: Для категорий - сторона учёта, для контрагентов - роль.
     side: str | None = None
     role: str | None = None
 
@@ -957,7 +1153,7 @@ def put_account_number(
     """Номер счёта в банке. Пустая строка снимает номер.
 
     Право то же, что у состава счетов: номер решает, на какой счёт ляжет
-    следующая выписка, — это не подпись, а адрес денег.
+    следующая выписка, - это не подпись, а адрес денег.
     """
     _guard()
     with finance_session() as session:
@@ -973,7 +1169,7 @@ def put_account_number(
                 kind="account.number",
                 entity="account",
                 entity_id=account.id,
-                title=f"номер счёта «{account.name}»: {before or '—'} → {account.number or '—'}",
+                title=f"номер счёта «{account.name}»: {before or '-'} → {account.number or '-'}",
                 before={"number": before},
                 after={"number": account.number},
                 actor=_actor(member),
@@ -1023,7 +1219,7 @@ _DICTIONARY_TITLES = {
 
 @router.delete("/dictionaries/{kind}/{item_id}")
 def archive_entry(kind: str, item_id: UUID, member: Member = Depends(require_access("dictionaries", "edit"))) -> dict[str, bool]:
-    """Удалить запись справочника — в корзину (`finance/trash.py`), не из базы."""
+    """Удалить запись справочника - в корзину (`finance/trash.py`), не из базы."""
     _guard()
     models = {
         "accounts": Account,
@@ -1049,7 +1245,7 @@ def archive_entry(kind: str, item_id: UUID, member: Member = Depends(require_acc
 
 
 class NatureIn(BaseModel):
-    nature: str = Field(pattern="^(revenue|cogs|operating|financial|depreciation|tax|other)$")
+    nature: str
 
 
 @router.patch("/dictionaries/categories/{item_id}/nature")
@@ -1058,10 +1254,18 @@ def set_category_nature(
 ) -> dict[str, Any]:
     """Природа статьи: себестоимость, операционный расход, проценты, амортизация…
 
-    От неё зависят показатели: без неё «Закуп товара» и «Аренда» — просто два
+    От неё зависят показатели: без неё «Закуп товара» и «Аренда» - просто два
     расхода, и валовую прибыль с EBITDA посчитать нечем.
+
+    Список - тот же, что у базы (`CATEGORY_NATURES`). До 01.10.2026 здесь стоял
+    свой, без `capital`: «капитал: кредит, погашение, дивиденды» из
+    «Справочников» отвечал 422 по-английски, хотя засев и отчёты его знают.
     """
     _guard()
+    from app.finance.models import CATEGORY_NATURES
+
+    if body.nature not in CATEGORY_NATURES:
+        raise HTTPException(status_code=422, detail="Такой природы статьи нет")
     with finance_session() as session:
         workspace = _workspace(session, member)
         category = session.get(Category, item_id)
@@ -1072,7 +1276,7 @@ def set_category_nature(
         session.flush()
         history.write(
             session, workspace, kind="category.nature", entity="categories", entity_id=category.id,
-            title=f"природа статьи «{category.name}»: {before or '—'} → {category.nature}",
+            title=f"природа статьи «{category.name}»: {before or '-'} → {category.nature}",
             before={"nature": before}, after={"nature": category.nature},
         )
         return {"id": str(category.id), "nature": category.nature}
@@ -1158,7 +1362,7 @@ def _filter(
 
         Молчаливый пропуск был хуже отказа: `kinds=нечто` не фильтровал
         ничего, журнал отдавал все операции, и человек читал полный список как
-        «расходов по этому виду столько». Фильтр, который не фильтрует, —
+        «расходов по этому виду столько». Фильтр, который не фильтрует, -
         это неверная цифра, а не пустой экран.
         """
         parts = tuple(part.strip() for part in (value or "").split(",") if part.strip())
@@ -1221,7 +1425,7 @@ def list_operations(
             "total": total,
             "limit": limit,
             "offset": offset,
-            # По всему фильтру, а не по странице — см. `service.operation_sums`.
+            # По всему фильтру, а не по странице - см. `service.operation_sums`.
             "sums": {key: str(value) for key, value in service.operation_sums(session, workspace.id, flt).items()},
             "items": [
                 _operation_out(operation, names=names, splits=splits, tags=tags)
@@ -1246,7 +1450,7 @@ def export_journal(
     counterparty_id: UUID | None = None,
     project_id: UUID | None = None,
 ) -> Response:
-    """Журнал с теми же фильтрами — файлом Excel. См. `app.finance.export`."""
+    """Журнал с теми же фильтрами - файлом Excel. См. `app.finance.export`."""
     _guard()
     with finance_session() as session:
         workspace = _workspace(session, member)
@@ -1264,12 +1468,12 @@ def export_journal(
             after={"count": count, "date_from": date_from, "date_to": date_to},
         )
         title = workspace.title
-    name = f"Журнал — {title} — {date.today():%d.%m.%Y}.xlsx"
+    name = f"Журнал - {title} - {date.today():%d.%m.%Y}.xlsx"
     return Response(
         content=data,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={
-            # Имя по-русски — через `filename*`: заголовок без него браузер
+            # Имя по-русски - через `filename*`: заголовок без него браузер
             # показал бы кракозябрами или обрезал на первой кириллической букве.
             "Content-Disposition": f"attachment; filename=\"journal.xlsx\"; filename*=UTF-8''{quote(name)}",
         },
@@ -1430,7 +1634,11 @@ def patch_operation(
 
 
 @router.delete("/operations/{operation_id}")
-def delete_operation(operation_id: UUID, member: Member = Depends(require_access(("journal", "calendar"), "edit"))) -> dict[str, bool]:
+def delete_operation(operation_id: UUID, member: Member = Depends(require_access(("journal", "calendar"), "edit"))) -> dict[str, Any]:
+    """Удалить операцию - в корзину. `undo` - запись истории: по ней журнал
+    сразу предлагает «Вернуть» (`POST /history/{undo}/undo`). До 01.10.2026
+    вернуть удалённое сотрудник мог только «Откатить» в кабинете - корзина
+    открыта лишь администратору."""
     _guard()
     with finance_session() as session:
         workspace = _workspace(session, member)
@@ -1440,7 +1648,7 @@ def delete_operation(operation_id: UUID, member: Member = Depends(require_access
             service.delete_operation(session, workspace, operation_id, actor=_actor(member))
         except FinanceError as exc:
             raise _fail(exc) from exc
-        history.write(
+        entry = history.write(
             session,
             workspace,
             kind="operation.delete",
@@ -1449,7 +1657,7 @@ def delete_operation(operation_id: UUID, member: Member = Depends(require_access
             before=before,
             actor=_actor(member),
         )
-        return {"ok": True}
+        return {"ok": True, "undo": str(entry.id)}
 
 
 # ── Табличный вид ────────────────────────────────────────────────────────────
@@ -1464,7 +1672,7 @@ def read_grid(
 ) -> dict[str, Any]:
     """Журнал как лист: шапка, строки и значения для выпадающих списков.
 
-    `seq` — номер изменения журнала, с которого лист начинает опрос
+    `seq` - номер изменения журнала, с которого лист начинает опрос
     (`/grid/changes`); читается до выборки строк, как у реестра договоров.
     """
     _guard()
@@ -1488,7 +1696,7 @@ def read_grid(
 def grid_changes(since: int = Query(0, ge=0), member: Member = Depends(require_access("table"))) -> dict[str, Any]:
     """Живой режим листа «Таблица»: строки, изменённые после `since`, и снятые.
 
-    Лист опрашивает раз в 2 с, пока вкладка видна; почти всегда ответ пустой —
+    Лист опрашивает раз в 2 с, пока вкладка видна; почти всегда ответ пустой -
     два чтения счётчика.
     """
     _guard()
@@ -1509,7 +1717,7 @@ def patch_cell(body: CellPatch, member: Member = Depends(require_access("table",
     _guard()
     with finance_session() as session:
         workspace = _workspace(session, member)
-        # Правка ячейки — та же правка операции, что из карточки, и пишется в
+        # Правка ячейки - та же правка операции, что из карточки, и пишется в
         # журнал так же: с состоянием до и после и с откатом. Раньше лист
         # менял операцию молча, и «кто поменял сумму» по нему было не узнать.
         existing = session.get(Operation, body.operation_id)
@@ -1534,7 +1742,7 @@ def patch_cell(body: CellPatch, member: Member = Depends(require_access("table",
         names = _names(session, workspace.id)
         splits = service.operation_projects(session, [operation.id])
         tags = service.operation_tags(session, [operation.id])
-        # `row` — строка листа после правки: лист пишет её обратно в свои
+        # `row` - строка листа после правки: лист пишет её обратно в свои
         # ячейки по месту, а не перечитывает журнал (см. `grid.row_of`).
         return {
             **_operation_out(operation, names=names, splits=splits, tags=tags),
@@ -1572,21 +1780,21 @@ def add_grid_row(body: GridRowIn, member: Member = Depends(require_access("table
 
 
 def _period(date_from: str | None, date_to: str | None) -> tuple[date, date]:
-    """Период отчёта. По умолчанию — шесть месяцев, включая текущий целиком.
+    """Период отчёта. По умолчанию - шесть месяцев, включая текущий целиком.
 
     Полгода, а не месяц: отчёт из одного столбца не отвечает ни на один
-    управленческий вопрос — сравнивать не с чем.
+    управленческий вопрос - сравнивать не с чем.
 
     Про «включая текущий целиком»
     ─────────────────────────────
     Сначала здесь стояло `end = первое число текущего месяца`, и это был
     дефект: операции текущего месяца после первого числа в отчёты не попадали
-    вовсе. Экран выглядел исправным — столбец сентября на месте, — но стоял в
+    вовсе. Экран выглядел исправным - столбец сентября на месте, - но стоял в
     нём ноль, а журнал в это же время показывал одиннадцать операций.
     Поймано сквозным прогоном 18 сентября 2026 на разделе «План/Факт», где
     пустота видна сразу.
 
-    Поэтому конец периода — последний день текущего месяца. Будущие даты внутри
+    Поэтому конец периода - последний день текущего месяца. Будущие даты внутри
     месяца ничего не портят: плановые платежи в отчётах и так показаны
     отдельными столбцами.
     """
@@ -1713,7 +1921,7 @@ def upsert_plan(body: PlanIn, member: Member = Depends(require_access("reports.p
             )
         )
         amount = _money(body.amount, field="amount")
-        # План — то же число в отчёте «План / Факт», что и факт, и проверяется
+        # План - то же число в отчёте «План / Факт», что и факт, и проверяется
         # так же: отрицательный план вычитался бы из плана по статье, а месяц
         # с опечаткой в годе навсегда остался бы строкой, которую не с чем
         # сравнить.
@@ -1746,7 +1954,7 @@ def upsert_plan(body: PlanIn, member: Member = Depends(require_access("reports.p
         session.flush()
         history.write(
             session, workspace, kind="plan.set", entity="plan", entity_id=existing.id,
-            title=f"план на {month:%m.%Y}: {before.get('amount', '—')} → {existing.amount}",
+            title=f"план на {month:%m.%Y}: {before.get('amount', '-')} → {existing.amount}",
             before=before, after={"amount": str(existing.amount), "comment": existing.comment},
         )
         return {"id": str(existing.id), "month": month.isoformat(), "amount": str(existing.amount)}
@@ -1899,7 +2107,7 @@ def suggest_rules(member: Member = Depends(require_access("rules"))) -> dict[str
 
 @router.get("/autotag")
 def autotag_preview(member: Member = Depends(require_access("rules"))) -> dict[str, Any]:
-    """Что разметится по тексту операций — группами, ничего не записывая."""
+    """Что разметится по тексту операций - группами, ничего не записывая."""
     _guard()
     with finance_session() as session:
         workspace = _workspace(session, member)
@@ -1917,7 +2125,7 @@ class AutotagIn(BaseModel):
 
 @router.post("/autotag")
 def autotag_apply(body: AutotagIn, member: Member = Depends(require_access("rules", "edit"))) -> dict[str, Any]:
-    """Разметить выбранные группы. Одна запись в истории — одна отмена на всё."""
+    """Разметить выбранные группы. Одна запись в истории - одна отмена на всё."""
     _guard()
     with finance_session() as session:
         workspace = _workspace(session, member)
@@ -1931,7 +2139,7 @@ def autotag_apply(body: AutotagIn, member: Member = Depends(require_access("rule
             kind="autotag.apply",
             entity="operations",
             title=f"авторазметка: {done['updated']} операций",
-            # Пустая разметка — тоже действие человека, но откатывать в ней нечего.
+            # Пустая разметка - тоже действие человека, но откатывать в ней нечего.
             after={"items": done["items"]} if done["updated"] else {"updated": 0},
             actor=_actor(member),
         )
@@ -1954,11 +2162,13 @@ def import_preview(
     строками и вернуться, не загружая файл заново.
     """
     _guard()
-    data = file.file.read()
+    # Не больше потолка и одного байта сверх: файл любой длины раньше
+    # дочитывался в память целиком и только потом отвергался.
+    data = file.file.read(finance_settings.import_max_bytes + 1)
     if len(data) > finance_settings.import_max_bytes:
         raise HTTPException(
             status_code=413,
-            detail=f"Файл больше {finance_settings.import_max_mb} МБ — разделите его на части",
+            detail=f"Файл больше {finance_settings.import_max_mb} МБ - разделите его на части",
         )
     with finance_session() as session:
         workspace = _workspace(session, member)
@@ -1977,9 +2187,9 @@ def import_preview(
         if len(preview.rows) > finance_settings.import_max_rows:
             raise HTTPException(
                 status_code=413,
-                detail=f"В файле {len(preview.rows)} строк — потолок {finance_settings.import_max_rows}",
+                detail=f"В файле {len(preview.rows)} строк - потолок {finance_settings.import_max_rows}",
             )
-        # Разметка правилами — ДО записи. Человек видит «412 строк лягут в
+        # Разметка правилами - ДО записи. Человек видит «412 строк лягут в
         # „Продукты“ по правилу „Magnum“» и может передумать; у соседей по
         # рынку правила срабатывают уже после того, как операции заведены.
         rule_hits = rules.preview_rows(
@@ -1996,11 +2206,11 @@ def _preview_response(
     rule_hits: dict[str, int],
     member: Member,
 ) -> dict[str, Any]:
-    """Ответ предпросмотра — один и тот же для файла и для книги Google.
+    """Ответ предпросмотра - один и тот же для файла и для книги Google.
 
     Собран отдельной функцией не ради краткости: два ответа с разным набором
     полей значили бы, что экран импорта показывает про книгу меньше, чем про
-    файл, — и «сколько строк отложено» стало бы зависеть от того, откуда данные.
+    файл, - и «сколько строк отложено» стало бы зависеть от того, откуда данные.
     """
     batch = service.save_preview(session, workspace, preview, actor=_actor(member))
     history.write(
@@ -2020,7 +2230,7 @@ def _preview_response(
         "unused_columns": preview.unused_columns,
         "accounts_missing": preview.accounts_missing,
         "accounts_suggested": preview.accounts_suggested,
-        # Сверка с остатками, которые напечатал банк, — PDF или таблицей.
+        # Сверка с остатками, которые напечатал банк, - PDF или таблицей.
         "bank": service.reconcile_statement(session, workspace, preview),
         "rules_applied": rule_hits,
         "rows": [
@@ -2076,7 +2286,7 @@ def list_invoices(
 
 @router.post("/invoices", status_code=201)
 def create_invoice(body: InvoiceIn, member: Member = Depends(require_access("invoices", "edit"))) -> dict[str, Any]:
-    """Выставить счёт. Ожидание по нему появляется сразу — это и есть долг."""
+    """Выставить счёт. Ожидание по нему появляется сразу - это и есть долг."""
     _guard()
     issued_at = _parse_date(body.issued_at, field="issued_at")
     due_at = _parse_date(body.due_at, field="due_at")
@@ -2305,9 +2515,9 @@ UNDO_RESOURCES = ("journal", "table", "calendar", "dictionaries", "rules")
 
 
 def undo_entry(member: Member, entry_id: UUID) -> dict[str, Any]:
-    """Откат записи журнала — с правом правки того раздела, чья это запись.
+    """Откат записи журнала - с правом правки того раздела, чья это запись.
 
-    Чужая компания и несуществующая запись отвечают одинаково — 404.
+    Чужая компания и несуществующая запись отвечают одинаково - 404.
     """
     from app.finance import audit
     from app.finance.models import ActionLog
@@ -2328,7 +2538,7 @@ def undo_entry(member: Member, entry_id: UUID) -> dict[str, Any]:
 
 @router.post("/history/{entry_id}/undo")
 def undo_action(entry_id: UUID, member: Member = Depends(require_access(UNDO_RESOURCES, "edit"))) -> dict[str, Any]:
-    """Отменить действие — вернуть состояние «до», а не сделать обратное."""
+    """Отменить действие - вернуть состояние «до», а не сделать обратное."""
     _guard()
     return undo_entry(member, entry_id)
 
@@ -2471,14 +2681,14 @@ def integration_inbox(
     request: Request,
     x_finance_token: str = Header(default=""),
 ) -> dict[str, Any]:
-    """Приём операций по адресу — вход для банков и чужих систем.
+    """Приём операций по адресу - вход для банков и чужих систем.
 
     Охраняется не учёткой человека, а токеном подключения: присылающая сторона
-    — это скрипт, а не человек в браузере. Поэтому здесь нет `current_member`, и
+    - это скрипт, а не человек в браузере. Поэтому здесь нет `current_member`, и
     компания берётся из токена.
 
-    Записываем через тот же разбор, что и файл: строка с минусом — расход,
-    неизвестный счёт — отказ строке, а не подстановка наугад.
+    Записываем через тот же разбор, что и файл: строка с минусом - расход,
+    неизвестный счёт - отказ строке, а не подстановка наугад.
     """
     _guard()
     if not body.operations:
@@ -2562,7 +2772,7 @@ def integration_inbox(
 def report_balance(
     member: Member = Depends(require_access("reports.balance")), as_of: str | None = None
 ) -> dict[str, Any]:
-    """Чем компания владеет и что должна — на дату."""
+    """Чем компания владеет и что должна - на дату."""
     _guard()
     with finance_session() as session:
         workspace = _workspace(session, member)
@@ -2575,7 +2785,7 @@ def report_indicators(
     date_from: str | None = None,
     date_to: str | None = None,
 ) -> dict[str, Any]:
-    """EBITDA, валовая прибыль, маржа — по природе статей."""
+    """EBITDA, валовая прибыль, маржа - по природе статей."""
     _guard()
     start, end = _period(date_from, date_to)
     with finance_session() as session:
@@ -2608,7 +2818,7 @@ def report_account_statement(
 def sheets_books(member: Member = Depends(require_access("sheets"))) -> dict[str, Any]:
     """Книги Google, открытые сервисному аккаунту программы.
 
-    Неготовность доступа — не ошибка экрана: `configured: false` показывается
+    Неготовность доступа - не ошибка экрана: `configured: false` показывается
     объяснением, что книгу нужно открыть сервисному аккаунту, а не отказом.
     """
     _guard()
@@ -2642,7 +2852,7 @@ def sheets_preview(
     body: SheetImportIn,
     member: Member = Depends(require_access("sheets", "edit")),
 ) -> dict[str, Any]:
-    """Разобрать вкладку книги — тем же разбором, что и загруженный файл."""
+    """Разобрать вкладку книги - тем же разбором, что и загруженный файл."""
     _guard()
     with finance_session() as session:
         workspace = _workspace(session, member)
@@ -2663,7 +2873,7 @@ def sheets_preview(
         if len(preview.rows) > finance_settings.import_max_rows:
             raise HTTPException(
                 status_code=413,
-                detail=f"Во вкладке {len(preview.rows)} строк — потолок {finance_settings.import_max_rows}",
+                detail=f"Во вкладке {len(preview.rows)} строк - потолок {finance_settings.import_max_rows}",
             )
         rule_hits = rules.preview_rows(
             rules.list_rules(session, workspace.id, only_active=True),
@@ -2744,7 +2954,7 @@ def read_batch(batch_id: UUID, member: Member = Depends(require_access("import")
 
 
 class ApplyIn(BaseModel):
-    #: Пусто — завести все готовые строки. Список — только эти строки.
+    #: Пусто - завести все готовые строки. Список - только эти строки.
     lines: list[int] | None = None
     create_dictionaries: bool = True
 
@@ -2778,7 +2988,7 @@ def apply_batch(batch_id: UUID, body: ApplyIn, member: Member = Depends(require_
         )
         remembered = done.get("remembered")
         if remembered:
-            # Номер записан счёту сам, по выписке, — это видно в истории и
+            # Номер записан счёту сам, по выписке, - это видно в истории и
             # отменяется оттуда же, как любая правка счёта.
             history.write(
                 session,

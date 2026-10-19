@@ -38,7 +38,7 @@ def _row(n, status, executor, customer, number, signed, dept, kind, subject, amo
     return row
 
 
-def _registry_file() -> bytes:
+def _registry_file(dept_13: str = "НО") -> bytes:
     book = Workbook()
     main = book.active
     main.title = "Сводная"
@@ -63,7 +63,7 @@ def _registry_file() -> bytes:
                      "Аренда", "Аренда нежилого помещения", 60000, end="12q"))
     main.append(_row(8, "действующий", "BBC Marketing", "ТОО Альфа", "№ 12", d(2025, 3, 1), "ОБО",
                      "Абонентское обслуживание", "Бухгалтерское сопровождение", 100000))
-    main.append(_row(9, "действующий", "BBC Marketing", "ТОО Бета", "№ 13", d(2025, 3, 1), "НО",
+    main.append(_row(9, "действующий", "BBC Marketing", "ТОО Бета", "№ 13", d(2025, 3, 1), dept_13,
                      "Абонентское обслуживание", "Налоговое сопровождение", 200000))
 
     buyer = book.create_sheet("Заказчик ГК")
@@ -78,7 +78,7 @@ def _registry_file() -> bytes:
     head = list(HEAD)
     head[5], head[6] = "Заказчик", "Исполнитель"
     buyer.append(head)
-    # Колонки наоборот: F — заказчик (наш), G — исполнитель (внешний).
+    # Колонки наоборот: F - заказчик (наш), G - исполнитель (внешний).
     buyer.append(_row(1, "исполнен", "BBC", "ИП «DSGroup»", "№041125", d(2025, 11, 4), None,
                       "Иное", "Маркетинг", 300000))
 
@@ -138,7 +138,7 @@ def test_kolonka_bez_shapki_i_nashi_yurlitsa_zhdut_cheloveka(finance_db):
         assert set(batch.report["blocking"]) == {"columns", "entities"}
         entities = _section(batch, "entities")
         own = {tuple(item["names"]) for item in entities["items"] if item["own"]}
-        # SAKOMPA-M и Sakompa-M — одно юрлицо; внешний продавец нашим не предложен.
+        # SAKOMPA-M и Sakompa-M - одно юрлицо; внешний продавец нашим не предложен.
         assert ("SAKOMPA-M", "Sakompa-M") in own
         assert all("Халык Актив" not in names for names in own)
         with pytest.raises(Exception):
@@ -199,7 +199,7 @@ def test_zavedenie_nichego_ne_teryaet(finance_db):
         assert float(first["file_snapshot"]["paid"]) == 250000
         assert first["values"]["folder_url"].startswith("https://bitrix/")
 
-        # Листы реестра; «Разовые» — своя книга, её засевает сам реестр.
+        # Листы реестра; «Разовые» - своя книга, её засевает сам реестр.
         views = {view.title: view for view in registry.views if not view.book}
         assert set(views) == {"Сводная", "Заказчик ГК", "Прочие договоры"}
         rent_members = [
@@ -208,12 +208,35 @@ def test_zavedenie_nichego_ne_teryaet(finance_db):
         ]
         assert {item["values"]["number"] for item in rent_members} == {"№ 50-RENT", "№ 51-RENT", "№ 52-RENT"}
 
-        # Загруженный договор — история: перевод на другое ТОО спрашивает режим
+        # Загруженный договор - история: перевод на другое ТОО спрашивает режим
         # даже у того, кто загрузил файл, в тот же день.
         owner = service.Actor(None, "owner@test")
         with pytest.raises(service.ModeRequired):
             service.patch(session, workspace, FULL, owner, __import__("uuid").UUID(first["id"]),
                           {"executor": "BBCA"}, known_seq=None)
+
+
+def test_otdely_spiskom_iz_fayla(finance_db):
+    """«ОБО, НО,⏎ ЮО» в «Отделе» - три отдела договора, а не текст с замечанием.
+
+    До 30.09.2026 такое значение считалось подсказкой из шапки и откладывалось:
+    договор «4 в 1» стоял без отдела и с «нет в списке «Отдел»».
+    """
+    with finance_session() as session:
+        workspace = finance_service.ensure_workspace(session)
+        batch = importer.start(session, workspace, ACTOR, _registry_file("ОБО, НО,\n ЮО"), "реестр.xlsx")
+        listed = [item for item in _section(batch, "statuses")["items"] if item["field"] == "department"]
+        assert all(not item["odd"] for item in listed)
+        batch = _decide_all(session, workspace, batch)
+        assert not importer.apply(session, workspace, FULL, ACTOR, batch.id)["failed"]
+        registry = service.Registry(session, workspace)
+        item = next(row for row in service.list_all(session, workspace, FULL)["contracts"] if row["values"]["number"] == "№ 13")
+        codes = [registry.departments[__import__("uuid").UUID(value)].code for value in item["values"]["department"]]
+        assert codes == ["ОБО", "НО", "ЮО"]
+        assert "unread_department" not in {issue["code"] for issue in item["issues"]}
+        # И обратно в Excel - списком, как было в ячейке.
+        contract = service.get_contract(session, workspace, __import__("uuid").UUID(item["id"]))
+        assert export._text(registry, contract, "department", []) == "ОБО, НО, ЮО"
 
 
 def test_vygruzka_i_obratnaya_zagruzka(finance_db, tmp_path, monkeypatch):
@@ -230,7 +253,7 @@ def test_vygruzka_i_obratnaya_zagruzka(finance_db, tmp_path, monkeypatch):
     assert book.sheetnames == ["Сводная", "Заказчик ГК", "Прочие договоры"]
     buyer = book["Заказчик ГК"]
     headers = [cell.value for row in buyer.iter_rows(max_row=10) for cell in row if cell.value]
-    # Шапка второго блока — как в файле: заказчик раньше исполнителя.
+    # Шапка второго блока - как в файле: заказчик раньше исполнителя.
     assert headers.index("Заказчик") < headers.index("Исполнитель")
 
     # Выгрузка читается обратно тем же разбором и даёт те же договоры.

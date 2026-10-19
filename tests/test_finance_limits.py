@@ -1,6 +1,6 @@
 """Пределы значений: отказ с объяснением вместо пятисотой и вместо тихой цифры.
 
-Каждый тест здесь — строка из стресс-прогона 21 сентября 2026, который
+Каждый тест здесь - строка из стресс-прогона 21 сентября 2026, который
 закончился пятисотой ошибкой, расхождением в копейку или экраном, обещавшим не
 то, что случится.
 """
@@ -56,7 +56,7 @@ def test_kurs_perepolnyaet_summu_v_valyute_kompanii(finance_db):
 
 
 def test_dolya_kopeyki_okruglyaetsya_odinakovo_vezde(finance_db):
-    """0.005 весило копейку в сводке и ноль в `amount_base` — выписка расходилась."""
+    """0.005 весило копейку в сводке и ноль в `amount_base` - выписка расходилась."""
     with finance_session() as session:
         space = service.ensure_workspace(session)
         operation = _income(session, space, amount=Decimal("0.015"))
@@ -83,7 +83,7 @@ def test_god_s_opechatkoy_otkaz(finance_db, year):
 
 
 def test_pravka_ozhidaniya_bez_scheta(finance_db):
-    """Ожидание без счёта разрешено — и правка не должна проверять его как факт."""
+    """Ожидание без счёта разрешено - и правка не должна проверять его как факт."""
     with finance_session() as session:
         space = service.ensure_workspace(session)
         plan = _income(session, space, status="plan", account_to_id=None, paid_at=date(2026, 12, 1))
@@ -114,7 +114,7 @@ def test_schet_faktura_ogromnaya_tsena(finance_db):
 
 
 def test_povtorenie_s_otritsatelnym_dnem(finance_db):
-    """День −5 записывался приведённым, а первая дата считалась из сырого — 500."""
+    """День −5 записывался приведённым, а первая дата считалась из сырого - 500."""
     with finance_session() as session:
         space = service.ensure_workspace(session)
         rule = recurring.create(
@@ -143,7 +143,7 @@ def test_predprosmotr_povtora_schitaet_povtory(finance_db):
 
 
 def test_itogi_zhurnala_po_vsemu_filtru_a_ne_po_stranitse(finance_db):
-    """Карточки над журналом складывали 250 строк страницы — врали в 20 раз."""
+    """Карточки над журналом складывали 250 строк страницы - врали в 20 раз."""
     with finance_session() as session:
         space = service.ensure_workspace(session)
         for day in range(1, 11):
@@ -157,7 +157,7 @@ def test_itogi_zhurnala_po_vsemu_filtru_a_ne_po_stranitse(finance_db):
 
 
 def test_vygruzka_v_excel_skhoditsya_s_itogami(finance_db):
-    """Файл открывается, суммы — числа, приход минус расход — как в отчёте."""
+    """Файл открывается, суммы - числа, приход минус расход - как в отчёте."""
     import io
 
     from openpyxl import load_workbook
@@ -188,7 +188,7 @@ def test_vygruzka_v_excel_skhoditsya_s_itogami(finance_db):
 
 
 def test_nachalnyy_ostatok_menyaetsya_i_otmenyaetsya(finance_db):
-    """Остаток ставился только при создании счёта — у заведённых сами не менялся."""
+    """Остаток ставился только при создании счёта - у заведённых сами не менялся."""
     from app.finance import history
 
     with finance_session() as session:
@@ -205,7 +205,7 @@ def test_nachalnyy_ostatok_menyaetsya_i_otmenyaetsya(finance_db):
 
 
 def test_sverka_vypiski_s_bankom(finance_db):
-    """Остатки банка против разобранных строк; начальный остаток — из выписки."""
+    """Остатки банка против разобранных строк; начальный остаток - из выписки."""
     from app.finance.importing import DateReading, ParsedRow, Preview
 
     rows = [
@@ -224,7 +224,7 @@ def test_sverka_vypiski_s_bankom(finance_db):
         assert out["file_net"] == "749.50"
         assert out["gap"] == "0.00"
         assert out["can_set_start"] is True
-        # Раньше периода по счёту была операция — остаток на начало задан ею,
+        # Раньше периода по счёту была операция - остаток на начало задан ею,
         # и начальный остаток из выписки уже не предлагается.
         _income(session, space, paid_at=date(2026, 8, 1), amount=Decimal("500"))
         again = service.reconcile_statement(session, space, preview)
@@ -234,7 +234,7 @@ def test_sverka_vypiski_s_bankom(finance_db):
 
 
 def test_kaspi_gold_ostatki_po_date_a_ne_po_poryadku():
-    """Первое «Доступно на» в шапке — остаток на КОНЕЦ, а бралось за начало."""
+    """Первое «Доступно на» в шапке - остаток на КОНЕЦ, а бралось за начало."""
     from app.services.document_service import _extract_pdf_metadata
 
     lines = [

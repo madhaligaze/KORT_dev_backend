@@ -4,12 +4,12 @@
 ───────────────────────────
 * Отбор без условий у неглавного листа не отбирает ничего. Раньше пустое
   правило значило «все договоры», и блок, которому правило не подобралось,
-  показывал весь реестр (лист на 192 строки — пять тысяч договоров).
+  показывал весь реестр (лист на 192 строки - пять тысяч договоров).
 * Предложенное правило, которое тянет в лист много лишнего, без человека не
   принимается: раздел «Правила листов» блокирует «Завести», пока по блоку нет
-  решения — принять как есть, своё правило или пустой блок.
+  решения - принять как есть, своё правило или пустой блок.
 * Строка листа с тем же номером, что у чужого договора, но без единой общей
-  стороны, — отдельный договор, а не «совпало по номеру»: иначе она
+  стороны, - отдельный договор, а не «совпало по номеру»: иначе она
   приклеивалась к чужому договору и не заводилась вовсе.
 * Партия получает один номер изменения, взятый в конце, а разобранные строки
   после заведения не хранятся.
@@ -116,8 +116,8 @@ def _wide_book() -> bytes:
     """Блок, которому правило подбирается только «вид ∈ {Иное}»: лишних много.
 
     В блоке «Заказчик ГК» наше юрлицо стоит то заказчиком, то исполнителем
-    (так бывает в живом реестре), предметов шесть — больше, чем правило
-    перечисляет, — и признаков, общих для строк блока и редких в реестре, нет,
+    (так бывает в живом реестре), предметов шесть - больше, чем правило
+    перечисляет, - и признаков, общих для строк блока и редких в реестре, нет,
     кроме вида «Иное». А «Иное» в главном листе у двенадцати агентских.
     """
     main = [_row(n, "BBC", f"ТОО Клиент {n}", f"№ АГ-{n}", "Иное", "Агентский") for n in range(1, 13)]
@@ -189,7 +189,7 @@ def test_prinyat_kak_est_zapisyvaet_pravilo_v_reshenie(finance_db):
         decisions["rules"] = {"Заказчик ГК#0": {"action": "accept"}}
         batch = importer.decide(session, workspace, batch.id, decisions)
         suggested = next(item for item in _section(batch, "rules")["items"] if item["block"] == "Заказчик ГК#0")
-        # Принятое правило записано в решение — следующее решение его не подменит.
+        # Принятое правило записано в решение - следующее решение его не подменит.
         frozen = batch.decisions["rules"]["Заказчик ГК#0"]
         assert frozen["action"] == "accept" and frozen["filter"] == suggested["filter"]
         assert suggested["source"] == "accepted" and not suggested["needs_decision"]
@@ -199,7 +199,7 @@ def test_prinyat_kak_est_zapisyvaet_pravilo_v_reshenie(finance_db):
         listing = service.list_all(session, workspace, FULL)
         view = next(v for v in service.Registry(session, workspace).views if v.title == "Заказчик ГК")
         members = [item for item in listing["contracts"] if any(m["view"] == view.key for m in item["views"])]
-        # Принято как есть — с лишними: 6 строк листа и 12 агентских.
+        # Принято как есть - с лишними: 6 строк листа и 12 агентских.
         assert suggested["extra"] == 12 and len(members) == 18
 
 
@@ -225,7 +225,7 @@ def test_pustoy_blok_i_svoe_pravilo(finance_db):
         view = next(v for v in registry.views if v.title == "Заказчик ГК")
         assert view.blocks[0]["filter"] == {"any": []}
         listing = service.list_all(session, workspace, FULL)
-        # Пустой блок — пустой лист, а не весь реестр.
+        # Пустой блок - пустой лист, а не весь реестр.
         assert not [item for item in listing["contracts"] if any(m["view"] == view.key for m in item["views"])]
         assert all(any(m["view"] == "main" for m in item["views"]) for item in listing["contracts"])
         data = export.build(session, workspace, FULL, ACTOR)
@@ -249,7 +249,7 @@ def test_tochnoe_pravilo_ne_sprashivaet(finance_db):
 
 
 def test_porog_pravila():
-    # Пять строк или десятая часть листа — что меньше.
+    # Пять строк или десятая часть листа - что меньше.
     assert [importer.rule_limit(n) for n in (0, 1, 9, 10, 21, 49, 50, 341, 20000)] == [0, 0, 0, 1, 2, 4, 5, 5, 5]
 
 
@@ -264,13 +264,13 @@ def test_nomer_bez_obshchey_storony_ne_skleivaetsya(finance_db):
         _row(4, "BBC", "ТОО Дельта", "№ 10", "Разовая услуга", "Аудит"),
     ]
     sheet = [
-        # Тот же номер, стороны переставлены — тот же договор.
+        # Тот же номер, стороны переставлены - тот же договор.
         _row(1, "ТОО Альфа", "BBC", "№ 7", "Разовая услуга", "Аудит"),
-        # Тот же номер и заказчик, исполнитель другой — тот же договор (сменили ТОО).
+        # Тот же номер и заказчик, исполнитель другой - тот же договор (сменили ТОО).
         _row(2, "BBCA", "ТОО Бета", "№ 8", "Разовая услуга", "Аудит"),
-        # Тот же номер, ни одной общей стороны — другой договор.
+        # Тот же номер, ни одной общей стороны - другой договор.
         _row(3, "ТОО Продавец", "ИП Покупатель", "№ 9", "Разовая услуга", "Аудит"),
-        # Тот же номер, общая только наша сторона — она почти в каждом договоре,
+        # Тот же номер, общая только наша сторона - она почти в каждом договоре,
         # это не довод: другой договор.
         _row(4, "BBC", "ТОО Эпсилон", "№ 10", "Разовая услуга", "Аудит"),
     ]
@@ -288,7 +288,7 @@ def test_nomer_bez_obshchey_storony_ne_skleivaetsya(finance_db):
         assert [item["number"] for item in orphans["items"]] == ["№ 9", "№ 10"]
         assert batch.report["totals"]["create"] == 6
 
-        # «Это он» — человек сводит строку с договором главного листа.
+        # «Это он» - человек сводит строку с договором главного листа.
         ref = orphans["number_only"][0]["ref"]
         batch = importer.decide(session, workspace, batch.id, {"loose": {ref: "same"}})
         orphans = _section(batch, "orphans")
@@ -331,7 +331,7 @@ def test_otkaz_stroki_ne_zavodit_ee_storony(finance_db):
     main = [_row(1, "BBC", "ТОО Альфа", "№ 1", "Разовая услуга", "Аудит"),
             _row(2, "BBC", "ТОО Бета", "№ 2", "Разовая услуга", "Аудит")]
     bad = _row(3, "BBC", "ТОО Одноразовый", "№ 3", "Разовая услуга", "Аудит")
-    bad[13] = "-500"  # оплачено: отрицательная сумма — строка не заводится
+    bad[13] = "-500"  # оплачено: отрицательная сумма - строка не заводится
     main.append(bad)
     with finance_session() as session:
         workspace = finance_service.ensure_workspace(session)
@@ -350,7 +350,7 @@ _PAREN = re.compile(r"\([^)]*\)", re.S)
 
 
 def _reference_match(text, catalog):
-    """Прежний перебор — эталон для быстрого поиска."""
+    """Прежний перебор - эталон для быстрого поиска."""
     full = norm(text)
     if not full:
         return None, "empty", []
@@ -375,7 +375,7 @@ def _reference_match(text, catalog):
 def test_poisk_shapki_kak_perebor():
     extra = [
         SimpleNamespace(key="istochnik", title="Источник клиента", names=["источник клиента", "источник"]),
-        # Своё поле, чьё написание — начало системного: мягкий ярус двусмысленен.
+        # Своё поле, чьё написание - начало системного: мягкий ярус двусмысленен.
         SimpleNamespace(key="dogovor_x", title="Договор", names=["договор", "дата договора (скан)"]),
         SimpleNamespace(key="n2", title="Сумма", names=["сумма"]),
     ]
@@ -434,14 +434,14 @@ def test_vygruzka_potokom_derzhit_oformlenie(finance_db):
     rows = [[cell.value for cell in row] for row in other.iter_rows()]
     titles = [i for i, row in enumerate(rows) if row[1] in ("АРЕНДА", "АУДИТ")]
     assert [rows[i][1] for i in titles] == ["АРЕНДА", "АУДИТ"]
-    # Блок: название, шапка, три договора; между блоками — две пустые строки.
+    # Блок: название, шапка, три договора; между блоками - две пустые строки.
     assert titles[1] - titles[0] == 1 + 1 + 3 + 2
     assert other.freeze_panes is None
 
 
 def test_vygruzka_rezhet_stroki_i_kolonki_po_pravam(finance_db):
-    """Потоковая книга выгружает то же, что видит человек: скрытое поле — без
-    колонки, договоры чужих юрлиц — без строк."""
+    """Потоковая книга выгружает то же, что видит человек: скрытое поле - без
+    колонки, договоры чужих юрлиц - без строк."""
     main = [_row(n, "BBC", f"ТОО Клиент {n}", f"№ B-{n}", "Разовая услуга", "Аудит") for n in range(1, 4)]
     main += [_row(10 + n, "BBCA", f"ТОО Арендатор {n}", f"№ R-{n}", "Аренда", "Аренда нежилого помещения") for n in range(1, 3)]
     with finance_session() as session:

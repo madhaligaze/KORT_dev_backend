@@ -1,12 +1,12 @@
 """Люди компании: отделы, сотрудники, учётки, сброс и блокировка.
 
-Сотрудник и учётка — разные вещи
+Сотрудник и учётка - разные вещи
 ────────────────────────────────
-Сотрудник (`employees`) — человек компании: ФИО, отдел, должность. Он бывает
+Сотрудник (`employees`) - человек компании: ФИО, отдел, должность. Он бывает
 ответственным в договорах, даже если в систему не входит. Учётка
-(`users` + `memberships`) — только у тех, кому дан вход. Поэтому кабинет
-работает с сотрудником, а доступ — его необязательная часть: «+ Сотрудник»
-без галочки заводит человека в справочник, с галочкой — ещё и учётку,
+(`users` + `memberships`) - только у тех, кому дан вход. Поэтому кабинет
+работает с сотрудником, а доступ - его необязательная часть: «+ Сотрудник»
+без галочки заводит человека в справочник, с галочкой - ещё и учётку,
 которая ждёт пароль 72 часа.
 
 У каждого, кто состоит в компании, запись сотрудника есть всегда
@@ -15,10 +15,10 @@
 
 Кто кого меняет
 ───────────────
-* владелец — всех, кроме себя как владельца; пароль владельца сбрасывается
+* владелец - всех, кроме себя как владельца; пароль владельца сбрасывается
   только командой на сервере (`python -m app.finance.cli reset-password`);
-* администратор и сотрудник с правом «Сотрудники и права: правит» —
-  сотрудников; администраторов — нет;
+* администратор и сотрудник с правом «Сотрудники и права: правит» -
+  сотрудников; администраторов - нет;
 * администратора назначает и снимает только владелец.
 
 Иначе администратор сбросил бы пароль владельцу, сам задал бы новый в окне
@@ -44,21 +44,21 @@ from app.finance.contracts.models import Department, Employee
 from app.finance.models import POSITION_STEP, Workspace
 
 
-#: Пояс компании — для «ждёт пароль до 26.09, 18:40» в журнале. Тот же, что
+#: Пояс компании - для «ждёт пароль до 26.09, 18:40» в журнале. Тот же, что
 #: у реестра договоров (`contracts/service.COMPANY_TZ`).
 _COMPANY_TZ = timezone(timedelta(hours=5))
 
 
 class PeopleError(Exception):
-    """Отказ с текстом для человека — 400."""
+    """Отказ с текстом для человека - 400."""
 
 
 class Forbidden(PeopleError):
-    """Действие не открыто — 403."""
+    """Действие не открыто - 403."""
 
 
 class NotFound(PeopleError):
-    """Нет такого — или он чужой. Ответ одинаковый — 404."""
+    """Нет такого - или он чужой. Ответ одинаковый - 404."""
 
 
 def _now() -> datetime:
@@ -77,7 +77,7 @@ def _iso(value: datetime | None) -> str | None:
 
 
 def short_name(full_name: str) -> str:
-    """«Ермеков Нурболат» → «Ермеков Н.» — как в строках журнала и договорах."""
+    """«Ермеков Нурболат» → «Ермеков Н.» - как в строках журнала и договорах."""
     parts = (full_name or "").split()
     if len(parts) >= 2:
         return f"{parts[0]} {parts[1][0]}."
@@ -104,9 +104,9 @@ def _free_name(
 ) -> tuple[str, str]:
     """Имя без столкновения с другим сотрудником той же компании.
 
-    Имя уникально — по нему договоры находят ответственного. Совпало при
-    заведении учётки — к имени дописывается логин, а не угадывается, что это
-    тот же человек: «не угадывать» — правило раздела.
+    Имя уникально - по нему договоры находят ответственного. Совпало при
+    заведении учётки - к имени дописывается логин, а не угадывается, что это
+    тот же человек: «не угадывать» - правило раздела.
     """
     candidates = [name, f"{name} · {login}" if login else "", f"{name} · {uuid.uuid4().hex[:4]}"]
     for candidate in candidates:
@@ -124,7 +124,7 @@ def _free_name(
 
 
 def ensure_employee(session: Session, workspace_id: uuid.UUID, user: FinanceUser) -> Employee:
-    """Запись сотрудника для учётки — найти или завести."""
+    """Запись сотрудника для учётки - найти или завести."""
     existing = session.scalar(
         sa.select(Employee).where(Employee.workspace_id == workspace_id, Employee.user_id == user.id)
     )
@@ -180,7 +180,7 @@ def rename_employee(session: Session, employee: Employee, full_name: str) -> Non
         )
     )
     if clash is not None:
-        raise PeopleError("Сотрудник с таким именем уже есть — уточните ФИО")
+        raise PeopleError("Сотрудник с таким именем уже есть - уточните ФИО")
     employee.full_name = clean
     employee.normalized_name = key
     session.flush()
@@ -206,6 +206,26 @@ def _check_people(member: auth.Member, level: str = "edit") -> None:
             if level == "edit"
             else "Сотрудники вам не открыты"
         )
+
+
+def _check_reach(member: auth.Member, employee: Employee) -> None:
+    """Начальник отдела меняет только людей своего отдела (`Rights.reaches`)."""
+    if not member.rights.reaches(employee.department_id):
+        raise Forbidden("Сотрудник другого отдела - им управляет администратор")
+
+
+def _check_departments(member: auth.Member) -> None:
+    """Отделы заводит и переименовывает администратор, а не начальник отдела."""
+    _check_people(member)
+    if member.rights.people_department_only:
+        raise Forbidden("Отделы заводит и меняет администратор")
+
+
+def reach_department(member: auth.Member) -> tuple[bool, uuid.UUID | None]:
+    """Чьих людей видит человек: `(только отдел?, какой отдел)`."""
+    if member.rights.people_department_only:
+        return True, member.rights.department_id
+    return False, None
 
 
 def _check_manage(member: auth.Member, target: FinanceMembership | None) -> None:
@@ -258,7 +278,7 @@ def _event(
 
 
 def _schema_changed(session: Session, workspace_id: uuid.UUID) -> None:
-    """Отделы и права видны в схеме реестра — открытые вкладки перечитают её."""
+    """Отделы и права видны в схеме реестра - открытые вкладки перечитают её."""
     from app.finance.contracts.fields import bump
 
     bump(session, workspace_id, "schema")
@@ -275,7 +295,14 @@ def department_out(item: Department, count: int = 0) -> dict[str, Any]:
     }
 
 
-def list_departments(session: Session, workspace_id: uuid.UUID, *, include_archived: bool = False) -> list[dict[str, Any]]:
+def list_departments(
+    session: Session,
+    workspace_id: uuid.UUID,
+    *,
+    include_archived: bool = False,
+    only: tuple[bool, uuid.UUID | None] = (False, None),
+) -> list[dict[str, Any]]:
+    """Отделы со счётчиками. `only` - у начальника отдела только свой."""
     counts = dict(
         session.execute(
             sa.select(Employee.department_id, sa.func.count())
@@ -286,6 +313,10 @@ def list_departments(session: Session, workspace_id: uuid.UUID, *, include_archi
     query = sa.select(Department).where(Department.workspace_id == workspace_id)
     if not include_archived:
         query = query.where(Department.archived_at.is_(None))
+    if only[0]:
+        if only[1] is None:
+            return []
+        query = query.where(Department.id == only[1])
     return [
         department_out(item, int(counts.get(item.id, 0)))
         for item in session.scalars(query.order_by(Department.position, Department.code))
@@ -297,7 +328,7 @@ def _clean_code(code: Any) -> tuple[str, str]:
     if not clean:
         raise PeopleError("У отдела должен быть код: ЮО, ОБО, ФО")
     if len(clean) > 12:
-        raise PeopleError("Код отдела — коротко, до 12 знаков")
+        raise PeopleError("Код отдела - коротко, до 12 знаков")
     return clean, norm(clean)
 
 
@@ -309,7 +340,7 @@ def get_department(session: Session, workspace_id: uuid.UUID, department_id: uui
 
 
 def create_department(session: Session, workspace: Workspace, member: auth.Member, data: dict[str, Any]) -> Department:
-    _check_people(member)
+    _check_departments(member)
     code, key = _clean_code(data.get("code"))
     if session.scalar(
         sa.select(Department.id).where(Department.workspace_id == workspace.id, Department.normalized_name == key)
@@ -336,7 +367,7 @@ def create_department(session: Session, workspace: Workspace, member: auth.Membe
 def update_department(
     session: Session, workspace: Workspace, member: auth.Member, department_id: uuid.UUID, data: dict[str, Any]
 ) -> Department:
-    _check_people(member)
+    _check_departments(member)
     item = get_department(session, workspace.id, department_id)
     before = {"code": item.code, "title": item.title, "archived": item.archived_at is not None}
     if "code" in data and data["code"] is not None:
@@ -365,7 +396,7 @@ def update_department(
                 or 0
             )
             if staff:
-                raise PeopleError(f"В отделе сотрудников: {staff} — сначала переведите их в другой отдел")
+                raise PeopleError(f"В отделе сотрудников: {staff} - сначала переведите их в другой отдел")
         item.archived_at = _now() if data["archived"] else None
     session.flush()
     after = {"code": item.code, "title": item.title, "archived": item.archived_at is not None}
@@ -430,13 +461,24 @@ def _employee_out(
 
 
 def list_employees(
-    session: Session, workspace_id: uuid.UUID, *, include_archived: bool = False
+    session: Session,
+    workspace_id: uuid.UUID,
+    *,
+    include_archived: bool = False,
+    only: tuple[bool, uuid.UUID | None] = (False, None),
 ) -> list[dict[str, Any]]:
-    """Все сотрудники компании — пятью запросами на любое их число."""
+    """Все сотрудники компании - пятью запросами на любое их число.
+
+    `only` - у начальника отдела только люди его отдела.
+    """
     ensure_member_employees(session, workspace_id)
     query = sa.select(Employee).where(Employee.workspace_id == workspace_id)
     if not include_archived:
         query = query.where(Employee.archived_at.is_(None))
+    if only[0]:
+        if only[1] is None:
+            return []
+        query = query.where(Employee.department_id == only[1])
     employees = list(session.scalars(query.order_by(Employee.position, Employee.full_name)))
     user_ids = [item.user_id for item in employees if item.user_id]
     users: dict[uuid.UUID, FinanceUser] = {}
@@ -507,23 +549,32 @@ def _clean_department(session: Session, workspace_id: uuid.UUID, raw: Any) -> uu
         raise PeopleError("Отдел указан неверно") from exc
     department = get_department(session, workspace_id, department_id)
     if department.archived_at is not None:
-        raise PeopleError("Этот отдел в корзине — сначала восстановите его")
+        raise PeopleError("Этот отдел в корзине - сначала восстановите его")
     return department.id
 
 
 def create_employee(session: Session, workspace: Workspace, member: auth.Member, data: dict[str, Any]) -> Employee:
     """«+ Сотрудник»: человек в справочник и, с номером, учётка по номеру.
 
-    Номер — это логин и ничего больше: у записи сотрудника своего телефона нет.
+    Номер - это логин и ничего больше: у записи сотрудника своего телефона нет.
     Поэтому номер без явного `access` открывает вход, а номер при `access:
-    false` — отказ. Раньше такой номер молча выбрасывался: человека заводили с
-    телефоном, а войти он не мог — «Асхат» 26.09.
+    false` - отказ. Раньше такой номер молча выбрасывался: человека заводили с
+    телефоном, а войти он не мог - «Асхат» 26.09.
 
     Тёзка из архива возвращается, а не упирается в «такое имя уже есть»:
     имя в компании уникально, и без этого убранного по ошибке человека нельзя
     было ни вернуть, ни завести заново.
     """
     _check_people(member)
+    if member.rights.people_department_only:
+        # Начальник отдела заводит людей только к себе: отдел ставится сам.
+        own = member.rights.department_id
+        if own is None:
+            raise Forbidden("У вас нет отдела - сотрудников заводит администратор")
+        asked = data.get("department_id")
+        if asked not in (None, "") and str(asked) != str(own):
+            raise Forbidden("Сотрудника в другой отдел заводит администратор")
+        data = {**data, "department_id": str(own)}
     full_name = str(data.get("full_name") or "").strip()
     if len(full_name) < 2:
         raise PeopleError("Укажите ФИО")
@@ -538,7 +589,9 @@ def create_employee(session: Session, workspace: Workspace, member: auth.Member,
         sa.select(Employee).where(Employee.workspace_id == workspace.id, Employee.normalized_name == key)
     )
     if existing is not None and existing.archived_at is None:
-        raise PeopleError("Сотрудник с таким именем уже есть — уточните ФИО")
+        raise PeopleError("Сотрудник с таким именем уже есть - уточните ФИО")
+    if existing is not None and not member.rights.reaches(existing.department_id) and existing.department_id is not None:
+        raise Forbidden("Человек с этим именем был в другом отделе - вернуть его может администратор")
     if existing is not None:
         employee = existing
         employee.archived_at = None
@@ -570,9 +623,9 @@ def create_employee(session: Session, workspace: Workspace, member: auth.Member,
 
 
 def _free_phone(session: Session, workspace_id: uuid.UUID, clean: str, user: FinanceUser | None) -> None:
-    """Номер свободен для `user` — или отказ, который говорит правду.
+    """Номер свободен для `user` - или отказ, который говорит правду.
 
-    Учётка, у которой не осталось ни одного членства, — след закрытого доступа
+    Учётка, у которой не осталось ни одного членства, - след закрытого доступа
     или архива. Войти по ней нельзя, а номер она держала навсегда, и новый
     человек с этим номером получал «занят в другой компании», хотя другой
     компании не было. Такой номер отпускается.
@@ -589,7 +642,7 @@ def _free_phone(session: Session, workspace_id: uuid.UUID, clean: str, user: Fin
         raise PeopleError("Этот номер занят в другой компании")
     holder.phone = None
     if not holder.email_normalized:
-        # Логина не осталось — учётка закрыта (ревизия 0021). Вернуть ей вход
+        # Логина не осталось - учётка закрыта (ревизия 0021). Вернуть ей вход
         # можно «Открыть вход» с новым номером: `create_account` снова
         # переведёт её в ожидание пароля.
         holder.status = "blocked"
@@ -610,12 +663,13 @@ def create_account(
 ) -> FinanceUser:
     """Открыть вход: учётка по номеру ждёт пароль 72 часа."""
     _check_people(member)
+    _check_reach(member, employee)
     if role not in ("employee", "admin"):
-        raise PeopleError("Роль — сотрудник или администратор")
+        raise PeopleError("Роль - сотрудник или администратор")
     if role == "admin" and member.role != "owner":
         raise Forbidden("Администратора назначает владелец компании")
     if employee.archived_at is not None:
-        raise PeopleError("Сотрудник в корзине — сначала восстановите его в личном кабинете")
+        raise PeopleError("Сотрудник в корзине - сначала восстановите его в личном кабинете")
     existing = _membership(session, workspace.id, employee.user_id)
     if existing is not None:
         raise PeopleError("У сотрудника уже есть доступ")
@@ -644,7 +698,7 @@ def create_account(
         session.flush()
         employee.user_id = user.id
     else:
-        # Доступ открывают снова тому, у кого он был: учётка та же. Пароль —
+        # Доступ открывают снова тому, у кого он был: учётка та же. Пароль -
         # новый, в окне ожидания, как при первом открытии: раньше прежний
         # пароль молча начинал действовать снова, а карточка писала «ждёт
         # пароль до…». Учётку, которая состоит и в другой компании, не трогаем:
@@ -652,7 +706,7 @@ def create_account(
         others = _other_companies(session, user.id, workspace.id)
         if clean is not None and clean != user.phone:
             if others:
-                raise Forbidden("Учётка состоит и в другой компании — номер меняет сам человек")
+                raise Forbidden("Учётка состоит и в другой компании - номер меняет сам человек")
             user.phone = clean
         if not others or user.status == "pending" or not user.password_hash:
             user.password_hash = None
@@ -680,6 +734,7 @@ def update_employee(
     employee = get_employee(session, workspace.id, employee_id)
     target = _membership(session, workspace.id, employee.user_id)
     _check_manage(member, target)
+    _check_reach(member, employee)
     user = session.get(FinanceUser, employee.user_id) if employee.user_id else None
     before: dict[str, Any] = {}
     after: dict[str, Any] = {}
@@ -697,6 +752,8 @@ def update_employee(
             employee.job_title = value
     if "department_id" in data:
         value = _clean_department(session, workspace.id, data.get("department_id"))
+        if value != employee.department_id and member.rights.people_department_only:
+            raise Forbidden("Перевести в другой отдел может администратор")
         if value != employee.department_id:
             before["department_id"] = str(employee.department_id) if employee.department_id else None
             after["department_id"] = str(value) if value else None
@@ -708,14 +765,14 @@ def update_employee(
             raise PeopleError(str(exc)) from exc
         if clean != user.phone:
             if _other_companies(session, user.id, workspace.id):
-                raise Forbidden("Учётка состоит и в другой компании — номер меняет сам человек")
+                raise Forbidden("Учётка состоит и в другой компании - номер меняет сам человек")
             _free_phone(session, workspace.id, clean, user)
             before["phone"], after["phone"] = user.phone, clean
             user.phone = clean
     if data.get("role") is not None and target is not None and data["role"] != target.role:
         role = data["role"]
         if role not in ("employee", "admin"):
-            raise PeopleError("Роль — сотрудник или администратор")
+            raise PeopleError("Роль - сотрудник или администратор")
         if member.role != "owner":
             raise Forbidden("Администратора назначает и снимает только владелец")
         if target.role == "owner" or target.user_id == member.user_id:
@@ -755,10 +812,11 @@ def _remove_access(
 
 
 def archive_employee(session: Session, workspace: Workspace, member: auth.Member, employee_id: uuid.UUID) -> Employee:
-    """Удалить сотрудника — в корзину, с доступом. Из базы не стирается: он в договорах."""
+    """Удалить сотрудника - в корзину, с доступом. Из базы не стирается: он в договорах."""
     employee = get_employee(session, workspace.id, employee_id)
     target = _membership(session, workspace.id, employee.user_id)
     _check_manage(member, target)
+    _check_reach(member, employee)
     if target is not None:
         _remove_access(session, workspace, member, employee, target)
     employee.archived_at = _now()
@@ -777,8 +835,19 @@ def _account_of(session: Session, workspace_id: uuid.UUID, employee: Employee) -
     return user, membership
 
 
-def reset_password(session: Session, workspace: Workspace, member: auth.Member, employee_id: uuid.UUID) -> Employee:
-    """Сброс: старый пароль не действует, сеансы закрыты, учётка снова ждёт пароль."""
+def reset_password(
+    session: Session, workspace: Workspace, member: auth.Member, employee_id: uuid.UUID
+) -> str | None:
+    """Сброс: старый пароль не действует, сеансы закрыты.
+
+    Учётка с телефоном снова ждёт пароль 72 часа - человек задаёт его сам по
+    номеру. Учётка без телефона входит по почте (администратор, сотрудник по
+    приглашению на почту): ей выдаётся временный пароль, его администратор
+    передаёт лично, а при входе человек задаёт свой (`must_change_password`).
+    До 01.10.2026 такой сброс отвечал «сначала впишите телефон», и учётке по
+    почте, забывшей пароль, помочь было нечем. Возвращает временный пароль -
+    один раз, в ответе; у учётки с телефоном - `None`.
+    """
     employee = get_employee(session, workspace.id, employee_id)
     user, target = _account_of(session, workspace.id, employee)
     if target.role == "owner":
@@ -786,26 +855,40 @@ def reset_password(session: Session, workspace: Workspace, member: auth.Member, 
     if user.id == member.user_id:
         raise PeopleError("Свой пароль меняется в профиле")
     _check_manage(member, target)
+    _check_reach(member, employee)
     if _other_companies(session, user.id, workspace.id):
-        raise Forbidden("Учётка состоит и в другой компании — сбросить её пароль отсюда нельзя")
-    if not user.phone:
-        raise PeopleError("Новый пароль задаётся по номеру — сначала впишите сотруднику телефон")
-    user.password_hash = None
-    user.status = "pending"
-    user.pending_until = _now() + auth.PENDING_WINDOW
-    user.must_change_password = False
+        raise Forbidden("Учётка состоит и в другой компании - сбросить её пароль отсюда нельзя")
+    temporary: str | None = None
+    if user.phone:
+        user.password_hash = None
+        user.status = "pending"
+        user.pending_until = _now() + auth.PENDING_WINDOW
+        user.must_change_password = False
+    elif user.email_normalized:
+        temporary = auth.temporary_password()
+        user.password_hash = auth.hash_password(temporary)
+        user.status = "active"
+        user.pending_until = None
+        user.must_change_password = True
+    else:
+        raise PeopleError("Войти этой учётке нечем - ни телефона, ни почты: впишите сотруднику телефон")
     closed = auth.end_sessions(session, user.id)
     resolved = notifications.resolve_about(session, workspace.id, user.id, by=member.user_id)
-    auth._forget_failures(f"phone:{user.phone}")
+    if user.phone:
+        auth._forget_failures(f"phone:{user.phone}")
+    if user.email_normalized:
+        auth._forget_failures(user.email_normalized)
     session.flush()
-    until = _aware(user.pending_until)
-    _event(
-        session, workspace, "people.reset",
-        f"сброс пароля: {short_name(employee.full_name)} · ждёт новый до {until.astimezone(_COMPANY_TZ):%d.%m, %H:%M}",
-        employee=employee, after={"sessions_closed": closed, "requests_resolved": resolved,
-                                  "pending_until": _iso(user.pending_until)},
-    )
-    return employee
+    if temporary is None:
+        until = _aware(user.pending_until)
+        title = f"сброс пароля: {short_name(employee.full_name)} · ждёт новый до {until.astimezone(_COMPANY_TZ):%d.%m, %H:%M}"
+        after = {"sessions_closed": closed, "requests_resolved": resolved, "pending_until": _iso(user.pending_until)}
+    else:
+        # Сам временный пароль в журнал не пишется: его видит только тот, кто сбросил.
+        title = f"сброс пароля: {short_name(employee.full_name)} · выдан временный пароль для входа по почте"
+        after = {"sessions_closed": closed, "requests_resolved": resolved, "temporary": True}
+    _event(session, workspace, "people.reset", title, employee=employee, after=after)
+    return temporary
 
 
 def set_blocked(
@@ -818,6 +901,7 @@ def set_blocked(
     if target.role == "owner":
         raise Forbidden("Вход владельца не закрыть")
     _check_manage(member, target)
+    _check_reach(member, employee)
     if blocked == (target.blocked_at is not None):
         return employee
     target.blocked_at = _now() if blocked else None
@@ -836,6 +920,8 @@ def end_employee_sessions(session: Session, workspace: Workspace, member: auth.M
     employee = get_employee(session, workspace.id, employee_id)
     _user, target = _account_of(session, workspace.id, employee)
     _check_manage(member, target)
+    if target.user_id != member.user_id:
+        _check_reach(member, employee)
     keep = member.session_id if target.user_id == member.user_id else None
     closed = auth.end_sessions(session, target.user_id, workspace_id=workspace.id, keep=keep)
     session.flush()
@@ -845,10 +931,38 @@ def end_employee_sessions(session: Session, workspace: Workspace, member: auth.M
     return closed
 
 
+def end_employee_session(
+    session: Session, workspace: Workspace, member: auth.Member, employee_id: uuid.UUID, session_id: uuid.UUID
+) -> int:
+    """Закрыть один сеанс сотрудника - кнопка «Завершить» в строке «Сеансов».
+
+    До 01.10.2026 кнопка в строке звала «завершить все сеансы»: администратор
+    закрывал сеанс на потерянном телефоне, а человека выбрасывало и с рабочего
+    компьютера. Проверки - те же, что у «Завершить сеансы»; свой текущий сеанс
+    так не закрывается - для него есть «Выйти».
+    """
+    employee = get_employee(session, workspace.id, employee_id)
+    _user, target = _account_of(session, workspace.id, employee)
+    _check_manage(member, target)
+    if target.user_id != member.user_id:
+        _check_reach(member, employee)
+    row = session.get(FinanceSession, session_id)
+    if row is None or row.user_id != target.user_id or row.workspace_id != workspace.id:
+        raise NotFound("Сеанс не найден")
+    if row.id == member.session_id:
+        raise PeopleError("Это ваш сеанс - выйти можно кнопкой «Выйти»")
+    session.delete(row)
+    session.flush()
+    _event(session, workspace, "people.session_end",
+           f"сеанс завершён: {short_name(employee.full_name)}",
+           employee=employee, after={"session_id": str(session_id)})
+    return 1
+
+
 def employee_sessions(session: Session, workspace: Workspace, member: auth.Member, employee_id: uuid.UUID) -> list[dict[str, Any]]:
     """Сеансы сотрудника в этой компании.
 
-    Администратор видит сеансы сотрудников, владелец — всех; чужой и
+    Администратор видит сеансы сотрудников, владелец - всех; чужой и
     несуществующий сотрудник отвечают одинаково (урок кабинета BBC: иначе
     перебор выдавал бы, чьи это идентификаторы).
     """
@@ -859,6 +973,8 @@ def employee_sessions(session: Session, workspace: Workspace, member: auth.Membe
     if target.user_id != member.user_id:
         _check_people(member, "view")
         if target.role == "owner" or (target.role == "admin" and member.role != "owner"):
+            raise NotFound("Сотрудник не найден")
+        if not member.rights.reaches(employee.department_id):
             raise NotFound("Сотрудник не найден")
     return auth.sessions_of(session, target.user_id, current=member.session_id, workspace_id=workspace.id)
 
@@ -875,12 +991,14 @@ __all__ = [
     "department_out",
     "employee_payload",
     "employee_sessions",
+    "end_employee_session",
     "end_employee_sessions",
     "ensure_employee",
     "ensure_member_employees",
     "get_department",
     "get_employee",
     "list_departments",
+    "reach_department",
     "list_employees",
     "rename_employee",
     "reset_password",

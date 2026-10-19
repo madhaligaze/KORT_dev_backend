@@ -41,8 +41,8 @@ def _serialize_sqlite_writes(engine: Engine) -> None:
     """SQLite: каждая транзакция сразу берёт право записи (`BEGIN IMMEDIATE`).
 
     Без этого два запроса, открывшие реестр одновременно, засевали его наперегонки
-    и второй получал «database is locked» — 500 на `/contracts` при каждой свежей
-    регистрации на локальном стенде (28.09.2026). Причина — отложенные транзакции:
+    и второй получал «database is locked» - 500 на `/contracts` при каждой свежей
+    регистрации на локальном стенде (28.09.2026). Причина - отложенные транзакции:
     `SAVEPOINT` открывает транзакцию без блокировки, оба запроса читают, а потом
     оба просят запись. SQLite это взаимная блокировка, и он отказывает сразу, не
     дожидаясь `timeout`. С `BEGIN IMMEDIATE` второй просто ждёт первого, а потом
@@ -78,7 +78,7 @@ def _build_engine(url: str) -> Engine:
         url,
         future=True,
         pool_pre_ping=True,      # validate connections before use (drops stale ones)
-        pool_recycle=1800,       # recycle after 30 min — Railway closes idle connections
+        pool_recycle=1800,       # recycle after 30 min - Railway closes idle connections
         pool_size=5,
         max_overflow=10,
         pool_timeout=30,

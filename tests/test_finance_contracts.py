@@ -38,7 +38,7 @@ def finance_db(tmp_path, monkeypatch):
 
 @pytest.fixture
 def space(finance_db):
-    """Компания с двумя нашими ТОО — BBC и BBCA."""
+    """Компания с двумя нашими ТОО - BBC и BBCA."""
     with finance_session() as session:
         workspace = finance_service.ensure_workspace(session)
         setup.add_entity(session, workspace, name="BBC", code="BBC", full_name='ТОО "Big Business Consulting"')
@@ -56,7 +56,7 @@ def _make(session, space_id, actor=OWNER, **values):
 
 
 def _age(session, contract_id, days=3):
-    """Договор заведён не сегодня — правка стороны и суммы спросит режим."""
+    """Договор заведён не сегодня - правка стороны и суммы спросит режим."""
     contract = session.get(Contract, contract_id)
     contract.created_at = datetime.now(timezone.utc) - timedelta(days=days)
     session.flush()
@@ -81,7 +81,7 @@ def test_storony_po_kavychkam_i_registru_odin_kontragent(space):
         b = _make(session, space, executor="bbc", customer='ТОО "АТРИУМ ПЛЮС"', number="№61")
         assert a.customer_id == b.customer_id
         assert a.executor_id == b.executor_id
-        # Без организационной формы — другое лицо: сводит только человек.
+        # Без организационной формы - другое лицо: сводит только человек.
         c = _make(session, space, executor="BBC", customer="Атриум плюс")
         assert c.customer_id != a.customer_id
 
@@ -128,7 +128,7 @@ def test_storona_i_summa_ne_menyayutsya_molcha(space):
         with pytest.raises(service.ModeRequired) as caught:
             service.patch(session, workspace, FULL, OTHER, contract.id, {"executor": "BBC"}, known_seq=None)
         assert caught.value.fields == ["executor"]
-        # Тот же исполнитель другим написанием — не изменение, вопроса нет.
+        # Тот же исполнитель другим написанием - не изменение, вопроса нет.
         service.patch(session, workspace, FULL, OTHER, contract.id, {"executor": "bbca"}, known_seq=None)
         # Правка примечания режима не требует.
         service.patch(session, workspace, FULL, OTHER, contract.id, {"note": "перекидка"}, known_seq=None)
@@ -188,7 +188,7 @@ def test_konflikt_po_polyu_a_ne_po_zapisi(space):
         contract = _make(session, space, executor="BBC", customer="ТОО Альфа", note="a")
         seen = contract.seq
         service.patch(session, workspace, FULL, OTHER, contract.id, {"note": "b"}, known_seq=seen)
-        # Другое поле с тем же прочитанным номером — не конфликт.
+        # Другое поле с тем же прочитанным номером - не конфликт.
         service.patch(session, workspace, FULL, OWNER, contract.id, {"folder_url": "https://x"}, known_seq=seen)
         with pytest.raises(service.FieldConflict) as caught:
             service.patch(session, workspace, FULL, OWNER, contract.id, {"note": "c"}, known_seq=seen)
@@ -209,7 +209,7 @@ def test_nomer_u_drugogo_kontragenta_i_tak_i_dolzhno_byt(space):
         issue = next(i for i in {x["id"]: x for x in listing["contracts"]}[str(second.id)]["issues"]
                      if i["code"] == "number_taken")
         assert issue["acknowledged"] is True
-        # Сменили номер на другой занятый — отметка к нему не относится.
+        # Сменили номер на другой занятый - отметка к нему не относится.
         _make(session, space, executor="BBC", customer="ТОО Третий", number="№ЮО-60")
         service.patch(session, workspace, FULL, OWNER, second.id, {"number": "ЮО-60"}, known_seq=None)
         listing = service.list_all(session, workspace, FULL)
@@ -253,7 +253,7 @@ def test_list_po_predmetu_a_ne_po_vidu(space):
         assert (prochie, 0) in views[str(agent.id)]
         assert (prochie, 1) in views[str(rent.id)]
         assert (executor_gk, 0) in views[str(service_contract.id)]
-        # Агентский без нашего исполнителя «Исполнитель ГК» не ловит — вид «Иное».
+        # Агентский без нашего исполнителя «Исполнитель ГК» не ловит - вид «Иное».
         assert all(view != executor_gk for view, _ in views[str(agent.id)])
         assert all(("main", 0) in item for item in views.values())
 
@@ -286,7 +286,7 @@ def test_smysl_daty_okonchaniya_ne_skhlopyvaetsya(space):
                           type="Разовая услуга", end_date="01.04.2025")
         unclear = _make(session, space, executor="BBC", customer="ТОО В", status="действующий",
                         type="Абонентское обслуживание", end_date="01.04.2025")
-        # Статус — закрытый список: своё значение сначала добавляют в настройке,
+        # Статус - закрытый список: своё значение сначала добавляют в настройке,
         # и без смысла оно горит замечанием.
         setup.add_value(session, workspace, "status", "нужно закрыть по бух")
         odd = _make(session, space, executor="BBC", customer="ТОО Г", status="нужно закрыть по бух")
@@ -329,8 +329,8 @@ def test_udalenie_ne_uvodit_ispolzuemoe_molcha(space):
     Юрлицо с договорами удаляется (27.09.2026: ошибочное «ИП WE make» с одним
     договором не удалялось никак): договор остаётся, юрлицо перестаёт быть
     «нашим», и это видно замечанием, а из корзины оно возвращается. Статус,
-    стоящий в договорах, не удаляется — подпись стала бы идентификатором.
-    «Выручка» — системный смысл: без неё продажи выпали бы из порога НДС.
+    стоящий в договорах, не удаляется - подпись стала бы идентификатором.
+    «Выручка» - системный смысл: без неё продажи выпали бы из порога НДС.
     """
     from app.finance import trash
 

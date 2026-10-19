@@ -1,9 +1,9 @@
 """Живой режим журнала: лист «Таблица» видит правки коллег без «Перечитать».
 
-Номер изменения ставят события сессии, а не вызывающие, — поэтому набор
+Номер изменения ставят события сессии, а не вызывающие, - поэтому набор
 пишет операцию разными дорогами (форма, ячейка листа, удаление из журнала,
 удаление плана `DELETE`) и проверяет одно: каждая правка приходит в опрос с
-номером больше прежнего, удалённая — списком на снятие, и ничто не приходит
+номером больше прежнего, удалённая - списком на снятие, и ничто не приходит
 дважды после своего номера.
 """
 from __future__ import annotations
@@ -60,11 +60,11 @@ def test_novaya_i_izmenennaya_operatsiya_prihodyat_v_opros(finance_db):
         assert batch["removed"] == []
         after_create = batch["seq"]
         assert after_create > start
-        # Пустой опрос — пусто, тот же номер.
+        # Пустой опрос - пусто, тот же номер.
         again = live.changes(session, space, after_create)
         assert again == {"rows": [], "removed": [], "seq": after_create}
 
-    # Правка ячейкой листа — та же дорога, что у человека в «Таблице».
+    # Правка ячейкой листа - та же дорога, что у человека в «Таблице».
     with finance_session() as session:
         space = service.ensure_workspace(session)
         operation = session.get(Operation, first_id)
@@ -96,7 +96,7 @@ def test_udalennaya_iz_zhurnala_snimaetsya_s_lista(finance_db):
 
 
 def test_udalennaya_nasovsem_tozhe_snimaetsya(finance_db):
-    """План из счёта и повторения удаляются `DELETE` — строки нет, запись удаления есть."""
+    """План из счёта и повторения удаляются `DELETE` - строки нет, запись удаления есть."""
     with finance_session() as session:
         space = service.ensure_workspace(session)
         operation = _income(session, space, "план")
@@ -115,7 +115,7 @@ def test_udalennaya_nasovsem_tozhe_snimaetsya(finance_db):
 
 
 def test_odna_tranzaktsiya_odin_nomer_i_otkat_bez_nomera(finance_db):
-    """Много операций одной транзакцией — один номер; откаченная правка номера не двигает."""
+    """Много операций одной транзакцией - один номер; откаченная правка номера не двигает."""
     with finance_session() as session:
         space = service.ensure_workspace(session)
         seq = live.current_seq(session, space.id)

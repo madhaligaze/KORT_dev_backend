@@ -3,9 +3,9 @@
 Набор написан после 22 сентября 2026: три настоящие Excel-выписки Kaspi
 Business (счета трёх ТОО) не заводились ни одной строкой. Нумерация колонок
 «1 2 3 … 9» под шапкой становилась операцией от 1 января 1900 года, подпись
-банка под таблицей — отложенными строками, счёт не спрашивался, а «Перевод на
+банка под таблицей - отложенными строками, счёт не спрашивался, а «Перевод на
 Депозит» лёг бы расходом на 1,2 млн. Тесты названы по симптому; данные в них
-вымышленные — личные выписки в репозиторий не кладутся.
+вымышленные - личные выписки в репозиторий не кладутся.
 """
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ OWNER_BIN = "990140001234"
 
 @pytest.fixture
 def finance_db(tmp_path, monkeypatch):
-    """Своя база на прогон — см. объяснение в `test_finance_import.py`."""
+    """Своя база на прогон - см. объяснение в `test_finance_import.py`."""
     from sqlalchemy import create_engine
 
     from app.finance import db as finance_db_module
@@ -50,7 +50,7 @@ def workspace(finance_db):
 
 
 def kaspi_business(ops, *, opening=0, closing=200000, number=KASPI):
-    """Выписка Kaspi Business в Excel — как её отдаёт банк."""
+    """Выписка Kaspi Business в Excel - как её отдаёт банк."""
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.append([])
@@ -99,7 +99,7 @@ OPS = [
 
 
 def test_nomer_scheta_v_vypiske_sam_nahodit_schet():
-    """Номер счёта из шапки выписки записан у счёта — вопроса нет, строки готовы."""
+    """Номер счёта из шапки выписки записан у счёта - вопроса нет, строки готовы."""
     preview = analyze(
         kaspi_business(OPS),
         "Выписка_по_счету.xlsx",
@@ -114,7 +114,7 @@ def test_nomer_scheta_v_vypiske_sam_nahodit_schet():
 
 
 def test_numeraciya_kolonok_i_podpis_banka_ne_operacii():
-    """«1 2 3 … 9» и «Отчёт сформирован…» — пропущены, а не отложены."""
+    """«1 2 3 … 9» и «Отчёт сформирован…» - пропущены, а не отложены."""
     preview = analyze(kaspi_business(OPS), "в.xlsx", ["Kaspi ТОО"], default_account="Kaspi ТОО")
     skipped = {row.line: row.problems[0]["text"] for row in preview.rows if row.state == "skipped"}
     assert "нумерация колонок" in skipped[13]
@@ -135,12 +135,12 @@ def test_perevod_na_svoy_depozit_ne_rashod():
     assert transfer.values["kind"] == "transfer"
     assert transfer.values["account_from"] == "Kaspi ТОО"
     assert transfer.values["account_to"] == "Депозит ТОО"
-    # Своя же компания — не контрагент.
+    # Своя же компания - не контрагент.
     assert transfer.values["counterparty"] is None
 
 
 def test_depozita_net_v_spravochnike_stroka_zhdyot_s_predlozheniem():
-    """Свой счёт, которого нет, — не расход и не молчание, а готовое предложение."""
+    """Свой счёт, которого нет, - не расход и не молчание, а готовое предложение."""
     preview = analyze(kaspi_business(OPS), "в.xlsx", ["Kaspi ТОО"], default_account="Kaspi ТОО")
     transfer = next(row for row in preview.rows if row.line == 15)
     assert transfer.state == "failed"
@@ -207,7 +207,7 @@ def test_nomer_zapisyvaetsya_schetu_i_sleduyushchaya_vypiska_lozhitsya_sama(work
 
 
 def test_chuzhoy_nomer_ne_peretiraetsya(workspace):
-    """У счёта уже есть номер — выписка другого счёта его не перепишет."""
+    """У счёта уже есть номер - выписка другого счёта его не перепишет."""
     with finance_session() as session:
         space = service.ensure_workspace(session)
         service.create_account(session, space, name="Kaspi ТОО", number="KZ11722S000000000001")
@@ -221,7 +221,7 @@ def test_chuzhoy_nomer_ne_peretiraetsya(workspace):
 
 
 def test_perevod_iz_dvuh_vypisok_zavoditsya_odin_raz(workspace):
-    """Перевод виден в выписке счёта и в выписке депозита, операция — одна."""
+    """Перевод виден в выписке счёта и в выписке депозита, операция - одна."""
     mirror = [
         ["77", "15.09.2026 19:34:02", None, 800000, f'ТОО "Пример"\nИИН/БИН {OWNER_BIN}',
          KASPI, None, "390", "Пополнение депозита со счёта Kaspi Pay"],
@@ -283,7 +283,7 @@ def test_nomer_odin_na_kompaniyu(workspace):
 
 
 def test_staryy_excel_xls_shapka_v_dve_stroki():
-    """Excel 97–2003 с шапкой в две строки — как печатает Halyk.
+    """Excel 97–2003 с шапкой в две строки - как печатает Halyk.
 
     Раньше: «Формат .xls не читается, пересохраните как .xlsx»; а шапка в две
     строки давала «нет колонки суммы», хотя суммы в файле есть.
@@ -338,7 +338,7 @@ def test_xml_excel_2003():
 
 
 def test_vygruzka_bank_klienta_1c():
-    """1CClientBankExchange: направление — по тому, чей счёт у плательщика."""
+    """1CClientBankExchange: направление - по тому, чей счёт у плательщика."""
     text = "\n".join(
         [
             "1CClientBankExchange",
@@ -430,7 +430,7 @@ def test_perenesyonnoe_naznachenie_platezha_skleivaetsya():
 
 
 def test_znak_v_vypiske_odnogo_scheta():
-    """Плюсы и минусы в одной колонке: плюс — поступление. Без минусов — вопрос."""
+    """Плюсы и минусы в одной колонке: плюс - поступление. Без минусов - вопрос."""
     signed = book(
         [[date(2026, 8, 3), "+5 000", "перевод"], [date(2026, 8, 4), "-1 000", "покупка"]],
         ["Дата", "Сумма", "Описание"],

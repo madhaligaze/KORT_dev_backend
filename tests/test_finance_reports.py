@@ -3,7 +3,7 @@
 Набор проверяет не «числа посчитались», а свойства, из-за которых
 управленческий учёт вообще заводят:
 
-* деньги и прибыль — разные отчёты, и разница между ними это дебиторка;
+* деньги и прибыль - разные отчёты, и разница между ними это дебиторка;
 * перевод между своими счетами не создаёт ни дохода, ни расхода;
 * месяц без операций стоит в отчёте нулём, а не пропадает из ряда;
 * кассовый разрыв назван днём, а не «где-то в следующем месяце».
@@ -80,11 +80,11 @@ def filled(finance_db):
 
         income(5, 500000, month=7, project=north.id)
         expense(7, 200000, month=7)
-        # Август: ни одной операции — месяц обязан остаться в отчёте нулём.
+        # Август: ни одной операции - месяц обязан остаться в отчёте нулём.
         income(3, 800000, month=9)
         expense(7, 300000, month=9)
         # Услуга оказана в сентябре, деньги ждём в октябре: в «Прибыли» это
-        # сентябрь, в «Деньгах» — октябрь.
+        # сентябрь, в «Деньгах» - октябрь.
         income(20, 900000, month=10, accrued=date(2026, 9, 25), status="plan")
         # Перевод: деньги переехали, но не появились и не исчезли.
         service.create_operation(
@@ -137,7 +137,7 @@ def test_dengi_i_pribyl_raznyye_otchety(filled):
     # В деньгах сентябрь без этой оплаты, а ожидание стоит отдельной строкой.
     assert cash_by_month["2026-09"]["income"] == "800000.00"
     assert cash_by_month["2026-10"]["income_plan"] == "900000.00"
-    # В прибыли она же учтена сентябрём — по дате сделки.
+    # В прибыли она же учтена сентябрём - по дате сделки.
     assert profit_by_month["2026-09"]["income"] == "1700000.00"
     assert profit_by_month["2026-10"]["income"] == "0"
 
@@ -153,7 +153,7 @@ def test_debitorka_znaet_prosrochku(filled):
 
 
 def test_ostatki_po_schetam_uchityvayut_nachalnyy(filled):
-    """Начальный остаток входит в остаток счёта, план — нет."""
+    """Начальный остаток входит в остаток счёта, план - нет."""
     with finance_session() as session:
         balances = {item["name"]: item for item in reports.account_balances(session, filled)}
     bank = balances["Банковский счёт"]
@@ -198,7 +198,7 @@ def test_kontrolnye_summy_otcheta(filled):
 
 
 def test_proekty_pokazyvayut_nerazneseennoe(filled):
-    """Сумма по проектам не сходится с прибылью — и это видно строкой."""
+    """Сумма по проектам не сходится с прибылью - и это видно строкой."""
     with finance_session() as session:
         report = reports.projects_report(session, filled, date(2026, 7, 1), date(2026, 10, 31))
     north = next(item for item in report["items"] if item["name"] == "Проект Север")
@@ -222,7 +222,7 @@ def test_plan_fakt_bez_plana_ne_delit_na_nol(filled):
 def test_pervoe_otkrytie_razdela_dvumya_zaprosami_srazu(finance_db):
     """Гонка на создании пространства не роняет запрос.
 
-    Раздел открывается двумя запросами сразу — сводка и справочники. Оба
+    Раздел открывается двумя запросами сразу - сводка и справочники. Оба
     вызывают `ensure_workspace`, и до исправления второй падал на уникальном
     ключе `slug`: отвечал 500, а экран оставался пустым без объяснения.
     Поймано сквозным прогоном 18 сентября 2026.
@@ -265,7 +265,7 @@ def test_period_po_umolchaniyu_vklyuchaet_tekushchiy_mesyats(finance_db) -> None
 
     Дефект, найденный сквозным прогоном 18 сентября 2026: период по умолчанию
     заканчивался ПЕРВЫМ числом текущего месяца, и всё, что записано позже, в
-    отчёты не попадало. Столбец месяца при этом стоял на месте с нулём —
+    отчёты не попадало. Столбец месяца при этом стоял на месте с нулём -
     выглядело как «данных нет», хотя в журнале были одиннадцать операций.
 
     Проверяется через тот же `_period`, которым пользуются все маршруты
@@ -302,10 +302,10 @@ def test_period_po_umolchaniyu_vklyuchaet_tekushchiy_mesyats(finance_db) -> None
     assert Decimal(row["income"]) == Decimal("123456"), report["rows"]
 
 def test_razbivka_ne_smeshivaet_fakt_i_ozhidanie(filled) -> None:
-    """Итог разбивки — факт; ожидание стоит отдельным числом.
+    """Итог разбивки - факт; ожидание стоит отдельным числом.
 
     Найдено глазами на живом экране 18 сентября 2026: в шапке отчёта стояло
-    «Поступило за период 5 117 777», а в итоге разбивки по категориям —
+    «Поступило за период 5 117 777», а в итоге разбивки по категориям -
     6 017 777. Обе цифры были верные (вторая включала запланированный платёж),
     но на экране разница ничем не объяснялась: два ответа на один вопрос.
     """
@@ -316,7 +316,7 @@ def test_razbivka_ne_smeshivaet_fakt_i_ozhidanie(filled) -> None:
     parts_income = sum((Decimal(item["total"]) for item in report["breakdown"]["income"]), Decimal("0"))
     assert months_income == parts_income, "итог разбивки обязан совпадать с таблицей месяцев"
 
-    # Ожидание при этом не потеряно — оно просто названо своим именем.
+    # Ожидание при этом не потеряно - оно просто названо своим именем.
     planned = sum((Decimal(item["planned"]) for item in report["breakdown"]["income"]), Decimal("0"))
     assert planned == Decimal("900000")
     assert all(check["ok"] for check in report["checks"]), report["checks"]

@@ -1,8 +1,8 @@
-"""finance: доступ — вход по номеру, роли, права, уведомления, журнал действий
+"""finance: доступ - вход по номеру, роли, права, уведомления, журнал действий
 
 Второй кирпич ERP: сотрудники входят по телефону, права раздаются отделам и
 людям галочками, журнал действий пишет каждое действие каждого аккаунта.
-Почему модель такая — в `app/finance/accounts_model.py` и `app/finance/access.py`.
+Почему модель такая - в `app/finance/accounts_model.py` и `app/finance/access.py`.
 
 Что меняется
 ────────────
@@ -11,7 +11,7 @@
   телефон); `status` += `pending`.
 * `memberships.role` → `owner` / `admin` / `employee`; + `blocked_at` (вход
   закрывается в одной компании, а не везде).
-* `access_grants`, `notifications` — новые таблицы.
+* `access_grants`, `notifications` - новые таблицы.
 * `sessions`: + `ip`.
 * `action_log` → журнал действий: + `user_id`, `session_id`, `ip`,
   `user_agent`, `category` и индексы под фильтры и очистку просмотров.
@@ -20,16 +20,16 @@
 Данные
 ──────
 * У каждого члена компании появляется запись сотрудника: права сотрудника
-  пишутся на неё. Имя совпало с чужой записью — к нему дописывается логин, а
+  пишутся на неё. Имя совпало с чужой записью - к нему дописывается логин, а
   не угадывается, что это тот же человек.
 * Бывшие `accountant` и `viewer` становятся `employee` с **личными правами,
   равными прежним способностям**: `viewer` видит всё, кроме людей и журнала
   действий; `accountant` вдобавок правит учёт, договоры, правила и планы, а
-  справочники и подключения по-прежнему только видит — счета он и раньше не
+  справочники и подключения по-прежнему только видит - счета он и раньше не
   заводил. Список зашит здесь, а не взят из `access.py`: ревизия обязана
   делать то же самое и через год, когда код прав поменяется.
-* Старым записям журнала проставляются вид (`contract.export` — выгрузка,
-  `contract.import` — загрузка, остальное — данные) и автор по почте.
+* Старым записям журнала проставляются вид (`contract.export` - выгрузка,
+  `contract.import` - загрузка, остальное - данные) и автор по почте.
 
 `access_grants` и `notifications` создаются, только если их ещё нет: до этой
 ревизии рабочий стенд с новым кодом мог завести их сам через `create_all`
@@ -75,7 +75,7 @@ _SPACES = re.compile(r"[\s   ]+")
 
 
 def _norm(value: str) -> str:
-    """Как `app.finance.layout.norm` — нормализованное имя сотрудника."""
+    """Как `app.finance.layout.norm` - нормализованное имя сотрудника."""
     return _SPACES.sub(" ", str(value or "")).strip().lower().replace("ё", "е")
 
 
@@ -125,7 +125,7 @@ def upgrade() -> None:
     )
     op.execute("UPDATE finance.action_log SET category = 'export' WHERE kind = 'contract.export'")
     op.execute("UPDATE finance.action_log SET category = 'import' WHERE kind = 'contract.import'")
-    # Автор старых записей — по почте, которой они подписаны.
+    # Автор старых записей - по почте, которой они подписаны.
     op.execute(
         "UPDATE finance.action_log AS a SET user_id = u.id FROM finance.users AS u "
         "WHERE a.user_id IS NULL AND a.actor <> '' AND u.email = a.actor"
@@ -247,7 +247,7 @@ def downgrade() -> None:
     bind = op.get_bind()
     if bind.dialect.name == "sqlite":
         return
-    # Роли обратно: кто правил журнал — бухгалтер, остальные — наблюдатели.
+    # Роли обратно: кто правил журнал - бухгалтер, остальные - наблюдатели.
     op.drop_constraint(op.f('ck_memberships_membership_role'), 'memberships', schema=SCHEMA, type_='check')
     op.execute(
         "UPDATE finance.memberships AS m SET role = CASE WHEN EXISTS ("
@@ -285,8 +285,8 @@ def downgrade() -> None:
     op.drop_column('sessions', 'ip', schema=SCHEMA)
 
     # Учётки без почты и пароля старой схеме не выразить: вход по номеру ей
-    # неизвестен. Почта — заглушка на номер, пароль — заведомо неверный хеш,
-    # ждущие пароль — заблокированы.
+    # неизвестен. Почта - заглушка на номер, пароль - заведомо неверный хеш,
+    # ждущие пароль - заблокированы.
     op.drop_constraint(op.f('ck_users_user_status'), 'users', schema=SCHEMA, type_='check')
     op.drop_constraint(op.f('ck_users_user_login'), 'users', schema=SCHEMA, type_='check')
     op.execute(

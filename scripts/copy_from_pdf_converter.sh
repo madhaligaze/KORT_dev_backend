@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Перенос учёта с прода PDF-CONVERTER в базу KORT — схема `finance` целиком.
+# Перенос учёта с прода PDF-CONVERTER в базу KORT - схема `finance` целиком.
 #
 #   SOURCE_DATABASE_URL=postgresql://…/railway   # база PDF-CONVERTER
 #   TARGET_DATABASE_URL=postgresql://…/railway   # база KORT
@@ -9,11 +9,11 @@
 #
 # Что делает:
 #   1. проверяет, что источник на той же ревизии, что последняя у KORT (0023):
-#      схема старше или новее кода KORT — перенос откладывается;
-#   2. отказывается писать в базу KORT, где уже есть учётки (FORCE=1 — снести);
+#      схема старше или новее кода KORT - перенос откладывается;
+#   2. отказывается писать в базу KORT, где уже есть учётки (FORCE=1 - снести);
 #   3. снимает дамп одной схемы `finance` и разворачивает его вместо той, что
 #      бэкенд KORT создал при первом старте (пустые таблицы из миграций);
-#   4. ставит `alembic_version` = 0023 — схема уже на последней ревизии;
+#   4. ставит `alembic_version` = 0023 - схема уже на последней ревизии;
 #   5. печатает счёт записей в источнике и в KORT рядом.
 #
 # Остальные схемы прода (public, bbc, books, webexcel) не трогаются и не
@@ -22,8 +22,8 @@ set -euo pipefail
 
 KORT_HEAD="0023"
 
-: "${SOURCE_DATABASE_URL:?задайте SOURCE_DATABASE_URL — база PDF-CONVERTER}"
-: "${TARGET_DATABASE_URL:?задайте TARGET_DATABASE_URL — база KORT}"
+: "${SOURCE_DATABASE_URL:?задайте SOURCE_DATABASE_URL - база PDF-CONVERTER}"
+: "${TARGET_DATABASE_URL:?задайте TARGET_DATABASE_URL - база KORT}"
 
 # Адреса SQLAlchemy (postgresql+psycopg://) утилитам Postgres непонятны.
 SRC="${SOURCE_DATABASE_URL/postgresql+psycopg:/postgresql:}"
@@ -32,7 +32,7 @@ SRC="${SRC/postgres:\/\//postgresql://}"
 DST="${DST/postgres:\/\//postgresql://}"
 
 if [ "$SRC" = "$DST" ]; then
-  echo "Источник и цель — одна и та же база. Отказ." >&2
+  echo "Источник и цель - одна и та же база. Отказ." >&2
   exit 1
 fi
 
@@ -44,7 +44,7 @@ q() { PGCLIENTENCODING=UTF8 psql "$1" -v ON_ERROR_STOP=1 -Atqc "$2"; }
 
 src_rev="$(q "$SRC" "select version_num from alembic_version" || true)"
 if [ "$src_rev" != "$KORT_HEAD" ]; then
-  echo "Ревизия источника — «${src_rev:-нет}», у KORT последняя — $KORT_HEAD. Сначала выровнять." >&2
+  echo "Ревизия источника - «${src_rev:-нет}», у KORT последняя - $KORT_HEAD. Сначала выровнять." >&2
   exit 1
 fi
 
@@ -52,7 +52,7 @@ has_users="$(q "$DST" "select count(*) from information_schema.tables where tabl
 if [ "$has_users" = "1" ]; then
   users="$(q "$DST" "select count(*) from finance.users")"
   if [ "$users" != "0" ] && [ "${FORCE:-0}" != "1" ]; then
-    echo "В базе KORT уже $users учёток. Перезаписать — FORCE=1." >&2
+    echo "В базе KORT уже $users учёток. Перезаписать - FORCE=1." >&2
     exit 1
   fi
 fi
@@ -82,5 +82,5 @@ for table in workspaces users employees accounts operations contracts; do
 done
 echo
 # Пул соединений бэкенда помнит подготовленные запросы к таблицам, которых
-# больше нет (схема пересоздана) — перезапуск сбрасывает их.
+# больше нет (схема пересоздана) - перезапуск сбрасывает их.
 echo "Готово. Перезапустите бэкенд KORT (Railway → Restart)."

@@ -487,7 +487,8 @@ def _extract_kaspi_transactions(lines: list[str]) -> list[StatementTransaction]:
         next_index = index + 3
         while next_index < len(body) and not DATE_PATTERN.match(body[next_index]):
             candidate = body[next_index]
-            if candidate.startswith("-") or candidate.startswith("•") or candidate.startswith("—"):
+            # Пункт в документе начинают и длинным тире (\u2014) - это чужой текст.
+            if candidate.startswith("-") or candidate.startswith("•") or candidate.startswith("\u2014"):
                 note = candidate
                 flags.append("requires_attention")
             next_index += 1
