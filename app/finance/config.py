@@ -16,6 +16,10 @@
     FINANCE_SUPPORT_CHAT_ID   - закрытый канал поддержки, куда бот кладёт
                                 обращения (`-100…`). Без обоих обращения
                                 копятся в базе и уйдут, когда бот появится
+    FINANCE_SECRETS_KEY       - ключ, которым шифруются пароли подключений
+                                (REST-сервис 1С). Пусто - базу 1С не подключить
+    FINANCE_ONEC_SYNC_MINUTES - как часто перечитывать базы 1С (30); 0 -
+                                только кнопкой «Обновить»
 
 Про валюту компании
 ───────────────────
@@ -66,6 +70,8 @@ class FinanceSettings(BaseSettings):
     )
     support_bot_token: str = Field(default="", validation_alias=AliasChoices("FINANCE_SUPPORT_BOT_TOKEN"))
     support_chat_id: str = Field(default="", validation_alias=AliasChoices("FINANCE_SUPPORT_CHAT_ID"))
+    secrets_key: str = Field(default="", validation_alias=AliasChoices("FINANCE_SECRETS_KEY"))
+    onec_sync_minutes: int = Field(default=30, ge=0, validation_alias=AliasChoices("FINANCE_ONEC_SYNC_MINUTES"))
 
     @property
     def support_ready(self) -> bool:

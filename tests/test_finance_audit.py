@@ -276,6 +276,25 @@ def test_kazhdyy_izmenyayushchiy_marshrut_pishet_sobytie(app: FastAPI, monkeypat
     )
     walk.call(owner, "DELETE", "/integrations/{integration_id}", integration_id=integration["id"])
 
+    # ── базы 1С: REST-сервис подменён - сеть в тесте не нужна ───────────
+    from app.finance.config import finance_settings
+    from app.finance.onec import service as onec_service
+    from test_finance_onec import _fake_1c
+
+    monkeypatch.setattr(finance_settings, "secrets_key", "audit-key")
+    monkeypatch.setattr(onec_service, "check_host", lambda url: None)
+    fake_1c = _fake_1c()
+    monkeypatch.setattr(onec_service, "Client", lambda connection: fake_1c)
+    onec_base = walk.call(
+        owner, "POST", "/onec/bases",
+        json={"url": "https://1cfresh.kz/a/ea201/284171", "login": "odata.user", "password": "пароль"},
+    ).json()["id"]
+    walk.call(owner, "PATCH", "/onec/bases/{base_id}", base_id=onec_base, json={"title": "ИБ ТОО BBC"})
+    walk.call(owner, "POST", "/onec/bases/{base_id}/sync", base_id=onec_base)
+    loose = owner.get(f"{BASE}/onec/month", params={"month": "2026-09"}).json()["unmatched"][0]["id"]
+    walk.call(owner, "POST", "/onec/documents/{document_id}/decide", document_id=loose, json={"action": "none"})
+    walk.call(owner, "DELETE", "/onec/bases/{base_id}", base_id=onec_base)
+
     # ── компании ────────────────────────────────────────────────────────
     second = walk.call(owner, "POST", "/auth/companies", json={"title": "Вторая"}).json()["id"]
     walk.call(owner, "POST", "/auth/switch", json={"company_id": second})

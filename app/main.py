@@ -113,6 +113,28 @@ async def _contract_amendments_loop() -> None:
         await asyncio.sleep(3600)
 
 
+async def _onec_loop(minutes: int) -> None:
+    """Базы 1С перечитываются сами: раз в `minutes` каждая включённая база.
+
+    Проверка - каждые пять минут, чтение - только тех баз, что читались давно,
+    поэтому «Обновить» человека не задваивается фоновым проходом. Отказ одной
+    базы пишется в неё (`last_error`) и не мешает остальным.
+    """
+    from app.finance.onec import service as onec_service
+
+    await asyncio.sleep(90)
+    while True:
+        try:
+            done = await asyncio.to_thread(onec_service.sync_due, minutes)
+            if done:
+                log.info("finance: перечитано баз 1С: %s", done)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - фоновый проход не роняет приложение
+            log.warning("finance: базы 1С не перечитались (%s)", exc)
+        await asyncio.sleep(300)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     # Схема - первым делом, до всего остального.
@@ -126,11 +148,14 @@ async def lifespan(_: FastAPI):
 
     contracts_task: asyncio.Task | None = None
     support_task: asyncio.Task | None = None
+    onec_task: asyncio.Task | None = None
     try:
         from app.finance.config import finance_settings
 
         if finance_settings.enabled:
             contracts_task = asyncio.create_task(_contract_amendments_loop())
+        if finance_settings.enabled and finance_settings.onec_sync_minutes > 0:
+            onec_task = asyncio.create_task(_onec_loop(finance_settings.onec_sync_minutes))
         # Бот поддержки: обращения - в канал Telegram, ответы - обратно.
         # Без токена и канала обращения копятся в базе и уйдут, когда бот появится.
         if finance_settings.enabled and finance_settings.support_ready:
@@ -144,7 +169,7 @@ async def lifespan(_: FastAPI):
     try:
         yield
     finally:
-        for task in (contracts_task, support_task):
+        for task in (contracts_task, support_task, onec_task):
             if task is not None:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
