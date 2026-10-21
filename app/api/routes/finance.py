@@ -414,6 +414,16 @@ def _me_payload(session, member: Member) -> dict[str, Any]:
     from app.finance import support
 
     support_state = support.state(session, member.user_id)
+    # Невыставленные счета - числом у пункта «Счета»: видно из любого раздела,
+    # пока они есть. Из уже прочитанной книги, без похода в Google.
+    bills_state = None
+    if member.workspace_id is not None and rights.can("invoices"):
+        from app.finance.contracts import bills
+
+        try:
+            bills_state = bills.badge(session, member.workspace_id)
+        except Exception:  # noqa: BLE001 - число у пункта не роняет вход
+            log.exception("счета: число для колонки не посчиталось")
     return {
         "authenticated": True,
         "user": {
@@ -441,6 +451,7 @@ def _me_payload(session, member: Member) -> dict[str, Any]:
         "employee": employee_out,
         "habits": prefer,
         "support": support_state,
+        "bills": bills_state,
     }
 
 
@@ -2324,6 +2335,24 @@ def create_invoice(body: InvoiceIn, member: Member = Depends(require_access("inv
             actor=_actor(member),
         )
         return invoices_module.read(session, workspace.id, invoice.id)
+
+
+@router.get("/bills")
+def list_bills(member: Member = Depends(require_access("invoices")), refresh: bool = Query(False)) -> dict[str, Any]:
+    """«Счета → Не выставлены»: строки книги-сводки без галочки «Счет», словами книги.
+
+    Только чтение: счёт выставляют в 1С и отмечают в книге юрлица, KORT по этим
+    строкам ничего не заводит (`contracts/bills.py`). `refresh` - «Обновить».
+    """
+    _guard()
+    from app.finance import bills_bot
+    from app.finance.contracts import bills as bills_module
+
+    with finance_session() as session:
+        workspace_id = _workspace(session, member).id
+        out = bills_module.board_out(session, workspace_id, force=refresh)
+    out["channel"] = bills_bot.channel_out(workspace_id) if out["source"] else None
+    return out
 
 
 @router.get("/invoices/{invoice_id}")

@@ -668,11 +668,44 @@ class Counter(FinanceBase):
     value: Mapped[int] = mapped_column(sa.BigInteger, server_default=sa.text("0"))
 
 
+class BillNotice(FinanceBase):
+    """О каком невыставленном счёте книги-сводки бот счетов уже написал.
+
+    Ключ - юрлицо, клиент, № договора и месяц строки (`bills_bot.bill_key`),
+    а не номер строки: лист сводки сортирует формула, и номер у строки
+    меняется. Группа - `soon` или `overdue`: «подошёл срок» и «срок прошёл» -
+    два разных сообщения об одном счёте, каждое по разу.
+
+    Хранится в базе, а не в памяти процесса: перезапуск или книга, на минуту
+    отдавшая пустые строки (`IMPORTRANGE` ещё собирает), не повторят в канал
+    то, что там уже есть.
+
+    `message_id` и `line` - сообщение, где счёт назван, и его строка: в книге
+    поставили галочку - бот убирает строку из того же сообщения (`done_at`), а
+    выставлено всё - удаляет сообщение вместе с этими записями.
+    Счёт, который пришёл сводкой дня, а не отдельным сообщением, лежит здесь
+    без `message_id` - только чтобы не повторяться.
+    """
+
+    __tablename__ = "bill_notices"
+
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        sa.Uuid, sa.ForeignKey("workspaces.id", ondelete="CASCADE"), primary_key=True
+    )
+    key: Mapped[str] = mapped_column(sa.Text, primary_key=True)
+    bill_group: Mapped[str] = mapped_column(sa.Text, primary_key=True)
+    notified_at: Mapped[datetime] = mapped_column(sa.DateTime(timezone=True), server_default=sa.func.now())
+    message_id: Mapped[int | None] = mapped_column(sa.BigInteger)
+    line: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("''"))
+    done_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True))
+
+
 __all__ = [
     "AMENDMENT_EFFECTS",
     "AMENDMENT_ORIGINS",
     "ALIAS_SOURCES",
     "BILLING_KINDS",
+    "BillNotice",
     "CONTRACT_IMPORT_STATUSES",
     "CONTRACT_SOURCES",
     "Contract",
