@@ -107,6 +107,20 @@ def _is_production() -> bool:
     return settings.environment.strip().lower() == "production"
 
 
+def _may_fall_back_to_sqlite() -> bool:
+    """Запасная SQLite - только тому, кто адреса базы не задавал вовсе.
+
+    Пустая SQLite не знает ни одной учётки: на любой вход она отвечает
+    «Неверная почта или пароль», а записанное в неё пропадает с перезапуском.
+    Задан `DATABASE_URL` - значит, ждут именно эту базу, и раз она недоступна,
+    сервер не должен подниматься. Иначе на новом хостинге хватало адреса,
+    недоступного оттуда (`postgres.railway.internal` с Render), и забытого
+    `ENVIRONMENT`: 22.10.2026, при переезде прода на Render, вход минуту
+    отвечал «неверный пароль», а в журнале базы прода ни одного отказа нет.
+    """
+    return not _is_production() and "database_url" not in settings.model_fields_set
+
+
 def get_engine() -> Engine:
     global _engine, _resolved_database_url
     if _engine is not None:
@@ -124,9 +138,9 @@ def get_engine() -> Engine:
     except Exception as exc:
         # In production we must NOT silently fall back to an ephemeral SQLite file:
         # that hides the real history/sessions and loses new writes on restart.
-        # Fail hard so Railway restarts the container (restartPolicy = ON_FAILURE).
-        if _is_production():
-            log.error("Primary DB unreachable in production after retries: %s", exc)
+        # Fail hard so the host restarts the container (restartPolicy = ON_FAILURE).
+        if not _may_fall_back_to_sqlite():
+            log.error("Primary DB %s unreachable after retries, not falling back to SQLite: %s", safe_url, exc)
             raise
         log.warning("Primary DB connection failed, falling back to SQLite (dev only): %s", exc)
         fallback_url = _default_sqlite_url()
