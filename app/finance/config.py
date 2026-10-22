@@ -28,7 +28,7 @@
     FINANCE_BILLS_HOUR        - час первого напоминания по Астане (UTC+5),
                                 0-19 (9); новое бот пишет сразу, в любое время
     FINANCE_BILLS_EVERY       - через сколько часов повторять напоминание до
-                                20:00 (3: 9, 12, 15, 18)
+                                20:00 (2: 9, 11, 13, 15, 17, 19)
     FINANCE_APP_URL           - адрес KORT для кнопки «Открыть в KORT»
                                 (https://kort.cards). Пусто - первый https из
                                 ALLOWED_ORIGINS
@@ -91,7 +91,7 @@ class FinanceSettings(BaseSettings):
     #: роняло весь API на старте. Неверный час выключает только бота - см.
     #: `bills_hour_value` и `bills_ready`.
     bills_hour: str = Field(default="9", validation_alias=AliasChoices("FINANCE_BILLS_HOUR"))
-    bills_every: str = Field(default="3", validation_alias=AliasChoices("FINANCE_BILLS_EVERY"))
+    bills_every: str = Field(default="2", validation_alias=AliasChoices("FINANCE_BILLS_EVERY"))
     app_url: str = Field(default="", validation_alias=AliasChoices("FINANCE_APP_URL"))
 
     @property

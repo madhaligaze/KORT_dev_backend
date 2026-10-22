@@ -89,6 +89,7 @@ _CATEGORY_PREFIXES: tuple[tuple[str, str], ...] = (
 _CATEGORY_EXACT = {
     "contract.export": "export",
     "journal.export": "export",
+    "bill.template": "export",
 }
 
 

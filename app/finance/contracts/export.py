@@ -66,7 +66,9 @@ HEAD_FILL = "F2F2F2"
 HEAD_LINE = "A6A6A6"
 CELL_LINE = "D9D9D9"
 LINK_COLOR = "0563C1"
-DATE_FORMAT = "DD.MM.YYYY"
+#: Только строчными: «DD.MM.YYYY» просмотр Apple (айфон) читает по правилам
+#: Unicode, где «D» - номер дня в году, и 23.10.2026 показывался «296.10.2026».
+DATE_FORMAT = "dd.mm.yyyy"
 DATE_KEYS = ("signed_at", "planned_end_at", "end_date")
 MONEY_KEYS = (
     "amount", "paid_snapshot", "remaining_snapshot", "summary_paid", "summary_remaining", *LIVE_FIELDS,

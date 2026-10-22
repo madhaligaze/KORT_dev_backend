@@ -1,13 +1,13 @@
-"""«Не выставлены» - счета, которые по книге-сводке пора выставить, а галочки «Счет» нет.
+"""Счета книги-сводки: какие пора выставить, какие выставлены - и что записал KORT.
 
 Откуда
 ──────
 Та же книга-сводка, что даёт «Оплачено (сводка)» (`summary.py`, запись
 `SummarySource`): у BBC - «Осн.Общая сводка BBC 2026», лист «Сводка все ЮР
 лица», строка - договор за месяц. Лист собирает формула (`IMPORTRANGE`) из книг
-девяти юрлиц, а колонку «Счет» каждая книга считает сама: галочка - `TRUE`, без
-галочки - состояние словами: «Просрочка более 5 дней», «3 дня до выставления»,
-«Еще рано» (разобрано 22.10.2026).
+девяти юрлиц, а колонку «Счет» каждая книга считает сама: заполнен «№ Счета» -
+`TRUE`, нет - состояние словами: «Просрочка более 5 дней», «3 дня до
+выставления», «Еще рано» (разобрано 22.10.2026).
 
 Что здесь по-другому и почему
 ─────────────────────────────
@@ -16,10 +16,14 @@
   канале и в книге стояло бы три ответа на один вопрос. KORT только раскладывает
   слова книги по группам (`state_of`); незнакомое значение не угадывается, а
   уходит как есть в группу «Без срока».
-* **Только чтение.** Счёт выставляют в 1С и отмечают в книге своего юрлица:
-  сводку собирает формула, правка в ней пропала бы. По этим строкам KORT не
-  заводит ни счетов, ни ожиданий - иначе долг клиента появился бы дважды: в
-  книге и в «Долгах».
+* **Сводку KORT не правит.** Её собирает формула, правка в ней пропала бы.
+  Счёт отмечают в книге юрлица - руками или из карточки KORT
+  (`bill_book.py`). По этим строкам KORT не заводит ни счетов, ни ожиданий -
+  иначе долг клиента появился бы дважды: в книге и в «Долгах».
+* **Записанное из KORT видно сразу** (`mark`, `view`). Сводка догоняет книгу
+  юрлица с задержкой: формуле `IMPORTRANGE` нужны секунды-минуты, да и само
+  чтение держится `CACHE_TTL`. Без отметки выставленный счёт ещё минуту висел
+  бы в списке и в канале, и его выставили бы второй раз.
 * **Колонки - по названиям** (`app.finance.layout`): рядом с «Счет» стоят «№
   Счета», «Счет за Период» и «Счет2», и прибитая буква однажды читала бы
   соседнюю.
@@ -29,12 +33,14 @@
 """
 from __future__ import annotations
 
+import dataclasses
+import hashlib
 import logging
 import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Sequence
 
@@ -54,13 +60,20 @@ ERROR_RETRY = 60.0
 FIRST_READ_WAIT = 20.0
 #: Чаще этого «Обновить» книгу не перечитывает: квота Google общая на аккаунт.
 FORCE_GAP = 30.0
+#: Сколько держится записанное из KORT, пока сводка его не покажет. Дольше -
+#: значит, в книге его поправили руками, и права книга.
+MARK_TTL = 600.0
+#: Время книг - по Казахстану (UTC+5): «сегодня» и окно «Выставлены».
+TZ = timezone(timedelta(hours=5))
 
 #: Группы невыставленных счетов - в порядке срочности.
 OVERDUE = "overdue"  # «Просрочка 1 день», «Просрочка более 5 дней»
-SOON = "soon"  # «3 дня до выставления»
+SOON = "soon"  # «3 дня до выставления», «Сегодня день выставления»
 EARLY = "early"  # «Еще рано»
 UNDATED = "undated"  # пусто, FALSE без слов, незнакомое значение
 GROUPS = (OVERDUE, SOON, EARLY, UNDATED)
+#: Выставленный счёт: «Счет» = TRUE.
+DONE = "issued"
 
 #: Галочка «Счет» в форматированном значении: Google пишет её по локали книги.
 ISSUED = frozenset({"true", "истина"})
@@ -80,7 +93,17 @@ COLUMNS: tuple[Column, ...] = (
     Column("amount", "Сумма Договора", ("сумма договора",), hint=12, required=False),
     Column("department", "Отдел", ("отдел",), hint=13, required=False),
     Column("period_from", "Период с (нач.)", ("период с (нач.)", "период с"), hint=18, required=False),
+    Column("period_to", "Период по (зав.)", ("период по (зав.)", "период по"), hint=19, required=False),
     Column("note", "Доп. Коммент.", ("доп. коммент.", "доп. комментарий"), hint=20, required=False),
+    # Для карточки и шаблона финансистов: как клиент назван в 1С (по нему
+    # выставляют счёт) и когда заключён договор.
+    Column("onec_name", "По 1C", ("по 1c", "по 1с"), hint=10, required=False, strict=True),
+    Column("signed_at", "Дата заключения Договора", ("дата заключения договора",), hint=15, required=False, strict=True),
+    # Поля счёта - только по точному названию: «Счет за Период» иначе нашлась бы
+    # «похожей» на «Счет», и лист без неё не читался бы вовсе.
+    Column("bill_period", "Счет за Период (Коммент)", ("счет за период (коммент)",), hint=25, required=False, strict=True),
+    Column("bill_no", "№ Счета", ("№ счета",), hint=26, required=False, strict=True),
+    Column("bill_date", "Дата выстав. Счета", ("дата выстав. счета",), hint=27, required=False, strict=True),
     Column("paid", "Факт Оплата", ("факт оплата",), hint=28, required=False),
     Column(
         "status",
@@ -103,7 +126,8 @@ def state_of(value: Any) -> str | None:
         return None
     if text.startswith("просрочка"):
         return OVERDUE
-    if "до выставления" in text:
+    # «Сегодня день выставления» уходило в «Без срока»: день счёта, а не неизвестность.
+    if "до выставления" in text or text.startswith("сегодня"):
         return SOON
     if text.startswith("еще рано"):
         return EARLY
@@ -136,6 +160,11 @@ def bill_key(own: str, customer: str, number: str, month: str) -> str:
     return "|".join(norm(part) for part in (own, customer, number, month))
 
 
+def bill_id(key: str) -> str:
+    """Короткий постоянный адрес счёта - для ссылки из канала и адреса карточки."""
+    return hashlib.sha1(key.encode()).hexdigest()[:12]
+
+
 def _int(value: Any) -> int | None:
     try:
         return int(str(value or "").strip())
@@ -145,7 +174,7 @@ def _int(value: Any) -> int | None:
 
 @dataclass(frozen=True)
 class Bill:
-    """Строка книги без галочки «Счет»: договор за месяц."""
+    """Строка книги-сводки: договор за месяц. `group` - `DONE`, если «Счет» = TRUE."""
 
     line: int
     group: str
@@ -160,16 +189,27 @@ class Bill:
     department: str
     amount: Decimal | None
     period_from: date | None
+    period_to: date | None
     paid: str
     status: str
     note: str
+    bill_no: str = ""
+    bill_date: str = ""
+    bill_period: str = ""
+    onec_name: str = ""
+    signed_at: str = ""
 
     @property
     def key(self) -> str:
         return bill_key(self.own, self.customer, self.number, self.month)
 
+    @property
+    def id(self) -> str:
+        return bill_id(self.key)
+
     def out(self) -> dict[str, Any]:
         return {
+            "id": self.id,
             "line": self.line,
             "group": self.group,
             "text": self.text,
@@ -182,9 +222,15 @@ class Bill:
             "department": self.department,
             "amount": str(self.amount) if self.amount is not None else None,
             "period_from": self.period_from.isoformat() if self.period_from else None,
+            "period_to": self.period_to.isoformat() if self.period_to else None,
             "paid": self.paid,
             "status": self.status,
             "note": self.note,
+            "bill_no": self.bill_no,
+            "bill_date": self.bill_date,
+            "bill_period": self.bill_period,
+            "onec_name": self.onec_name,
+            "signed_at": self.signed_at,
         }
 
 
@@ -195,7 +241,7 @@ def _order(bill: Bill) -> tuple[Any, ...]:
 
 @dataclass
 class Board:
-    """Прочитанная книга: невыставленные счета и откуда они."""
+    """Прочитанная книга: невыставленные и выставленные счета и откуда они."""
 
     read_at: datetime
     title: str
@@ -208,6 +254,8 @@ class Board:
     #: сообщений. Пропавшая строка - не «выставлен»: её могла на минуту
     #: потерять формула сводки.
     issued: set[str] = field(default_factory=set)
+    #: Выставленные строки целиком - для «Выставлены» и карточки счёта.
+    done: list[Bill] = field(default_factory=list)
 
     def of(self, group: str) -> list[Bill]:
         return [bill for bill in self.bills if bill.group == group]
@@ -221,6 +269,10 @@ class Board:
     def total(self, group: str) -> Decimal:
         return sum((bill.amount or Decimal("0") for bill in self.of(group)), Decimal("0"))
 
+    def find(self, wanted: str) -> Bill | None:
+        """Счёт по `bill_id` - среди невыставленных и выставленных."""
+        return next((bill for bill in [*self.bills, *self.done] if bill.id == wanted), None)
+
 
 def build_board(
     values: Sequence[Sequence[Any]], *, title: str, worksheet: str, spreadsheet_id: str = ""
@@ -233,7 +285,7 @@ def build_board(
     except LayoutError as exc:
         raise BillsError(str(exc)) from exc
     bills: list[Bill] = []
-    issued: set[str] = set()
+    done: list[Bill] = []
     count = 0
     for offset, raw in enumerate(values[1:]):
         row = [str(cell) for cell in raw]
@@ -244,32 +296,32 @@ def build_board(
         count += 1
         text = layout.cell(row, "bill").strip()
         group = state_of(text)
-        if group is None:
-            issued.add(
-                bill_key(layout.cell(row, "own").strip(), customer, number, layout.cell(row, "month").strip())
-            )
-            continue
         amount_text = layout.cell(row, "amount").strip()
-        bills.append(
-            Bill(
-                line=offset + 2,
-                group=group,
-                text=text,
-                own=layout.cell(row, "own").strip(),
-                customer=customer,
-                number=number,
-                month=layout.cell(row, "month").strip(),
-                month_no=_int(layout.cell(row, "month_no")),
-                kind=layout.cell(row, "kind").strip(),
-                staff=layout.cell(row, "staff").strip(),
-                department=layout.cell(row, "department").strip(),
-                amount=read_money(amount_text) if amount_text else None,
-                period_from=read_date(layout.cell(row, "period_from")),
-                paid=_paid(layout.cell(row, "paid")),
-                status=layout.cell(row, "status").strip(),
-                note=layout.cell(row, "note").strip(),
-            )
+        bill = Bill(
+            line=offset + 2,
+            group=DONE if group is None else group,
+            text=text,
+            own=layout.cell(row, "own").strip(),
+            customer=customer,
+            number=number,
+            month=layout.cell(row, "month").strip(),
+            month_no=_int(layout.cell(row, "month_no")),
+            kind=layout.cell(row, "kind").strip(),
+            staff=layout.cell(row, "staff").strip(),
+            department=layout.cell(row, "department").strip(),
+            amount=read_money(amount_text) if amount_text else None,
+            period_from=read_date(layout.cell(row, "period_from")),
+            period_to=read_date(layout.cell(row, "period_to")),
+            paid=_paid(layout.cell(row, "paid")),
+            status=layout.cell(row, "status").strip(),
+            note=layout.cell(row, "note").strip(),
+            bill_no=layout.cell(row, "bill_no").strip(),
+            bill_date=layout.cell(row, "bill_date").strip(),
+            bill_period=layout.cell(row, "bill_period").strip(),
+            onec_name=layout.cell(row, "onec_name").strip(),
+            signed_at=layout.cell(row, "signed_at").strip(),
         )
+        (done if group is None else bills).append(bill)
     if not count:
         # Пустой лист под шапкой - это сводка, которую формула ещё собирает, а не
         # «всё выставлено»: прежнее чтение остаётся, бот не правит пост в пустоту.
@@ -283,7 +335,99 @@ def build_board(
         bills=bills,
         rows=count,
         drift=layout.describe_drift(),
-        issued=issued,
+        issued={bill.key for bill in done},
+        done=done,
+    )
+
+
+# ── Записанное из KORT ───────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class Mark:
+    """Что KORT только что записал в книгу юрлица - до того, как это покажет сводка."""
+
+    issued: bool
+    bill_no: str
+    bill_date: str
+    bill_period: str
+    note: str
+    written_at: datetime
+    at: float
+
+
+_marks: dict[uuid.UUID, dict[str, Mark]] = {}
+
+
+def mark(workspace_id: uuid.UUID, key: str, values: dict[str, str]) -> None:
+    """Запомнить записанное в книгу юрлица: `values` - как его покажет книга."""
+    stamp = Mark(
+        issued=bool(values.get("bill_no", "").strip()),
+        bill_no=values.get("bill_no", ""),
+        bill_date=values.get("bill_date", ""),
+        bill_period=values.get("bill_period", ""),
+        note=values.get("note", ""),
+        written_at=datetime.now(timezone.utc),
+        at=time.monotonic(),
+    )
+    with _guard:
+        _marks.setdefault(workspace_id, {})[key] = stamp
+        slot = _slots.get(workspace_id)
+        if slot is not None:
+            slot.at = 0.0  # следующее обращение перечитает сводку
+
+
+def _group_by_date(period_from: date | None, today: date) -> str:
+    """Группа снятой отметки до перечитывания сводки - тем же правилом, что формула книги."""
+    if period_from is None:
+        return UNDATED
+    if (period_from - today).days > 3:
+        return EARLY
+    return SOON if period_from >= today else OVERDUE
+
+
+def view(workspace_id: uuid.UUID, board: Board) -> Board:
+    """Книга с записанным из KORT: пока сводка его не показала, верим записи.
+
+    Отметка уходит, когда сводка, прочитанная после записи, показывает то же
+    самое, или через `MARK_TTL`: тогда книгу, видимо, поправили руками, и права
+    книга, а не KORT.
+    """
+    now = time.monotonic()
+    with _guard:
+        marks = _marks.get(workspace_id)
+        if not marks:
+            return board
+        for key, stamp in list(marks.items()):
+            shown = (key in board.issued) == stamp.issued
+            if now - stamp.at > MARK_TTL or (shown and board.read_at >= stamp.written_at):
+                del marks[key]
+        marks = dict(marks)
+    if not marks:
+        return board
+    today = datetime.now(TZ).date()
+    bills: list[Bill] = []
+    done: list[Bill] = []
+    for bill in [*board.bills, *board.done]:
+        stamp = marks.get(bill.key)
+        if stamp is None:
+            (done if bill.group == DONE else bills).append(bill)
+            continue
+        fields = {
+            "bill_no": stamp.bill_no,
+            "bill_date": stamp.bill_date,
+            "bill_period": stamp.bill_period,
+            "note": stamp.note,
+        }
+        if stamp.issued:
+            done.append(dataclasses.replace(bill, group=DONE, text="TRUE", **fields))
+        else:
+            group = bill.group if bill.group != DONE else _group_by_date(bill.period_from, today)
+            text = bill.text if bill.group != DONE else "отметка снята в KORT"
+            bills.append(dataclasses.replace(bill, group=group, text=text, **fields))
+    bills.sort(key=_order)
+    return dataclasses.replace(
+        board, bills=bills, done=done, issued={bill.key for bill in done}
     )
 
 
@@ -374,9 +518,20 @@ def get(session: Session, workspace_id: uuid.UUID, *, wait: float = FIRST_READ_W
     return slot
 
 
+def current(session: Session, workspace_id: uuid.UUID, **kwargs: Any) -> tuple[Board | None, str]:
+    """Книга с записанным из KORT и отказ чтения, если был. `(None, "")` - книга не подключена."""
+    slot = get(session, workspace_id, **kwargs)
+    if slot is None:
+        return None, ""
+    with _guard:
+        board, error = slot.board, slot.error
+    return (view(workspace_id, board) if board is not None else None), error
+
+
 def forget(workspace_id: uuid.UUID) -> None:
     with _guard:
         _slots.pop(workspace_id, None)
+        _marks.pop(workspace_id, None)
 
 
 # ── Наружу ───────────────────────────────────────────────────────────────────
@@ -391,27 +546,42 @@ def counts_out(board: Board) -> dict[str, Any]:
     }
 
 
+def window_start(today: date) -> date:
+    """Первое число прошлого месяца: с него «Выставлены» и окно бота."""
+    year, month = (today.year, today.month - 1) if today.month > 1 else (today.year - 1, 12)
+    return date(year, month, 1)
+
+
+def recent(board: Board, today: date | None = None) -> list[Bill]:
+    """Выставленные за прошлый и текущий месяц (по «Периоду с») - свежие первыми.
+
+    Весь год выставленного - тысяча строк, и правят обычно вчерашнее: окно то
+    же, что у бота.
+    """
+    start = window_start(today or datetime.now(TZ).date())
+    items = [bill for bill in board.done if bill.period_from is not None and bill.period_from >= start]
+    return sorted(items, key=lambda bill: (bill.period_from or date.min, bill.line), reverse=True)
+
+
 def board_out(session: Session, workspace_id: uuid.UUID, *, force: bool = False) -> dict[str, Any]:
-    """Раздел «Счета → Не выставлены»: строки, числа по группам и откуда они."""
-    slot = get(session, workspace_id, force=force)
-    if slot is None:
-        return {"source": None, "items": [], "counts": None}
-    with _guard:
-        board, error = slot.board, slot.error
+    """Раздел «Счета»: невыставленные с числами по группам, недавно выставленные и откуда они."""
+    board, error = current(session, workspace_id, force=force)
     source = source_of(session, workspace_id)
-    out: dict[str, Any] = {
+    if source is None:
+        return {"source": None, "items": [], "issued": [], "counts": None}
+    return {
         "source": {
-            "title": (board.title if board else "") or (source.title if source else ""),
-            "worksheet": source.worksheet if source else "",
-            "url": f"https://docs.google.com/spreadsheets/d/{source.spreadsheet_id}/edit" if source else "",
+            "title": (board.title if board else "") or source.title,
+            "worksheet": source.worksheet,
+            "url": f"https://docs.google.com/spreadsheets/d/{source.spreadsheet_id}/edit",
             "read_at": board.read_at.isoformat() if board else None,
             "drift": board.drift if board else "",
             "error": error,
         },
         "items": [bill.out() for bill in board.bills] if board else [],
+        "issued": [bill.out() for bill in recent(board)] if board else [],
         "counts": counts_out(board) if board else None,
     }
-    return out
 
 
 def badge(session: Session, workspace_id: uuid.UUID) -> dict[str, int] | None:
@@ -424,7 +594,7 @@ def badge(session: Session, workspace_id: uuid.UUID) -> dict[str, int] | None:
         board = slot.board
     if board is None:
         return None
-    counts = board.counts()
+    counts = view(workspace_id, board).counts()
     return {OVERDUE: counts[OVERDUE], SOON: counts[SOON]}
 
 
@@ -433,18 +603,25 @@ __all__ = [
     "BillsError",
     "Board",
     "COLUMNS",
+    "DONE",
     "EARLY",
     "GROUPS",
     "OVERDUE",
     "SOON",
     "UNDATED",
     "badge",
+    "bill_id",
     "bill_key",
     "board_out",
     "build_board",
     "counts_out",
+    "current",
     "forget",
     "get",
+    "mark",
     "read_date",
+    "recent",
     "state_of",
+    "view",
+    "window_start",
 ]

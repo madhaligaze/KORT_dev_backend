@@ -49,6 +49,10 @@ ALLOWED: dict[tuple[str, str], str] = {
     ("POST", "/recurrences/materialize"): (
         "пустое продление ничего не меняет и не пишет; с новыми ожиданиями пишет recurrence.materialize"
     ),
+    ("POST", "/bills/template"): (
+        "разбирает загруженный шаблон счетов и возвращает его строки; в книги каждую строку пишет "
+        "POST /bills/{bill_id}, и событие - там"
+    ),
     ("PUT", "/looks/{key}"): "личный вид листа - настройка экрана одной учётки, не данные компании",
     ("DELETE", "/looks/{key}"): "сброс личного вида листа - настройка экрана одной учётки, не данные компании",
     ("POST", "/looks/habits/{group}"): "привычка вида раздела (минуты в «Таблице» и «Карточках») - экран одной учётки",
@@ -447,6 +451,37 @@ def test_kazhdyy_izmenyayushchiy_marshrut_pishet_sobytie(app: FastAPI, monkeypat
     )
     walk.call(owner, "POST", "/contracts/setup/summary",
               json={"link": "https://docs.google.com/spreadsheets/d/abc123/edit", "worksheet": "Сводка"})
+
+    # ── карточка счёта пишет в книгу юрлица: книги - в памяти ───────────
+    from app.finance.contracts import bill_book
+    from app.finance.contracts import bills as bills_module
+    from bill_book_fake import fake_api
+
+    monkeypatch.setattr(
+        bills_module,
+        "_read",
+        lambda spreadsheet_id, tab: bills_module.build_board(
+            [
+                ["Наша Фирма", "Заказчик (Название Фирмы)", "№ Договора", "Техн. 1", "Счет", "Период с (нач.)"],
+                ["BBCL", "ТОО KENESARY AGRO", "№ЮО/44", "ОКТЯБРЬ 2026", "Сегодня день выставления", "22.10.2026"],
+            ],
+            title="Сводка",
+            worksheet=tab,
+        ),
+    )
+    books = fake_api()
+    books.summary_id = "abc123"
+    monkeypatch.setattr(bill_book, "_api", books)
+    bill_book.forget()
+    bills_module._slots.clear()  # чтение до подмены (без кредов Google) держалось бы минуту
+    listed = owner.get(f"{BASE}/bills").json()
+    assert len(listed["items"]) == 1, "ошибка: " + str(listed["source"]["error"])
+    [bill] = listed["items"]
+    card = owner.get(f"{BASE}/bills/{bill['id']}").json()
+    walk.call(owner, "POST", "/bills/{bill_id}", bill_id=bill["id"],
+              json={"values": {"bill_no": "312", "bill_date": "2026-10-22"}, "expect": card["book"]["fields"]})
+    bill_book.forget()
+
     walk.call(owner, "DELETE", "/contracts/setup/summary")
 
     # ── загрузка реестра ────────────────────────────────────────────────

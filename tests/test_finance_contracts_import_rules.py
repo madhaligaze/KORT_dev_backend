@@ -428,7 +428,8 @@ def test_vygruzka_potokom_derzhit_oformlenie(finance_db):
     assert header[0].value == "№" and all(cell.font.b for cell in header if cell.value)
     assert header[1].fill.start_color.rgb.endswith("D9E1F2")
     signed = next(i for i, cell in enumerate(header) if cell.value == "Дата заключения Договора")
-    assert sheet.cell(row=2, column=signed + 1).number_format == "DD.MM.YYYY"
+    # Строчными: «DD» просмотр Apple читает как номер дня в году (23.10 - «296.10»).
+    assert sheet.cell(row=2, column=signed + 1).number_format == "dd.mm.yyyy"
     assert sheet.max_row == 7  # шапка и шесть договоров
     other = book["Прочие договоры"]
     rows = [[cell.value for cell in row] for row in other.iter_rows()]

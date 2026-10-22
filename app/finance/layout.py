@@ -85,6 +85,11 @@ class Column:
 
     `required=False` - колонка может отсутствовать. Тогда `Layout.cell` вернёт
     пустую строку, и парсер получит None/0, как для пустой ячейки.
+
+    `strict=True` - только точное название, без «похожего». Нужно колонке, чьё
+    название начинается с названия соседки: «Счет за Период (Коммент)» без
+    точного совпадения находилась «похожей» на «Счет», и лист без неё не
+    читался вовсе (22.10.2026).
     """
 
     key: str
@@ -92,6 +97,7 @@ class Column:
     names: tuple[str, ...]
     hint: int | None = None
     required: bool = True
+    strict: bool = False
 
     def matches_exact(self, header: str) -> bool:
         return any(norm(header) == norm(name) for name in self.names)
@@ -215,11 +221,10 @@ def _candidates(column: Column, headers: Sequence[str]) -> tuple[list[int], str]
     Три ступени, от строгой к мягкой. Мягкая включается, только если строгая не
     дала ничего: точное совпадение всегда бьёт похожее.
     """
-    for how, predicate in (
-        ("exact", column.matches_exact),
-        ("squashed", column.matches_squashed),
-        ("loose", column.matches_loose),
-    ):
+    stages = [("exact", column.matches_exact), ("squashed", column.matches_squashed)]
+    if not column.strict:
+        stages.append(("loose", column.matches_loose))
+    for how, predicate in stages:
         found = [
             index
             for index, header in enumerate(headers)

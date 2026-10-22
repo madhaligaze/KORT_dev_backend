@@ -6,7 +6,10 @@
 которыми пользуются «Финансы»: список книг, вкладки книги и значения вкладки.
 
 Права - только чтение (`spreadsheets.readonly`): учёт книгу не правит, правка
-живёт в учёте, а книга остаётся источником.
+живёт в учёте, а книга остаётся источником. Одно исключение - `writer()`:
+отметку «счёт выставлен» KORT ставит в книгу юрлица сам
+(`contracts/bill_book.py`, 22.10.2026). Это отдельный токен с правом записи, и
+берёт его только тот модуль.
 """
 from __future__ import annotations
 
@@ -59,17 +62,17 @@ def is_configured() -> bool:
     return bool(finance_settings.credentials_available)
 
 
-def _load_credentials() -> Credentials:
+def _load_credentials(scopes: list[str] = GOOGLE_SCOPES) -> Credentials:
     raw = (finance_settings.service_account_json or "").strip()
     if not raw:
         raise GoogleError("Не заданы креды Google (FINANCE_SERVICE_ACCOUNT_JSON)")
     try:
         if raw.startswith("{"):
-            return Credentials.from_service_account_info(json.loads(raw), scopes=GOOGLE_SCOPES)
+            return Credentials.from_service_account_info(json.loads(raw), scopes=scopes)
         path = finance_settings.credentials_path
         if path is None or not path.is_file():
             raise GoogleError(f"Файл кредов Google не найден: {path or raw}")
-        return Credentials.from_service_account_file(str(path), scopes=GOOGLE_SCOPES)
+        return Credentials.from_service_account_file(str(path), scopes=scopes)
     except (ValueError, OSError) as exc:
         raise GoogleError(f"Некорректные креды Google: {exc}") from exc
 
@@ -77,6 +80,20 @@ def _load_credentials() -> Credentials:
 @lru_cache(maxsize=1)
 def _client() -> gspread.Client:
     return gspread.authorize(_load_credentials())
+
+
+#: Токен записи - только для отметки счёта в книге юрлица (`contracts/bill_book.py`).
+WRITE_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+
+
+@lru_cache(maxsize=1)
+def _write_credentials() -> Credentials:
+    return _load_credentials(WRITE_SCOPES)
+
+
+def writer() -> gspread.Client:
+    """Новый клиент с правом записи - свой на поток, токен общий. Кроме `bill_book.py` его никто не берёт."""
+    return gspread.authorize(_write_credentials())
 
 
 # ── Кэш ─────────────────────────────────────────────────────────────────────
@@ -261,4 +278,5 @@ __all__ = [
     "is_configured",
     "list_spreadsheets",
     "spreadsheet_meta",
+    "writer",
 ]
