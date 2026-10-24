@@ -1,7 +1,7 @@
-"""Бот «Счета к выставлению»: книга-сводка → канал Telegram, два поста - абонентская плата и аренда.
+"""Бот «Счета к выставлению»: книга-сводка → канал Telegram, посты абонентской платы и аренды и у каждого - пост просроченного.
 
-Как складывалось (22.10.2026, владелец и заказчик)
-──────────────────────────────────────────────────
+Как складывалось (22.10.2026 - 24.10.2026, владелец и заказчик)
+───────────────────────────────────────────────────────────────
 * Ночью - владелец: окно - текущий и прошлый месяц; пост по часам, прошлый
   удаляется; новое - сразу, круглосуточно и со звуком; выставленное уходит.
 * Вечером - заказчик, шаблон v1.3: день счёта - «Период с», выставлен - «Счет»;
@@ -12,26 +12,31 @@
   шаблон был примером, а не образцом для копии. Имя клиента в посте -
   ссылка на карточку счёта в KORT, где его отмечают выставленным прямо в книге
   (`contracts/bill_book.py`).
+* 24.10 - владелец: просроченное - отдельным постом, а не разделом среди
+  счетов дня. Пост просроченного - у каждого вида свой: абонентскую плату и
+  аренду владелец уже развёл по постам, и общий пост смешал бы их снова.
 
 Что попадает в пост
 ───────────────────
 * **Галочка «Счет» (колонка Y) - выставлен**, в посте его нет.
 * **День счёта - «Период с» (колонка S).** Счёт приходит в свой день, а не
-  «через 3 дня». Не выставили - назавтра раздел «вчерашнее», дальше -
-  «просрочено» с датой срока у строки. Срок - по дате, а не словами книги:
-  так велел заказчик, и 22.10 слова книги считались от той же колонки S.
+  «через 3 дня». Не выставили - назавтра раздел «вчерашнее», дальше - пост
+  просроченного своего вида, с датой срока у строки. Срок - по дате, а не
+  словами книги: так велел заказчик, и 22.10 слова книги считались от той же
+  колонки S.
 * **Вид - «Вид Услуги»**: «Абон.П.» - пост абонентской платы, «Аренда» - пост
   аренды; «Разовый» и «Прочее» не присылаются. Где вида нет («нет», пусто),
   аренду узнаём по отделу «Аренда». Прочее без вида не угадывается: строка
   «Без вида услуги» в посте абонентской платы называет такие счета, чтобы
   книгу поправили, а не чтобы счёт тихо пропал. Так же - «Без даты».
 * **Окно - прошлый и текущий месяц** по «Периоду с» (владелец: 84
-  просроченных разом - «странно и неудобно»). Старше - одной строкой.
+  просроченных разом - «странно и неудобно»). Старше - одной строкой в посте
+  просроченного.
 
 Когда
 ─────
 * **По часам** - с `FINANCE_BILLS_HOUR` через `FINANCE_BILLS_EVERY` до 20:00
-  по Астане (9, 11 … 19), каждый день: оба поста заново, прошлые удаляются, в
+  по Астане (9, 11 … 19), каждый день: все посты заново, прошлые удаляются, в
   канале по одному актуальному. Строка под шапкой - что изменилось с прошлого,
   если изменилось.
 * **Новое - сразу**, в любое время и со звуком: счёт впервые попал в пост
@@ -49,19 +54,19 @@
 Не дважды
 ─────────
 Час поста (`counters`: `bills.day`, `bills.post`, `bills.hash` - абонентская
-плата, `….rent` - аренда) и «счёт уже был в посте» (`bill_notices`, группа
-`due`) помнит база, а не процесс: перезапуск и два экземпляра API на время
-выкладки не повторят пост. Telegram не принял - час и счета освобождаются,
-следующий проход (через минуту) пробует снова.
+плата, `….rent` - аренда, `….late` - их просроченное) и «счёт уже был в
+посте» (`bill_notices`, группа `due`) помнит база, а не процесс: перезапуск и
+два экземпляра API на время выкладки не повторят пост. Telegram не принял -
+час и счета освобождаются, следующий проход (через минуту) пробует снова.
 
 Первый запуск запоминает текущий список молча (`bills.seeded`): иначе бот на
-выкладке выдал бы весь список «новым». Переход с одного поста на два
-(`bills.seeded` 2 → 3): висящий пост правится в пост абонентской платы, пост
-аренды выходит рядом без звука.
+выкладке выдал бы весь список «новым». Переход, пока в канале висят посты
+прежнего вида (`bills.seeded` 2 или 3 → 4): висящие правятся в новый вид, а
+недостающие посты (аренда, просроченное) выходят рядом без звука.
 
 Пост не длиннее `LIMIT` видимых знаков и `ENTITIES` выделений: Telegram режет
 на 4096 и после сотни выделений перестаёт их показывать. Не влезло - уходят
-самые старые просроченные, строкой «и ещё N - в KORT».
+самые старые, строкой «и ещё N - в KORT».
 """
 from __future__ import annotations
 
@@ -116,20 +121,31 @@ NOTICE_KEEP = timedelta(days=100)
 ABON = "abon"
 RENT = "rent"
 KINDS = (ABON, RENT)
+#: Просроченное вида - своим постом, а не разделом среди счетов дня.
+ABON_LATE = "abon-late"
+RENT_LATE = "rent-late"
+LATE_POSTS = {ABON: ABON_LATE, RENT: RENT_LATE}
+#: Все посты в порядке выкладки: за постом вида - его просроченное.
+ORDER = (ABON, ABON_LATE, RENT, RENT_LATE)
+#: Вид счетов в посте.
+KIND_OF = {ABON: ABON, ABON_LATE: ABON, RENT: RENT, RENT_LATE: RENT}
 SKIP = "skip"
 UNKNOWN = "unknown"
 TITLES = {ABON: "Абонентская плата", RENT: "Аренда"}
 
-#: Счётчики поста каждого вида. Абонентская плата - прежние имена: висящий
+#: Счётчики каждого поста. Абонентская плата - прежние имена: висящий
 #: пост одного вида правится в её пост, а не выходит заново.
-DAYS = {ABON: "bills.day", RENT: "bills.day.rent"}
-POSTS = {ABON: "bills.post", RENT: "bills.post.rent"}
-HASHES = {ABON: "bills.hash", RENT: "bills.hash.rent"}
+DAYS = {ABON: "bills.day", RENT: "bills.day.rent", ABON_LATE: "bills.day.late", RENT_LATE: "bills.day.rent.late"}
+POSTS = {ABON: "bills.post", RENT: "bills.post.rent", ABON_LATE: "bills.post.late", RENT_LATE: "bills.post.rent.late"}
+HASHES = {
+    ABON: "bills.hash", RENT: "bills.hash.rent", ABON_LATE: "bills.hash.late", RENT_LATE: "bills.hash.rent.late"
+}
 SEEDED = "bills.seeded"
 PIN = "bills.pin"
 COUNTERS = (*DAYS.values(), *POSTS.values(), *HASHES.values(), SEEDED, PIN)
-#: `bills.seeded` нынешнего вида: 1 - сообщения «новое», 2 - один пост на оба вида.
-SEED_VERSION = 3
+#: `bills.seeded` нынешнего вида: 1 - сообщения «новое», 2 - один пост на оба вида,
+#: 3 - просроченное разделом в посте вида.
+SEED_VERSION = 4
 #: Группа записи `bill_notices`: счёт был в посте. Прежние `soon`/`overdue` стираются при первом запуске.
 DUE = "due"
 
@@ -260,6 +276,17 @@ def stage_of(bill: bills.Bill, today: date) -> str:
     return LATE
 
 
+def is_late(kind: str | None) -> bool:
+    """Пост просроченного, а не счетов дня."""
+    return kind in (ABON_LATE, RENT_LATE)
+
+
+def post_of(bill: bills.Bill, today: date) -> str:
+    """В каком посте счёт, чей день наступил: в посте своего вида или в его просроченном."""
+    kind = kind_of(bill)
+    return LATE_POSTS[kind] if stage_of(bill, today) == LATE else kind
+
+
 @dataclass(frozen=True)
 class Plan:
     """Что пора выставить на сегодня - и что в пост не попало, но назвать надо."""
@@ -285,16 +312,21 @@ class Plan:
 
 
 def plan(board: bills.Board, now: datetime, kind: str | None = None) -> Plan:
-    """Счета поста `kind`; `None` - обоих. «Без вида услуги» - в посте абонентской платы."""
+    """Счета поста `kind` (`ORDER`); `None` - всех постов.
+
+    «Без вида услуги» - в посте абонентской платы, «без даты» - в посте вида,
+    хвост раньше окна - в посте просроченного.
+    """
     today = now.astimezone(TZ).date()
     start = window_start(now)
+    want = KIND_OF[kind] if kind is not None else None
     due: list[bills.Bill] = []
     tail: list[bills.Bill] = []
     undated: list[bills.Bill] = []
     unknown: list[bills.Bill] = []
     for bill in board.bills:
         sort = kind_of(bill)
-        if sort == SKIP or (kind is not None and sort != kind and not (sort == UNKNOWN and kind == ABON)):
+        if sort == SKIP or (want is not None and sort != want and not (sort == UNKNOWN and want == ABON)):
             continue
         when = bill.period_from
         if when is None:
@@ -309,7 +341,12 @@ def plan(board: bills.Board, now: datetime, kind: str | None = None) -> Plan:
                 tail.append(bill)
             continue
         (due if sort in KINDS else unknown).append(bill)
-    return Plan(today, start, tuple(due), tuple(tail), tuple(undated), tuple(unknown))
+    if kind is None:
+        return Plan(today, start, tuple(due), tuple(tail), tuple(undated), tuple(unknown))
+    if is_late(kind):
+        return Plan(today, start, tuple(bill for bill in due if stage_of(bill, today) == LATE), tuple(tail), (), ())
+    due = [bill for bill in due if stage_of(bill, today) != LATE]
+    return Plan(today, start, tuple(due), (), tuple(undated), tuple(unknown))
 
 
 # ── Пост ─────────────────────────────────────────────────────────────────────
@@ -330,7 +367,7 @@ class Section:
     def head(self) -> str:
         title = f"<b>{_esc(self.firm or 'без юрлица')}</b>"
         if self.stage == LATE:
-            return f"{title} · просрочено"
+            return title  # что просрочено, говорит шапка поста
         first = self.items[0]
         period = f"{first.period_from:%d.%m}" + (f" - {first.period_to:%d.%m}" if first.period_to else "")
         return f"{title} · " + ("вчерашнее, " if self.stage == YESTERDAY else "") + period
@@ -364,14 +401,15 @@ def sections(items: Iterable[bills.Bill], today: date) -> list[Section]:
 def listed(board: bills.Board) -> tuple[date, list[bills.Bill]]:
     """Счета постов в порядке постов - для шаблона Excel раздела «Счета» (`contracts/bill_template.py`).
 
-    Абонентская плата, затем аренда - по разделам поста; за ними те, что пост
-    называет строкой: «без вида услуги» и «без даты». Финансисты заполняют те
-    же счета, что видят в канале. Возвращает и день, на который список.
+    Абонентская плата и её просроченное, затем так же аренда - по разделам
+    поста; за ними те, что пост называет строкой: «без вида услуги» и «без
+    даты». Финансисты заполняют те же счета, что видят в канале. Возвращает и
+    день, на который список.
     """
     now = _now()
     due: list[bills.Bill] = []
     named: list[bills.Bill] = []
-    for kind in KINDS:
+    for kind in ORDER:
         p = plan(board, now, kind)
         due.extend(bill for part in sections(p.due, p.today) for bill in part.items)
         named.extend((*p.unknown, *p.undated))
@@ -428,8 +466,14 @@ class Post:
         return int(hashlib.sha1(self.body.encode()).hexdigest()[:15], 16)
 
 
+def heading(kind: str, day: date) -> str:
+    """«Абонентская плата: счета к выставлению (22.10.2026)»; у поста просроченного - «просроченные счета»."""
+    what = "просроченные счета" if is_late(kind) else "счета к выставлению"
+    return f"<b>{TITLES[KIND_OF[kind]]}: {what} ({day:%d.%m.%Y})</b>"
+
+
 def _body(kind: str, p: Plan, parts: list[Section], shown: set[int], note: str) -> str:
-    lines = [f"<b>{TITLES[kind]}: счета к выставлению ({p.today:%d.%m.%Y})</b>"]
+    lines = [heading(kind, p.today)]
     if note:
         lines.append(f"<i>{_esc(note)}</i>")
     dropped: list[bills.Bill] = []
@@ -510,8 +554,7 @@ def since_line(previous: frozenset[str], previous_at: datetime, board: bills.Boa
 
 def _cleared(kind: str, now: datetime) -> str:
     """Telegram не дал удалить пост (старше 48 часов) - пост так и говорит, а не висит списком."""
-    local = now.astimezone(TZ)
-    return f"<b>{TITLES[kind]}: счета к выставлению ({local:%d.%m.%Y})</b>\n\nВсё выставлено."
+    return f"{heading(kind, now.astimezone(TZ).date())}\n\nВсё выставлено."
 
 
 def keyboard() -> dict[str, Any]:
@@ -890,9 +933,9 @@ def _announce(
 def tick(api: Bot, chat: str, now: datetime | None = None) -> str:
     """Один проход: посты по часу, новое - сразу, правка текущих.
 
-    Возвращает сделанное через «+» с видом поста (`abon-posted+rent-posted`,
-    `rent-new`, `seeded`, `abon-edited`, `rent-deleted`, `abon-same`), `wait` -
-    ничего; `no-workspace` / `no-board` - читать нечего.
+    Возвращает сделанное через «+» с постом (`abon-posted+abon-late-posted`,
+    `rent-new`, `seeded`, `abon-edited`, `rent-late-deleted`, `abon-same`),
+    `wait` - ничего; `no-workspace` / `no-board` - читать нечего.
     """
     now = now or _now()
     workspace_id = target_workspace()
@@ -910,19 +953,27 @@ def tick(api: Bot, chat: str, now: datetime | None = None) -> str:
 def _tick(api: Bot, chat: str, workspace_id: uuid.UUID, board: bills.Board, now: datetime) -> str:
     done: list[str] = []
     fresh_post: set[str] = set()
-    if _value(workspace_id, SEEDED) == 2:
-        # Переход с одного поста на два: час аренды - тот же, что у висящего
-        # поста, иначе в этот же час вышел бы второй пост аренды. Висящий пост
-        # правится в пост абонентской платы ниже, аренда выходит рядом без звука.
-        _set(workspace_id, DAYS[RENT], max(_value(workspace_id, DAYS[RENT]), _value(workspace_id, DAYS[ABON])))
+    seeded = _value(workspace_id, SEEDED)
+    if 2 <= seeded < SEED_VERSION:
+        # В канале висят посты прежнего вида: один общий (2) или по посту на
+        # вид с просроченным внутри (3). Новый пост берёт час того, в котором
+        # были его счета, иначе в этот же час вышел бы второй. Висящие посты
+        # правятся ниже, недостающие выходят рядом без звука: просроченное
+        # уходит из поста вида и не должно пропасть из канала до следующего часа.
+        moved: list[str] = []
+        for kind in ORDER:
+            was = KIND_OF[kind] if seeded == 3 else ABON
+            _set(workspace_id, DAYS[kind], max(_value(workspace_id, DAYS[kind]), _value(workspace_id, DAYS[was])))
+            if _value(workspace_id, POSTS[was]) and not _value(workspace_id, POSTS[kind]):
+                moved.append(kind)
         remember(workspace_id, board, now)
         done.append("seeded")
-        if _value(workspace_id, POSTS[ABON]) and not _value(workspace_id, POSTS[RENT]):
-            done.append("rent-" + _publish(api, chat, workspace_id, board, now, RENT, at=now, silent=True, extras_alone=True))
-            fresh_post.add(RENT)
+        for kind in moved:
+            done.append(f"{kind}-" + _publish(api, chat, workspace_id, board, now, kind, at=now, silent=True, extras_alone=True))
+            fresh_post.add(kind)
     hour = slot_of(now)
     if hour is not None:
-        for kind in KINDS:
+        for kind in ORDER:
             previous = claim(workspace_id, hour, kind)
             if previous is None:
                 continue
@@ -941,8 +992,8 @@ def _tick(api: Bot, chat: str, workspace_id: uuid.UUID, board: bills.Board, now:
         fresh = claim_new(workspace_id, board, now)
         if fresh:
             p = plan(board, now)
-            for kind in KINDS:
-                mine = {bill.key for bill in p.due if bill.key in fresh and kind_of(bill) == kind}
+            for kind in ORDER:
+                mine = {bill.key for bill in p.due if bill.key in fresh and post_of(bill, p.today) == kind}
                 if not mine or kind in fresh_post:
                     continue
                 announced = _announce(api, chat, workspace_id, board, now, kind, mine)
@@ -950,7 +1001,7 @@ def _tick(api: Bot, chat: str, workspace_id: uuid.UUID, board: bills.Board, now:
                     done.append(f"{kind}-{announced}")
                     fresh_post.add(kind)
     forget_issued(workspace_id, board, now)
-    for kind in KINDS:
+    for kind in ORDER:
         if kind in fresh_post:
             continue
         edited = _edit_post(api, chat, workspace_id, board, now, kind)
@@ -962,8 +1013,12 @@ def _tick(api: Bot, chat: str, workspace_id: uuid.UUID, board: bills.Board, now:
 
 
 def _counts(board: bills.Board, now: datetime) -> str:
-    """«абонентская плата - 11 счетов, аренда - 32 счёта»: сколько счетов в каждом посте."""
-    return ", ".join(f"{TITLES[kind].lower()} - {_bills(len(plan(board, now, kind).due))}" for kind in KINDS)
+    """«абонентская плата - 11 счетов (просрочено 4), аренда - 32 счёта»: сколько счетов в постах вида."""
+    out: list[str] = []
+    for kind in KINDS:
+        due, late = (len(plan(board, now, post).due) for post in (kind, LATE_POSTS[kind]))
+        out.append(f"{TITLES[kind].lower()} - {_bills(due + late)}" + (f" (просрочено {late})" if late else ""))
+    return ", ".join(out)
 
 
 def pull(api: Bot, chat: str, now: datetime | None = None) -> str:
@@ -990,7 +1045,7 @@ def pull(api: Bot, chat: str, now: datetime | None = None) -> str:
         if time.monotonic() - _pulled.get(workspace_id, -PULL_GAP) < PULL_GAP:
             return recent
         results: list[str] = []
-        for kind in KINDS:
+        for kind in ORDER:
             post_id = _value(workspace_id, POSTS[kind])
             with _last_lock:
                 last = _last.get((workspace_id, kind))
@@ -1286,6 +1341,7 @@ async def run_forever() -> None:
 __all__ = [
     "KINDS",
     "LIMIT",
+    "ORDER",
     "Plan",
     "Post",
     "bill_link",

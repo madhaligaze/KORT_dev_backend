@@ -2151,6 +2151,7 @@ def create(
     block: int | None = None,
     source: str = "app",
     before: uuid.UUID | None = None,
+    contract_id: uuid.UUID | None = None,
 ) -> Contract:
     """Завести договор. Подстановки блока ставит сервер.
 
@@ -2158,11 +2159,25 @@ def create(
     начислением и смыслом этого блока - человек печатает только своё.
     `before` - договор, перед которым встать в порядке реестра (строка,
     вставленная посреди листа).
+
+    `contract_id` - код, выданный клиентом. Десктоп заводит договор без связи
+    и отправляет его, когда связь вернётся, а ответ на отправку может
+    потеряться в дороге - и та же отправка уйдёт ещё раз. Второй раз с тем же
+    кодом договор не заводится: возвращается уже заведённый.
     """
     if not access.edit:
         raise PermissionError("Заводить договоры вам не открыто")
+    if contract_id is not None:
+        found = session.get(Contract, contract_id)
+        if found is not None:
+            if found.workspace_id != workspace.id:
+                raise FinanceError("Код договора уже занят - заведите договор заново")
+            if found.deleted_at is not None:
+                raise NotFound("Договор уже заведён и удалён")
+            return found
     registry = Registry(session, workspace)
     contract = Contract(
+        id=contract_id or uuid.uuid4(),
         workspace_id=workspace.id,
         source=source,
         position=_position_before(session, workspace.id, before),

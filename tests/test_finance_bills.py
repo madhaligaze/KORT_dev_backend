@@ -6,11 +6,11 @@ Google и Telegram подменены: проверяется разбор кн�
 * колонка «Счет» находится по названию рядом с «№ Счета», «Счет за Период» и
   «Счет2» и после вставленной колонки; состояние в KORT - словами книги,
   незнакомое - в «Без срока», а не угадано;
-* два поста - абонентская плата и аренда, не вперемешку; без служебных строк
-  шаблона; день счёта по «Периоду с»; «Разовый» и «Прочее» не идут;
-  вчерашнее и просроченное - с пометкой; без вида и без даты - названы
-  строкой; имя клиента - ссылка на его карточку в KORT; длинный пост режется
-  с самых старых;
+* посты абонентской платы и аренды, не вперемешку, и у каждого - отдельный
+  пост просроченного; без служебных строк шаблона; день счёта по «Периоду с»;
+  «Разовый» и «Прочее» не идут; вчерашнее - с пометкой, просроченное - с
+  датой срока; без вида и без даты - названы строкой; имя клиента - ссылка на
+  его карточку в KORT; длинный пост режется с самых старых;
 * посты по часам: второй проход и второй процесс не выкладывают их снова,
   отказ Telegram освобождает час, отметка правит пост, всё выставлено - пост
   удалён;
@@ -18,8 +18,8 @@ Google и Telegram подменены: проверяется разбор кн�
   кнопка «Прислать сейчас» - изменившиеся посты без звука и не чаще `PULL_GAP`,
   итог на 5 секунд в канале, старые нажатия не отрабатываются;
   `/bind` ставит кнопку заново;
-* переход с одного поста на два правит висящий пост и выкладывает пост аренды
-  без звука, а не выдаёт весь список новым;
+* переход с прежних постов правит висящие и выкладывает недостающие (аренда,
+  просроченное) без звука, а не выдаёт весь список новым;
 * карточка счёта пишет в книгу юрлица, список и канал видят запись сразу,
   запись - в журнале; без права «Счета: правка» записать нельзя;
 * раздел открыт только с правом «Счета», без подключённой сводки - пусто.
@@ -252,12 +252,20 @@ ABON_POST = "\n".join(
         "<b>BBCL</b> · 22.10 - 21.11",
         f"1) {link('BBCL', 'ТОО KENESARY AGRO', '№ЮО/44')} - №ЮО/44 = 150 000 ₸",
         "",
-        "<b>BBCS</b> · просрочено",
-        f"1) {link('BBCS', 'ИП АЙЯ', '№НО/39')} - №НО/39 = 91 000 ₸ · с 20.10",
-        "",
-        "<b>ВСЕГО: 2 счёта = 241 000 ₸</b>",
+        "<b>ВСЕГО: 1 счёт = 150 000 ₸</b>",
         "",
         "Без вида услуги в книге: ADK Home",
+    ]
+)
+
+ABON_LATE_POST = "\n".join(
+    [
+        "<b>Абонентская плата: просроченные счета (22.10.2026)</b>",
+        "",
+        "<b>BBCS</b>",
+        f"1) {link('BBCS', 'ИП АЙЯ', '№НО/39')} - №НО/39 = 91 000 ₸ · с 20.10",
+        "",
+        "<b>ВСЕГО: 1 счёт = 91 000 ₸</b>",
     ]
 )
 
@@ -271,32 +279,46 @@ RENT_POST = "\n".join(
         "<b>BBC Omar</b> · вчерашнее, 21.10 - 20.11",
         f"1) {link('BBC Omar', 'ТОО Custom Trade', '№RENT/84')} - №RENT/84 = 0 ₸",
         "",
-        "<b>BBC Omar</b> · просрочено",
-        f"1) {link('BBC Omar', 'ТОО Молфуд', '№RENT/93')} - №RENT/93 = 50 000 ₸ · с 04.10",
+        "<b>ВСЕГО: 2 счёта = 0 ₸</b>",
         "",
-        "<b>ВСЕГО: 3 счёта = 50 000 ₸</b>",
-        "",
-        "Раньше сентября: ещё 3 счёта на 150 000 ₸ - список в KORT",
         "Без даты «Период с» в книге: ИП ЖАЛМҰХАН",
     ]
 )
 
+RENT_LATE_POST = "\n".join(
+    [
+        "<b>Аренда: просроченные счета (22.10.2026)</b>",
+        "",
+        "<b>BBC Omar</b>",
+        f"1) {link('BBC Omar', 'ТОО Молфуд', '№RENT/93')} - №RENT/93 = 50 000 ₸ · с 04.10",
+        "",
+        "<b>ВСЕГО: 1 счёт = 50 000 ₸</b>",
+        "",
+        "Раньше сентября: ещё 3 счёта на 150 000 ₸ - список в KORT",
+    ]
+)
 
-def test_dva_posta_bez_sluzhebnyh_strok(monkeypatch) -> None:
-    """Абонентская плата и аренда - отдельными постами; ни черт, ни «шаблон v1.3»."""
+#: Посты в порядке выкладки: за постом вида - его просроченное.
+ALL_POSTS = [ABON_POST, ABON_LATE_POST, RENT_POST, RENT_LATE_POST]
+
+
+def test_posty_bez_sluzhebnyh_strok(monkeypatch) -> None:
+    """Абонентская плата и аренда - отдельными постами, просроченное каждой - своим; ни черт, ни «шаблон v1.3»."""
     monkeypatch.setattr(finance_settings, "app_url", "https://kort.cards")
     board = board_of(SHEET)
-    abon = bills_bot.render(board, NOW, bills_bot.ABON)
-    rent_post = bills_bot.render(board, NOW, bills_bot.RENT)
-    assert abon is not None and rent_post is not None
-    assert abon.text == ABON_POST
-    assert rent_post.text == RENT_POST
-    for text in (abon.text, rent_post.text):
-        assert "---" not in text and "шаблон" not in text
-        assert chr(0x2014) not in text, "длинного тире в посте нет (CLAUDE.md)"
-    assert "TrioSynergy" not in abon.text and "Meliora" not in abon.text, "день счёта ещё не наступил"
-    assert "ТОРИ" not in abon.text + rent_post.text, "разовые не присылаются"
-    assert "Алатау" not in abon.text, "выставлен"
+    posts = [bills_bot.render(board, NOW, kind) for kind in bills_bot.ORDER]
+    assert all(post is not None for post in posts)
+    assert [post.text for post in posts] == ALL_POSTS
+    for post in posts:
+        assert "---" not in post.text and "шаблон" not in post.text
+        assert chr(0x2014) not in post.text, "длинного тире в посте нет (CLAUDE.md)"
+    abon, abon_late, rent_post, rent_late = (post.text for post in posts)
+    assert "ИП АЙЯ" not in abon and "Молфуд" not in rent_post, "просроченное - не среди счетов дня"
+    assert "Раньше сентября" not in rent_post, "старый хвост - в посте просроченного"
+    assert "TrioSynergy" not in abon and "Meliora" not in abon, "день счёта ещё не наступил"
+    assert "ТОРИ" not in "".join(post.text for post in posts), "разовые не присылаются"
+    assert "Алатау" not in abon + abon_late, "выставлен"
+    assert "Custom Trade" not in rent_late, "вчерашнее - ещё в посте дня"
 
 
 def test_dlinnyy_post_rezhetsya_so_starogo(monkeypatch) -> None:
@@ -306,26 +328,30 @@ def test_dlinnyy_post_rezhetsya_so_starogo(monkeypatch) -> None:
              period=f"{index % 20 + 1:02d}.10.2026")
         for index in range(150)
     ] + [line_of(SHEET, "ТОО Find Dream")]
-    post = bills_bot.render(board_of(many), NOW, bills_bot.RENT)
+    board = board_of(many)
+    post = bills_bot.render(board, NOW, bills_bot.RENT_LATE)
     assert post is not None
     assert bills_bot._visible(post.text) <= 4096 and bills_bot._entities(post.text) <= bills_bot.ENTITIES
-    assert "ТОО Find Dream" in post.text, "сегодняшнее не режется"
-    assert "<b>ВСЕГО: 151 счёт = 7 500 000 ₸</b>" in post.text, "итог - по всем, и по не вошедшим"
+    assert "<b>ВСЕГО: 150 счетов = 7 500 000 ₸</b>" in post.text, "итог - по всем, и по не вошедшим"
     assert "· с 20.10" in post.text and "· с 01.10" not in post.text, "уходят самые старые"
     hidden = int(post.text.split("и ещё ", 1)[1].split(" ", 1)[0])
     assert post.text.count("ТОО Арендатор с длинным названием") + hidden == 150
+    today = bills_bot.render(board, NOW, bills_bot.RENT)
+    assert today is not None and "ТОО Find Dream" in today.text, "сегодняшнее - в своём посте, его не режет"
+    assert "Арендатор" not in today.text
 
 
 def test_pustoy_spisok_ne_vykladyvaetsya() -> None:
     nothing = board_of([HEADER, line_of(SHEET, "Алатау Пауэр"), line_of(SHEET, "Meliora")])
-    assert bills_bot.render(nothing, NOW, bills_bot.ABON) is None
-    assert bills_bot.render(nothing, NOW, bills_bot.RENT) is None
+    for kind in bills_bot.ORDER:
+        assert bills_bot.render(nothing, NOW, kind) is None, kind
     tail = board_of([HEADER, line_of(SHEET, "ТОО Молфуд", "04.06.2026")])
-    assert bills_bot.render(tail, NOW, bills_bot.RENT) is None, "одно старое - только первым постом дня и по кнопке"
-    alone = bills_bot.render(tail, NOW, bills_bot.RENT, extras_alone=True)
+    assert bills_bot.render(tail, NOW, bills_bot.RENT_LATE) is None, "одно старое - только первым постом дня и по кнопке"
+    alone = bills_bot.render(tail, NOW, bills_bot.RENT_LATE, extras_alone=True)
     assert alone is not None and "Раньше сентября: ещё 1 счёт на 50 000 ₸" in alone.text
     assert "ВСЕГО" not in alone.text
-    assert bills_bot.render(tail, NOW, bills_bot.ABON, extras_alone=True) is None, "аренда в пост абонентской платы не идёт"
+    assert bills_bot.render(tail, NOW, bills_bot.RENT, extras_alone=True) is None, "старое - в посте просроченного"
+    assert bills_bot.render(tail, NOW, bills_bot.ABON_LATE, extras_alone=True) is None, "аренда в пост абонентской платы не идёт"
 
 
 # ── Посты по часам ───────────────────────────────────────────────────────────
@@ -449,8 +475,12 @@ def issue_all(values: list[list[str]]) -> None:
             line[BILL] = "TRUE"
 
 
-BOTH_POSTED = "abon-posted+rent-posted"
-BOTH_SAME = "abon-same+rent-same"
+ALL_POSTED = "abon-posted+abon-late-posted+rent-posted+rent-late-posted"
+ALL_SAME = "abon-same+abon-late-same+rent-same+rent-late-same"
+#: Начала шапок постов - для `FakeBot.posts`.
+TITLE_ABON, TITLE_ABON_LATE, TITLE_RENT, TITLE_RENT_LATE = (
+    "Абонентская плата: счета", "Абонентская плата: просроченные", "Аренда: счета", "Аренда: просроченные"
+)
 
 
 def test_posty_po_chasu_i_pravka(app: FastAPI, book) -> None:
@@ -458,11 +488,12 @@ def test_posty_po_chasu_i_pravka(app: FastAPI, book) -> None:
     connect(owner)
     api = FakeBot()
 
-    assert bills_bot.tick(api, CHAT, NOW) == BOTH_POSTED
-    abon, rent_post = api.sent("sendMessage")
-    assert abon["text"] == ABON_POST and rent_post["text"] == RENT_POST, "абонентская плата - первой"
+    assert bills_bot.tick(api, CHAT, NOW) == ALL_POSTED
+    sent = api.sent("sendMessage")
+    assert [item["text"] for item in sent] == ALL_POSTS, "абонентская плата - первой, за постом вида - его просроченное"
+    abon = sent[0]
     assert abon["chat_id"] == CHAT and abon["parse_mode"] == "HTML"
-    assert abon["disable_notification"] is None, "по часу - со звуком"
+    assert all(item["disable_notification"] is None for item in sent), "по часу - со звуком, и просроченное тоже"
     assert abon["reply_markup"]["inline_keyboard"] == [
         [
             {"text": "Прислать сейчас", "callback_data": "bills:now"},
@@ -471,38 +502,46 @@ def test_posty_po_chasu_i_pravka(app: FastAPI, book) -> None:
     ]
 
     # Второй проход и «второй процесс» (тот же час в базе) - не выкладывают снова.
-    assert bills_bot.tick(api, CHAT, NOW + timedelta(minutes=1)) == BOTH_SAME
-    for kind in bills_bot.KINDS:
+    assert bills_bot.tick(api, CHAT, NOW + timedelta(minutes=1)) == ALL_SAME
+    for kind in bills_bot.ORDER:
         assert bills_bot.claim(bills_bot.target_workspace(), bills_bot.slot_of(NOW), kind) is None
-    assert len(api.sent("sendMessage")) == 2 and not api.sent("editMessageText")
+    assert len(api.sent("sendMessage")) == 4 and not api.sent("editMessageText")
 
-    # Отметили аренду - правится только пост аренды.
+    # Отметили вчерашнюю аренду - правится только пост аренды.
+    line_of(book["values"], "ТОО Custom Trade")[BILL] = "TRUE"
+    fresh()
+    assert bills_bot.tick(api, CHAT, NOW + timedelta(minutes=5)) == "abon-same+abon-late-same+rent-edited+rent-late-same"
+    [edit] = api.sent("editMessageText")
+    assert edit["message_id"] == 103 and "Custom Trade" not in edit["text"]
+    assert "<b>ВСЕГО: 1 счёт = 0 ₸</b>" in edit["text"]
+    fresh()
+    assert bills_bot.tick(api, CHAT, NOW + timedelta(minutes=6)) == ALL_SAME
+
+    # Выставили последнее просроченное в окне - пост просроченного уходит, старый
+    # хвост одной строкой назовёт первый пост дня.
     line_of(book["values"], "ТОО Молфуд", "04.10.2026")[BILL] = "TRUE"
     fresh()
-    assert bills_bot.tick(api, CHAT, NOW + timedelta(minutes=5)) == "abon-same+rent-edited"
-    [edit] = api.sent("editMessageText")
-    assert edit["message_id"] == 102 and "ТОО Молфуд" not in edit["text"]
-    assert "<b>ВСЕГО: 2 счёта = 0 ₸</b>" in edit["text"]
-    fresh()
-    assert bills_bot.tick(api, CHAT, NOW + timedelta(minutes=6)) == BOTH_SAME
+    assert bills_bot.tick(api, CHAT, NOW + timedelta(minutes=7)) == "abon-same+abon-late-same+rent-same+rent-late-deleted"
+    assert api.sent("deleteMessage") == [{"chat_id": CHAT, "message_id": 104}]
 
     # Выставили всё - постов в канале больше нет.
     issue_all(book["values"])
     fresh()
-    assert bills_bot.tick(api, CHAT, NOW + timedelta(minutes=7)) == "abon-deleted+rent-deleted"
-    assert api.sent("deleteMessage") == [{"chat_id": CHAT, "message_id": 101}, {"chat_id": CHAT, "message_id": 102}]
-    assert bills_bot.tick(api, CHAT, NOW + timedelta(minutes=8)) == "wait"
+    assert bills_bot.tick(api, CHAT, NOW + timedelta(minutes=8)) == "abon-deleted+abon-late-deleted+rent-deleted"
+    assert [item["message_id"] for item in api.sent("deleteMessage")] == [104, 101, 102, 103]
+    assert bills_bot.tick(api, CHAT, NOW + timedelta(minutes=9)) == "wait"
 
-    # Завтра - новые посты, и вчерашнее в них - с пометкой.
+    # Завтра - новые посты: вчерашнее - с пометкой, позавчерашнее - в просроченном.
     book["values"] = [list(line) for line in SHEET]
     fresh()
-    assert bills_bot.tick(api, CHAT, NOW + timedelta(days=1)) == BOTH_POSTED
-    tomorrow = api.posts("Абонентская плата")[-1]["text"]
+    assert bills_bot.tick(api, CHAT, NOW + timedelta(days=1)) == ALL_POSTED
+    tomorrow = api.posts(TITLE_ABON)[-1]["text"]
     assert tomorrow.startswith("<b>Абонентская плата: счета к выставлению (23.10.2026)</b>")
     assert "<b>BBCL</b> · вчерашнее, 22.10 - 21.11" in tomorrow
-    assert f"{link('BBC Omar', 'ТОО Custom Trade', '№RENT/84')} - №RENT/84 = 0 ₸ · с 21.10" in (
-        api.posts("Аренда")[-1]["text"]
-    )
+    late = api.posts(TITLE_RENT_LATE)[-1]["text"]
+    assert late.startswith("<b>Аренда: просроченные счета (23.10.2026)</b>")
+    assert f"{link('BBC Omar', 'ТОО Custom Trade', '№RENT/84')} - №RENT/84 = 0 ₸ · с 21.10" in late
+    assert "Custom Trade" not in api.posts(TITLE_RENT)[-1]["text"]
 
 
 def test_otkaz_telegram_osvobozhdaet_chas(app: FastAPI, book) -> None:
@@ -513,7 +552,7 @@ def test_otkaz_telegram_osvobozhdaet_chas(app: FastAPI, book) -> None:
     with pytest.raises(TelegramError):
         bills_bot.tick(api, CHAT, NOW)
     api.fail = None
-    assert bills_bot.tick(api, CHAT, NOW + timedelta(minutes=1)) == BOTH_POSTED
+    assert bills_bot.tick(api, CHAT, NOW + timedelta(minutes=1)) == ALL_POSTED
 
 
 def test_posty_kazhdyy_den_v_svoy_chas(app: FastAPI, book) -> None:
@@ -527,8 +566,8 @@ def test_posty_kazhdyy_den_v_svoy_chas(app: FastAPI, book) -> None:
     assert bills_bot.tick(api, CHAT, early) == "seeded"
     assert bills_bot.tick(api, CHAT, late) == "wait", "по часу после 20:00 не выходит"
     assert api.calls == []
-    assert bills_bot.tick(api, CHAT, saturday) == BOTH_POSTED, "и в выходные"
-    assert len(api.sent("sendMessage")) == 2
+    assert bills_bot.tick(api, CHAT, saturday) == ALL_POSTED, "и в выходные"
+    assert len(api.sent("sendMessage")) == 4
 
 
 def test_napominanie_kazhdye_tri_chasa(app: FastAPI, book) -> None:
@@ -537,28 +576,29 @@ def test_napominanie_kazhdye_tri_chasa(app: FastAPI, book) -> None:
     connect(owner)
     api = FakeBot()
     morning = datetime(2026, 10, 22, 5, 0, tzinfo=timezone.utc)  # 10:00 в Астане
-    assert bills_bot.tick(api, CHAT, morning) == BOTH_POSTED
-    assert bills_bot.tick(api, CHAT, morning + timedelta(hours=2, minutes=59)) == BOTH_SAME, "12:59 - ещё 10:00"
+    assert bills_bot.tick(api, CHAT, morning) == ALL_POSTED
+    assert bills_bot.tick(api, CHAT, morning + timedelta(hours=2, minutes=59)) == ALL_SAME, "12:59 - ещё 10:00"
 
-    assert bills_bot.tick(api, CHAT, morning + timedelta(hours=3)) == BOTH_POSTED
-    second = api.posts("Абонентская плата")[-1]
+    assert bills_bot.tick(api, CHAT, morning + timedelta(hours=3)) == ALL_POSTED
+    second = api.posts(TITLE_ABON)[-1]
     assert second["text"].startswith("<b>Абонентская плата: счета к выставлению (22.10.2026)</b>\n\n"), (
         "ничего не изменилось - строки нет"
     )
-    assert api.sent("deleteMessage") == [{"chat_id": CHAT, "message_id": 101}, {"chat_id": CHAT, "message_id": 102}]
+    assert [item["message_id"] for item in api.sent("deleteMessage")] == [101, 102, 103, 104]
 
-    line_of(book["values"], "ИП АЙЯ")[BILL] = "TRUE"
+    line_of(book["values"], "ТОО KENESARY AGRO")[BILL] = "TRUE"
     book["values"].append(
         row(10, OCT, "BBC Omar", "ИП АЛТЫНБЕКОВА", "№ОБО/92", "Сегодня день выставления", amount="800 000",
             period="22.10.2026")
     )
     fresh()
     # Пост по часу назвал АЛТЫНБЕКОВУ - отдельного «нового» о ней нет.
-    assert bills_bot.tick(api, CHAT, morning + timedelta(hours=6)) == BOTH_POSTED
-    third = api.posts("Абонентская плата")[-1]["text"]
+    assert bills_bot.tick(api, CHAT, morning + timedelta(hours=6)) == ALL_POSTED
+    third = api.posts(TITLE_ABON)[-1]["text"]
     assert "\n<i>С 13:00 выставлено 1, добавилось 1</i>\n" in third
-    assert "<i>" not in api.posts("Аренда")[-1]["text"], "в аренде не менялось"
-    assert bills_bot.tick(api, CHAT, morning + timedelta(hours=6, minutes=1)) == BOTH_SAME
+    for title in (TITLE_ABON_LATE, TITLE_RENT, TITLE_RENT_LATE):
+        assert "<i>" not in api.posts(title)[-1]["text"], f"{title}: не менялось"
+    assert bills_bot.tick(api, CHAT, morning + timedelta(hours=6, minutes=1)) == ALL_SAME
 
     late = morning + timedelta(hours=10)  # 20:00 - по часам больше нет
     posts = len(api.sent("sendMessage"))
@@ -566,7 +606,7 @@ def test_napominanie_kazhdye_tri_chasa(app: FastAPI, book) -> None:
     assert "posted" not in bills_bot.tick(api, CHAT, morning + timedelta(hours=14))
     assert len(api.sent("sendMessage")) == posts
     assert bills_bot.slot_of(morning + timedelta(hours=24)) == 2026102310
-    assert bills_bot.tick(api, CHAT, morning + timedelta(hours=24)) == BOTH_POSTED
+    assert bills_bot.tick(api, CHAT, morning + timedelta(hours=24)) == ALL_POSTED
 
 
 NIGHT = datetime(2026, 10, 21, 22, 0, tzinfo=timezone.utc)  # 03:00 в Астане, четверг 22.10
@@ -586,10 +626,11 @@ def test_novoe_srazu_v_svoy_post(app: FastAPI, book, monkeypatch) -> None:
     fresh()
     assert bills_bot.tick(api, CHAT, NIGHT + timedelta(minutes=1)) == "abon-new"
     [first] = api.sent("sendMessage")
-    assert first["text"].startswith("<b>Абонентская плата")
+    assert first["text"].startswith("<b>Абонентская плата: счета к выставлению")
     assert f"<b>BBCS</b> · 22.10 - 21.11\n1) {link('BBCS', 'ИП НУСУПБАЕВ', '№ОБО/100')} - №ОБО/100 = 150 000 ₸" in first["text"]
     assert "ТОО KENESARY AGRO" in first["text"], "в посте - весь список вида, а не одно новое"
     assert "Custom Trade" not in first["text"], "аренда - в своём посте"
+    assert "ИП АЙЯ" not in first["text"], "просроченное - в своём посте"
     assert first["disable_notification"] is None, "ночью - со звуком (решение владельца)"
     assert bills_bot.tick(api, CHAT, NIGHT + timedelta(minutes=2)) == "abon-same"
 
@@ -597,7 +638,16 @@ def test_novoe_srazu_v_svoy_post(app: FastAPI, book, monkeypatch) -> None:
     book["values"].append(rent(10, OCT, "ТОО YI DA", "№RENT/100", "Сегодня день выставления", period="22.10.2026"))
     fresh()
     assert bills_bot.tick(api, CHAT, NIGHT + timedelta(minutes=2, seconds=30)) == "rent-new+abon-same"
-    assert api.sent("sendMessage")[-1]["text"].startswith("<b>Аренда")
+    assert api.sent("sendMessage")[-1]["text"].startswith("<b>Аренда: счета к выставлению")
+
+    # Новое просроченное (строку внесли задним числом) - в пост просроченного своего вида.
+    book["values"].append(rent(10, OCT, "ТОО Задним числом", "№RENT/101", "Просрочка", period="10.10.2026"))
+    fresh()
+    assert bills_bot.tick(api, CHAT, NIGHT + timedelta(minutes=2, seconds=45)) == "rent-late-new+abon-same+rent-same"
+    late = api.sent("sendMessage")[-1]
+    assert late["text"].startswith("<b>Аренда: просроченные счета (22.10.2026)</b>")
+    assert "ТОО Задним числом" in late["text"] and "ТОО Молфуд" in late["text"], "в посте - всё просроченное вида"
+    assert "YI DA" not in late["text"] and late["disable_notification"] is None
 
     # Ещё новое через минуту - правка, а не второй звонок.
     book["values"].append(
@@ -605,19 +655,19 @@ def test_novoe_srazu_v_svoy_post(app: FastAPI, book, monkeypatch) -> None:
             period="22.10.2026")
     )
     fresh()
-    assert bills_bot.tick(api, CHAT, NIGHT + timedelta(minutes=3)) == "abon-edited+rent-same"
-    assert len(api.sent("sendMessage")) == 2 and "Green Line Customs" in api.sent("editMessageText")[-1]["text"]
+    assert bills_bot.tick(api, CHAT, NIGHT + timedelta(minutes=3)) == "abon-edited+rent-same+rent-late-same"
+    assert len(api.sent("sendMessage")) == 3 and "Green Line Customs" in api.sent("editMessageText")[-1]["text"]
 
     # Выставили - строка уходит; сняли отметку после паузы - счёт снова новый.
     monkeypatch.setattr(bills_bot, "NEW_GAP", 0.0)
     kenesary = line_of(book["values"], "ТОО KENESARY AGRO")
     kenesary[BILL] = "TRUE"
     fresh()
-    assert bills_bot.tick(api, CHAT, NIGHT + timedelta(minutes=4)) == "abon-edited+rent-same"
+    assert bills_bot.tick(api, CHAT, NIGHT + timedelta(minutes=4)) == "abon-edited+rent-same+rent-late-same"
     assert "KENESARY" not in api.sent("editMessageText")[-1]["text"]
     kenesary[BILL] = "Сегодня день выставления"
     fresh()
-    assert bills_bot.tick(api, CHAT, NIGHT + timedelta(minutes=5)) == "abon-new+rent-same"
+    assert bills_bot.tick(api, CHAT, NIGHT + timedelta(minutes=5)) == "abon-new+rent-same+rent-late-same"
     assert "KENESARY" in api.sent("sendMessage")[-1]["text"]
     assert api.sent("deleteMessage") == [{"chat_id": CHAT, "message_id": 101}], "прошлый пост вида - прочь"
 
@@ -630,10 +680,14 @@ def test_novoe_srazu_v_svoy_post(app: FastAPI, book, monkeypatch) -> None:
     midnight = datetime(2026, 10, 22, 19, 0, 30, tzinfo=timezone.utc)  # 00:00:30 в Астане, 23.10
     assert "new" not in bills_bot.tick(api, CHAT, midnight - timedelta(minutes=1))
     assert bills_bot.tick(api, CHAT, midnight).startswith("abon-new")
-    night_post = api.posts("Абонентская плата")[-1]["text"]
+    night_post = api.posts(TITLE_ABON)[-1]["text"]
     assert night_post.startswith("<b>Абонентская плата: счета к выставлению (23.10.2026)</b>")
     assert f"<b>BBCS</b> · 23.10 - 22.11\n1) {link('BBCS', 'ИП ПЕН Г.И.', '№НО/47')}" in night_post
     assert "<b>BBCL</b> · вчерашнее, 22.10 - 21.11" in night_post
+    # Позавчерашнее переехало из поста аренды (102) в её просроченное (103) - правкой, без звонка.
+    edits = {item["message_id"]: item["text"] for item in api.sent("editMessageText")}
+    assert "Custom Trade" not in edits[102]
+    assert f"{link('BBC Omar', 'ТОО Custom Trade', '№RENT/84')} - №RENT/84 = 0 ₸ · с 21.10" in edits[103]
 
 
 def test_novoe_ne_teryaetsya_pri_otkaze_telegram(app: FastAPI, book) -> None:
@@ -658,17 +712,22 @@ def test_staryy_post_ne_udalit_pravitsya(app: FastAPI, book) -> None:
     owner = register(app)
     connect(owner)
     api = FakeBot()
-    assert bills_bot.tick(api, CHAT, NOW) == BOTH_POSTED
+    assert bills_bot.tick(api, CHAT, NOW) == ALL_POSTED
     issue_all(book["values"])
     fresh()
     api.refuse["deleteMessage"] = TelegramError("Bad Request: message can't be deleted", code=400)
-    assert bills_bot.tick(api, CHAT, NOW + timedelta(minutes=2)) == "abon-edited+rent-edited"
-    assert api.sent("editMessageText")[-1]["text"].endswith("\n\nВсё выставлено.")
-    assert bills_bot.tick(api, CHAT, NOW + timedelta(minutes=3)) == BOTH_SAME
+    assert bills_bot.tick(api, CHAT, NOW + timedelta(minutes=2)) == (
+        "abon-edited+abon-late-edited+rent-edited+rent-late-edited"
+    )
+    assert api.sent("editMessageText")[-1]["text"] == "<b>Аренда: просроченные счета (22.10.2026)</b>\n\nВсё выставлено."
+    assert bills_bot.tick(api, CHAT, NOW + timedelta(minutes=3)) == ALL_SAME
 
 
-def test_perehod_s_odnogo_posta_na_dva(app: FastAPI, book) -> None:
-    """На проде висит общий пост (22.10, 16:00): он становится постом абонентской платы, аренда выходит рядом без звука."""
+AFTERNOON = datetime(2026, 10, 22, 11, 30, tzinfo=timezone.utc)  # 16:30 в Астане
+
+
+def test_perehod_s_odnogo_posta(app: FastAPI, book) -> None:
+    """На проде висит общий пост (22.10, 16:00): он становится постом абонентской платы, остальные выходят рядом без звука."""
     owner = register(app)
     connect(owner)
     workspace_id = bills_bot.target_workspace()
@@ -678,16 +737,56 @@ def test_perehod_s_odnogo_posta_na_dva(app: FastAPI, book) -> None:
     with finance_session() as session:
         session.add(BillNotice(workspace_id=workspace_id, key="старая-запись", bill_group="due", line=""))
     api = FakeBot()
-    afternoon = datetime(2026, 10, 22, 11, 30, tzinfo=timezone.utc)  # 16:30 в Астане
-    assert bills_bot.tick(api, CHAT, afternoon) == "seeded+rent-posted+abon-edited"
-    [rent_post] = api.sent("sendMessage")
-    assert rent_post["text"] == RENT_POST and rent_post["disable_notification"] is True, "без звука"
+    assert bills_bot.tick(api, CHAT, AFTERNOON) == (
+        "seeded+abon-late-posted+rent-posted+rent-late-posted+abon-edited"
+    )
+    sent = api.sent("sendMessage")
+    assert [item["text"] for item in sent] == [ABON_LATE_POST, RENT_POST, RENT_LATE_POST]
+    assert all(item["disable_notification"] is True for item in sent), "без звука"
     [edit] = api.sent("editMessageText")
     assert edit["message_id"] == 8 and edit["text"] == ABON_POST
-    assert bills_bot._value(workspace_id, "bills.day.rent") == 2026102216, "второй пост аренды в 16:00 не выйдет"
-    assert bills_bot.tick(api, CHAT, afternoon + timedelta(minutes=1)) == BOTH_SAME
+    for name in ("bills.day.rent", "bills.day.late", "bills.day.rent.late"):
+        assert bills_bot._value(workspace_id, name) == 2026102216, f"{name}: второй пост в 16:00 не выйдет"
+    assert bills_bot.tick(api, CHAT, AFTERNOON + timedelta(minutes=1)) == ALL_SAME
     with finance_session() as session:
         assert session.get(BillNotice, (workspace_id, "старая-запись", "due")) is not None, "сказанное - помнится"
+
+
+def test_perehod_k_postam_prosrochennogo(app: FastAPI, book) -> None:
+    """На проде висят посты абонентской платы и аренды с просроченным внутри (24.10):
+    они правятся без просроченного, а оно выходит рядом своими постами без звука - не пропадает до следующего часа."""
+    owner = register(app)
+    connect(owner)
+    workspace_id = bills_bot.target_workspace()
+    bills_bot._ensure(workspace_id)
+    for name, value in (
+        ("bills.day", 2026102216), ("bills.post", 8), ("bills.hash", 12345),
+        ("bills.day.rent", 2026102216), ("bills.post.rent", 9), ("bills.hash.rent", 6789),
+        ("bills.seeded", 3),
+    ):
+        bills_bot._set(workspace_id, name, value)
+    api = FakeBot()
+    assert bills_bot.tick(api, CHAT, AFTERNOON) == "seeded+abon-late-posted+rent-late-posted+abon-edited+rent-edited"
+    sent = api.sent("sendMessage")
+    assert [item["text"] for item in sent] == [ABON_LATE_POST, RENT_LATE_POST]
+    assert all(item["disable_notification"] is True for item in sent), "без звука"
+    assert [(item["message_id"], item["text"]) for item in api.sent("editMessageText")] == [(8, ABON_POST), (9, RENT_POST)]
+    assert bills_bot._value(workspace_id, "bills.day.late") == bills_bot._value(workspace_id, "bills.day.rent.late") == 2026102216
+    assert bills_bot.tick(api, CHAT, AFTERNOON + timedelta(minutes=1)) == ALL_SAME
+    assert bills_bot.tick(api, CHAT, AFTERNOON + timedelta(hours=2, minutes=30)) == ALL_POSTED, "19:00 - все четыре"
+
+
+def test_perehod_bez_posta_vida(app: FastAPI, book) -> None:
+    """Поста аренды в канале нет (всё было выставлено) - и её просроченное до своего часа не выходит."""
+    owner = register(app)
+    connect(owner)
+    workspace_id = bills_bot.target_workspace()
+    bills_bot._ensure(workspace_id)
+    for name, value in (("bills.day", 2026102216), ("bills.post", 8), ("bills.day.rent", 2026102216), ("bills.seeded", 3)):
+        bills_bot._set(workspace_id, name, value)
+    api = FakeBot()
+    assert bills_bot.tick(api, CHAT, AFTERNOON) == "seeded+abon-late-posted+abon-edited"
+    assert [item["text"] for item in api.sent("sendMessage")] == [ABON_LATE_POST]
 
 
 def test_pervyy_zapusk_posle_soobshcheniy_novoe(app: FastAPI, book) -> None:
@@ -709,7 +808,7 @@ def test_pervyy_zapusk_posle_soobshcheniy_novoe(app: FastAPI, book) -> None:
 # ── Кнопка «Прислать сейчас» и /bind ─────────────────────────────────────────
 
 
-COUNTS = "абонентская плата - 2 счёта, аренда - 3 счёта"
+COUNTS = "абонентская плата - 2 счёта (просрочено 1), аренда - 3 счёта (просрочено 1)"
 
 
 def test_knopka_prislat_seychas(app: FastAPI, book, monkeypatch) -> None:
@@ -717,32 +816,32 @@ def test_knopka_prislat_seychas(app: FastAPI, book, monkeypatch) -> None:
     connect(owner)
     api = FakeBot()
     assert bills_bot.pull(api, CHAT, NOW) == f"Списки обновлены: {COUNTS}."
-    abon, rent_post = api.sent("sendMessage")
-    assert abon["text"] == ABON_POST and rent_post["text"] == RENT_POST
-    assert abon["disable_notification"] is True and rent_post["disable_notification"] is True, "по кнопке - без звука"
+    sent = api.sent("sendMessage")
+    assert [item["text"] for item in sent] == ALL_POSTS
+    assert all(item["disable_notification"] is True for item in sent), "по кнопке - без звука"
     assert bills_bot.pull(api, CHAT, NOW) == "Списки только что обновлены - они выше."
-    assert len(api.sent("sendMessage")) == 2
+    assert len(api.sent("sendMessage")) == 4
 
     # Книга не менялась - посты не перевыкладываются, только проверяется, что они на месте.
     monkeypatch.setattr(bills_bot, "PULL_GAP", 0.0)
     assert bills_bot.pull(api, CHAT, NOW + timedelta(minutes=1)) == f"Новых счетов нет, списки выше актуальны: {COUNTS}."
-    assert len(api.sent("sendMessage")) == 2 and api.sent("deleteMessage") == []
-    assert [item["message_id"] for item in api.sent("editMessageText")] == [101, 102]
+    assert len(api.sent("sendMessage")) == 4 and api.sent("deleteMessage") == []
+    assert [item["message_id"] for item in api.sent("editMessageText")] == [101, 102, 103, 104]
 
-    # Пост удалили из канала руками - кнопка выкладывает его заново.
+    # Посты удалили из канала руками - кнопка выкладывает их заново.
     api.refuse["editMessageText"] = TelegramError("Bad Request: message to edit not found", code=400)
     assert bills_bot.pull(api, CHAT, NOW + timedelta(minutes=1)) == f"Списки обновлены: {COUNTS}."
-    assert [item["text"] for item in api.sent("sendMessage")[2:]] == [ABON_POST, RENT_POST]
-    assert [item["message_id"] for item in api.sent("deleteMessage")] == [101, 102]
+    assert [item["text"] for item in api.sent("sendMessage")[4:]] == ALL_POSTS
+    assert [item["message_id"] for item in api.sent("deleteMessage")] == [101, 102, 103, 104]
     del api.refuse["editMessageText"]
 
     # Пост по кнопке не делает час: в 10:00 выйдет свой.
-    assert bills_bot.tick(api, CHAT, NOW + timedelta(minutes=2)) == BOTH_POSTED
+    assert bills_bot.tick(api, CHAT, NOW + timedelta(minutes=2)) == ALL_POSTED
 
     issue_all(book["values"])
     fresh()
     assert bills_bot.pull(api, CHAT, NOW + timedelta(minutes=3)) == "На сегодня все счета выставлены."
-    assert [item["message_id"] for item in api.sent("deleteMessage")][-2:] == [105, 106]
+    assert [item["message_id"] for item in api.sent("deleteMessage")][-4:] == [109, 110, 111, 112]
 
 
 def test_knopka_posle_pravki_knigi(app: FastAPI, book, monkeypatch) -> None:
@@ -756,10 +855,12 @@ def test_knopka_posle_pravki_knigi(app: FastAPI, book, monkeypatch) -> None:
     line[BILL] = "TRUE"
     fresh()
     assert bills_bot.pull(api, CHAT, NOW + timedelta(minutes=1)) == (
-        "Списки обновлены: абонентская плата - 2 счёта, аренда - 2 счёта."
+        "Списки обновлены: абонентская плата - 2 счёта (просрочено 1), аренда - 2 счёта."
     )
-    assert api.sent("sendMessage")[-1]["text"].startswith("<b>Аренда")
-    assert [item["message_id"] for item in api.sent("deleteMessage")] == [102], "пост аренды заменён, абонентская - на месте"
+    late = api.sent("sendMessage")[-1]["text"]
+    assert late.startswith("<b>Аренда: просроченные счета") and "Молфуд" not in late
+    assert late.endswith("Раньше сентября: ещё 3 счёта на 150 000 ₸ - список в KORT"), "по кнопке - и одним старым хвостом"
+    assert [item["message_id"] for item in api.sent("deleteMessage")] == [104], "заменён пост просроченной аренды, остальные - на месте"
 
 
 def press(data: str = "bills:now", chat: dict | None = None) -> dict:
@@ -777,15 +878,15 @@ def test_knopka_cherez_telegram(app: FastAPI, book, monkeypatch) -> None:
     api = FakeBot()
     bills_bot.handle(api, CHAT, press())
     assert api.sent("answerCallbackQuery") == [{"callback_query_id": "q1", "text": "Проверяю книгу…"}]
-    abon, rent_post, note = api.sent("sendMessage")
-    assert [abon["text"], rent_post["text"]] == [ABON_POST, RENT_POST]
+    *posts, note = api.sent("sendMessage")
+    assert [item["text"] for item in posts] == ALL_POSTS
     assert note["text"] == f"Списки обновлены: {COUNTS}."
     assert note["disable_notification"] is True and "reply_markup" not in note, "итог - без звука и без кнопки"
     [(seconds, drop)] = later
     assert seconds == bills_bot.NOTE_SECONDS == 5.0
     assert api.sent("deleteMessage") == []
     drop()
-    assert api.sent("deleteMessage") == [{"chat_id": CHAT, "message_id": 103}], "итог прочитан - и ушёл"
+    assert api.sent("deleteMessage") == [{"chat_id": CHAT, "message_id": 105}], "итог прочитан - и ушёл"
 
     # Повторное нажатие в те же 30 секунд - тоже не молчит.
     bills_bot.handle(api, CHAT, press())
@@ -796,7 +897,7 @@ def test_knopka_cherez_telegram(app: FastAPI, book, monkeypatch) -> None:
     assert api.sent("answerCallbackQuery")[-1]["text"] == "Кнопка работает только в канале счетов"
     bills_bot.handle(api, CHAT, press("другое"))
     assert api.sent("answerCallbackQuery")[-1]["text"] is None
-    assert len(api.sent("sendMessage")) == 4
+    assert len(api.sent("sendMessage")) == 6
 
 
 def test_staroe_nazhatie_ne_otrabatyvaetsya(app: FastAPI, book, monkeypatch) -> None:
@@ -815,8 +916,8 @@ def test_staroe_nazhatie_ne_otrabatyvaetsya(app: FastAPI, book, monkeypatch) -> 
     # Ответ не ушёл по сети - нажатие свежее, отрабатывается.
     api.refuse["answerCallbackQuery"] = TelegramError("нет связи с Telegram (ConnectionError)")
     bills_bot.handle(api, CHAT, press())
-    assert len(api.sent("sendMessage")) == 3
-    assert api.sent("deleteMessage") == [{"chat_id": CHAT, "message_id": 103}]
+    assert len(api.sent("sendMessage")) == 5
+    assert api.sent("deleteMessage") == [{"chat_id": CHAT, "message_id": 105}]
 
 
 def test_bind_stavit_knopku(app: FastAPI, book) -> None:

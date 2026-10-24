@@ -790,6 +790,9 @@ class CreateIn(BaseModel):
     #: Договор, перед которым встать в порядке реестра: строка, вставленная
     #: в середину листа, не должна после пересборки уехать в конец.
     before: UUID | None = None
+    #: Код, выданный клиентом: договор, заведённый в десктопе без связи,
+    #: при повторной отправке не заводится второй раз (`service.create`).
+    id: UUID | None = None
 
 
 class PatchIn(BaseModel):
@@ -818,6 +821,7 @@ def create_contract(body: CreateIn, member: Member = Depends(contract_editor)):
                 view_key=body.view, block=body.block,
                 source="grid" if body.source == "grid" else "app",
                 before=body.before,
+                contract_id=body.id,
             )
             return service.one(session, workspace, access, contract)
         except Exception as exc:  # noqa: BLE001

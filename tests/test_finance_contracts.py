@@ -195,6 +195,28 @@ def test_konflikt_po_polyu_a_ne_po_zapisi(space):
         assert caught.value.conflicts == ["note"]
 
 
+def test_povtor_zavedeniya_s_kodom_klienta_ne_dvoit(space):
+    """Десктоп заводит договор без связи со своим кодом и отправляет позже.
+
+    Ответ на отправку мог потеряться - тогда та же отправка уходит снова, и
+    второй договор с теми же полями был бы двойником в реестре. С тем же кодом
+    возвращается уже заведённый; удалённый за это время не воскресает.
+    """
+    code = uuid.uuid4()
+    with finance_session() as session:
+        workspace = _ws(session, space)
+        first = service.create(session, workspace, FULL, OWNER, {"executor": "BBC", "number": "Д-1"}, contract_id=code)
+        assert first.id == code
+        again = service.create(session, workspace, FULL, OWNER, {"executor": "BBC", "number": "Д-1"}, contract_id=code)
+        assert again.id == code
+        live = session.query(Contract).filter(Contract.workspace_id == workspace.id, Contract.deleted_at.is_(None)).all()
+        assert [item.id for item in live] == [code]
+
+        service.remove(session, workspace, FULL, OWNER, code)
+        with pytest.raises(service.NotFound):
+            service.create(session, workspace, FULL, OWNER, {"number": "Д-1"}, contract_id=code)
+
+
 def test_nomer_u_drugogo_kontragenta_i_tak_i_dolzhno_byt(space):
     with finance_session() as session:
         workspace = _ws(session, space)
