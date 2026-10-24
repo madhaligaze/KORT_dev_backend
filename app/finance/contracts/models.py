@@ -61,10 +61,13 @@ ECONOMIC_ROLES = ("revenue", "expense", "financing", "intra_group")
 #: Фаза договора - системный смысл значения статуса.
 STATUS_PHASES = ("draft", "active", "in_progress", "suspended", "fulfilled", "terminated", "failed")
 CONTRACT_SOURCES = ("app", "grid", "import", "api")
-AMENDMENT_EFFECTS = ("none", "amount", "executor", "customer", "end_date", "other")
+#: `status` - статус с даты: приостановка, возобновление (начисления ядра,
+#: `core/terms.py`, смотрят статус на дату периода).
+AMENDMENT_EFFECTS = ("none", "amount", "executor", "customer", "end_date", "other", "status")
 #: `change` - «изменение с даты» из листа или карточки; `parsed` - кусок
-#: текста соглашений из файла, подтверждённый человеком.
-AMENDMENT_ORIGINS = ("change", "parsed")
+#: текста соглашений из файла, подтверждённый человеком; `book` - условие,
+#: взятое из книги-сводки по предложению сверки (`core/shadow.py`).
+AMENDMENT_ORIGINS = ("change", "parsed", "book")
 ALIAS_SOURCES = ("registry", "bank", "1c", "manual")
 FIELD_TYPES = (
     "text", "number", "money", "date", "bool", "list", "multi_list",
@@ -347,6 +350,9 @@ class Contract(FinanceBase):
         sa.CheckConstraint(
             "end_kind = '' OR " + _in("end_kind", END_KINDS), name="contract_end_kind"
         ),
+        sa.CheckConstraint(
+            "period_day IS NULL OR period_day BETWEEN 1 AND 31", name="contract_period_day"
+        ),
         sa.CheckConstraint(_in("source", CONTRACT_SOURCES), name="contract_source"),
         sa.Index("ix_contracts_workspace_seq", "workspace_id", "seq"),
         sa.Index("ix_contracts_workspace_number_key", "workspace_id", "number_key"),
@@ -381,6 +387,12 @@ class Contract(FinanceBase):
         sa.Uuid, sa.ForeignKey("list_values.id", ondelete="SET NULL")
     )
     billing: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("''"))
+    #: День месяца, с которого идёт период начисления («Период с» книги):
+    #: пусто - день даты начала начислений. У договора от 25.06 период с
+    #: 25-го, но бывает и с 1-го у договора, подписанного 25-го.
+    period_day: Mapped[int | None] = mapped_column(sa.SmallInteger)
+    #: С какого дня начислять: пусто - с даты договора.
+    billing_from: Mapped[date | None] = mapped_column(sa.Date)
     amount: Mapped[Decimal | None] = mapped_column(MONEY)
     #: Условие суммы текстом, когда числа нет: «20% по разовым, 40% по абон.».
     amount_terms: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("''"))

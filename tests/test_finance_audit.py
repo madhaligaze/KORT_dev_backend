@@ -518,6 +518,39 @@ def test_kazhdyy_izmenyayushchiy_marshrut_pishet_sobytie(app: FastAPI, monkeypat
     walk.call(owner, "PUT", "/core/tax-years/{year}", year=2027,
               json={"mrp": "4600", "threshold_mrp": 10000, "vat_rate": "16"})
 
+    # ── ядро: поправка месяца, статус с даты, сверка с книгой ───────────
+    def monthly(customer: str, number: str, signed: str) -> str:
+        created = owner.post(f"{BASE}/contracts", json=contract_values(customer, number, signed_at=signed, billing="month"))
+        assert created.status_code < 400, created.text
+        return created.json()["contract"]["id"]
+
+    omega = monthly("ТОО Омегаком", "ОБО/8", "25.05.2026")
+    sigma = monthly("ТОО Сигмаком", "ОБО/9", "27.05.2026")
+    assert owner.get(f"{BASE}/core/contracts/{omega}/months").status_code == 200
+    adjustment = walk.call(owner, "POST", "/core/contracts/{contract_id}/adjustments", contract_id=omega,
+                           json={"month": "2026-07", "amount": "5000", "reason": "скидка"}).json()["id"]
+    walk.call(owner, "DELETE", "/core/contracts/{contract_id}/adjustments/{document_id}",
+              contract_id=omega, document_id=adjustment)
+    walk.call(owner, "POST", "/core/contracts/{contract_id}/status-from", contract_id=sigma,
+              json={"status_id": paused, "effective_from": "2026-09-01"})
+    rows = [
+        [str(month), f"{title} 2026", "BBC", customer, "500 000", number, f"01.0{month}.2026", f"{last}.0{month}.2026"]
+        for month, title, last in ((6, "ИЮНЬ", 30), (7, "ИЮЛЬ", 31))
+        for number, customer in (("ОБО/8", "ТОО Омегаком"), ("ОБО/9", "ТОО Сигмаком"))
+    ]
+    rows.append(["7", "ИЮЛЬ 2026", "BBC", "ТОО Новичок", "15 000", "БезДог.07-1", "", ""])
+    core_book.put(company, core_book.build_book(
+        [["Мес", "Техн. 1", "Наша Фирма", "Заказчик (Название Фирмы)", "Сумма Договора", "№ Договора",
+          "Период с (нач.)", "Период по (зав.)"], *rows],
+        title="Сводка", worksheet="Сводка",
+    ))
+    view = owner.get(f"{BASE}/core/shadow").json()
+    first_day = next(item for item in view["proposals"] if item["kind"] == "period_day" and item["contract_id"] == omega)
+    walk.call(owner, "POST", "/core/shadow/apply", json={key: first_day[key] for key in ("contract_id", "kind", "value")})
+    walk.call(owner, "POST", "/core/shadow/apply-all", json={"kind": "period_day"})
+    walk.call(owner, "POST", "/core/shadow/create", json={"key": view["unknown"][0]["key"]})
+    core_book.forget()
+
     walk.call(owner, "DELETE", "/contracts/setup/summary")
 
     # ── загрузка реестра ────────────────────────────────────────────────

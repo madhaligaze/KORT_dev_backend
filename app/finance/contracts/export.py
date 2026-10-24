@@ -69,7 +69,7 @@ LINK_COLOR = "0563C1"
 #: Только строчными: «DD.MM.YYYY» просмотр Apple (айфон) читает по правилам
 #: Unicode, где «D» - номер дня в году, и 23.10.2026 показывался «296.10.2026».
 DATE_FORMAT = "dd.mm.yyyy"
-DATE_KEYS = ("signed_at", "planned_end_at", "end_date")
+DATE_KEYS = ("signed_at", "planned_end_at", "end_date", "billing_from")
 MONEY_KEYS = (
     "amount", "paid_snapshot", "remaining_snapshot", "summary_paid", "summary_remaining", *LIVE_FIELDS,
 )
@@ -140,7 +140,7 @@ def _text(
         return float(contract.amount - match.paid) if contract.amount is not None else None
     if key == "age_months":
         return age_months(contract.signed_at)
-    if key in ("signed_at", "planned_end_at", "end_date"):
+    if key in DATE_KEYS:
         return getattr(contract, key)
     if key in ("billing", "end_kind"):
         # Выбор - словами, как на экране: «Расторжение», а не «terminated».

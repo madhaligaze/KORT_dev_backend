@@ -20,8 +20,10 @@ from pydantic import BaseModel, Field
 from app.api.routes.finance import _guard, _workspace, require_access
 from app.api.routes.finance_contracts import _access, _actor, _raise
 from app.finance.auth import Member
+from app.finance.contracts import service as contracts_service
 from app.finance.core import book as book_module
-from app.finance.core import participants, tax
+from app.finance.core import changes, participants, tax
+from app.finance.core import shadow as shadow_module
 from app.finance.db import finance_session
 
 router = APIRouter(prefix="/finance/core", tags=["finance-core"])
@@ -31,7 +33,11 @@ editor = require_access("contracts", "edit")
 
 
 def _run(member: Member, action):
-    """Вызов ядра в транзакции: отказы - словами и своим кодом."""
+    """Вызов ядра в транзакции: отказы - словами и своим кодом.
+
+    `_raise` бросает 4xx сам, а «нужен режим правки» и конфликт поля
+    возвращает ответом - его надо вернуть, иначе клиент получал `null` с 200.
+    """
     _guard()
     access = _access(member)
     with finance_session() as session:
@@ -39,7 +45,7 @@ def _run(member: Member, action):
         try:
             return action(session, workspace, access)
         except Exception as exc:  # noqa: BLE001 - `_raise` сам решает, что словами, а что ошибкой
-            _raise(exc)
+            return _raise(exc)
 
 
 # ── Участники ────────────────────────────────────────────────────────────────
@@ -218,3 +224,182 @@ class YearIn(BaseModel):
 @router.put("/tax-years/{year}")
 def tax_year_set(year: int, body: YearIn, member: Member = Depends(editor)) -> dict[str, Any]:
     return _run(member, lambda s, w, a: tax.set_year(s, w, a, _actor(member), year, body.model_dump()))
+
+
+# ── Начисления и сверка с книгой-сводкой ─────────────────────────────────────
+
+
+def _setup_only(access) -> None:
+    # Сверка показывает все договоры компании с деньгами книги - это работа
+    # того, кто переводит учёт в KORT: владельца или администратора.
+    if not access.setup:
+        raise PermissionError("Сверку с книгой-сводкой ведёт владелец или администратор")
+
+
+def _book_out(book: book_module.Book) -> dict[str, Any]:
+    return {
+        "title": book.title,
+        "worksheet": book.worksheet,
+        "read_at": book.read_at.isoformat(),
+        "url": f"https://docs.google.com/spreadsheets/d/{book.spreadsheet_id}" if book.spreadsheet_id else "",
+        "drift": book.drift,
+    }
+
+
+@router.get("/shadow")
+def shadow_view(member: Member = Depends(viewer)) -> dict[str, Any]:
+    """Сверка начислений KORT с книгой-сводкой: совпало, расходится, предложения, нет в реестре."""
+
+    def action(session, workspace, access):
+        _setup_only(access)
+        book, error = book_module.current(session, workspace.id, wait=book_module.FIRST_READ_WAIT)
+        if book is None:
+            return {"book": None, "error": error or "Книга-сводка компании не подключена", "window": [], "counts": {},
+                    "contracts": {}, "lines": [], "proposals": [], "unknown": []}
+        reconciler = shadow_module.Reconciler(session, workspace, access, book)
+        return {"book": _book_out(book), "error": "", **reconciler.out(reconciler.run(), money=True)}
+
+    return _run(member, action)
+
+
+@router.get("/shadow/bills")
+def shadow_bills(member: Member = Depends(viewer)) -> dict[str, Any]:
+    """«Не выставлены» KORT против списка книги: совпало, срок другой, только в книге, только у KORT."""
+    from app.finance.core import billing
+
+    def action(session, workspace, access):
+        _setup_only(access)
+        book, error = book_module.current(session, workspace.id, wait=book_module.FIRST_READ_WAIT)
+        if book is None:
+            return {"book": None, "error": error or "Книга-сводка компании не подключена", "window": [], "counts": {},
+                    "lines": [], "contracts": {}}
+        out = billing.reconcile_bills(session, workspace, access, book, today=contracts_service.today())
+        return {"book": _book_out(book), "error": "", **out}
+
+    return _run(member, action)
+
+
+class ApplyIn(BaseModel):
+    contract_id: UUID
+    kind: str = Field(max_length=40)
+    value: dict[str, Any] = Field(default_factory=dict)
+    option: str = Field(default="", max_length=20)
+
+
+@router.post("/shadow/apply")
+def shadow_apply(body: ApplyIn, member: Member = Depends(editor)) -> dict[str, Any]:
+    """Записать одно предложение сверки - обычным изменением договора."""
+    return _run(
+        member,
+        lambda s, w, a: {
+            "ok": True,
+            "text": changes.apply_proposal(s, w, a, _actor(member), body.contract_id, body.kind, body.value, option=body.option),
+        },
+    )
+
+
+class ApplyAllIn(BaseModel):
+    kind: str = Field(pattern="^(billing|period_day|billing_from)$")
+
+
+@router.post("/shadow/apply-all")
+def shadow_apply_all(body: ApplyAllIn, member: Member = Depends(editor)) -> dict[str, Any]:
+    """Все предложения простого вида разом - с точкой восстановления."""
+
+    def action(session, workspace, access):
+        _setup_only(access)
+        return changes.apply_all(session, workspace, access, _actor(member), _book(session, workspace), body.kind)
+
+    return _run(member, action)
+
+
+class FromBookIn(BaseModel):
+    key: str = Field(min_length=8, max_length=40)
+
+
+@router.post("/shadow/create", status_code=201)
+def shadow_create(body: FromBookIn, member: Member = Depends(editor)) -> dict[str, Any]:
+    """Договор книги, которого нет в реестре, - завести по его строкам."""
+
+    def action(session, workspace, access):
+        _setup_only(access)
+        contract = changes.create_from_book(session, workspace, access, _actor(member), _book(session, workspace), body.key)
+        return {"id": str(contract.id), "number": contract.number}
+
+    return _run(member, action)
+
+
+def _opened_contract(session, workspace, access, contract_id: UUID):
+    contract = contracts_service.get_contract(session, workspace, contract_id)
+    registry = contracts_service.Registry(session, workspace)
+    people = contracts_service.people_of(session, [contract.id]).get(contract.id, [])
+    if not contracts_service.visible_to(contract, registry, access, people):
+        raise contracts_service.NotFound("Договор не найден")
+    return contract
+
+
+@router.get("/contracts/{contract_id}/months")
+def contract_months(contract_id: UUID, member: Member = Depends(viewer)) -> dict[str, Any]:
+    """Лента месяцев договора: начисление KORT и строка книги за месяц."""
+
+    def action(session, workspace, access):
+        contract = _opened_contract(session, workspace, access, contract_id)
+        book, _error = book_module.current(session, workspace.id, wait=0)
+        # Оплата и АВР книги - деньги компании: тем, кому скрыта «Оплачено (сводка)», не отдаются.
+        money = "summary_paid" not in access.hidden
+        return shadow_module.contract_months(
+            session, workspace, access, contract, book, money=money, on=contracts_service.today()
+        )
+
+    return _run(member, action)
+
+
+class AdjustmentIn(BaseModel):
+    month: str = Field(pattern=r"^\d{4}-\d{2}$")
+    amount: str | None = Field(default=None, max_length=40)
+    skip: bool = False
+    reason: str = Field(default="", max_length=500)
+
+
+@router.post("/contracts/{contract_id}/adjustments", status_code=201)
+def contract_adjustment(contract_id: UUID, body: AdjustmentIn, member: Member = Depends(editor)) -> dict[str, Any]:
+    """Поправка начисления месяца: другая сумма или «не начислять», с причиной."""
+
+    def action(session, workspace, access):
+        doc = changes.set_adjustment(
+            session, workspace, access, _actor(member), contract_id, body.month,
+            amount=body.amount, skip=body.skip, reason=body.reason,
+        )
+        return {"id": str(doc.id)}
+
+    return _run(member, action)
+
+
+@router.delete("/contracts/{contract_id}/adjustments/{document_id}")
+def contract_adjustment_remove(contract_id: UUID, document_id: UUID, member: Member = Depends(editor)) -> dict[str, Any]:
+    def action(session, workspace, access):
+        changes.remove_adjustment(session, workspace, access, _actor(member), contract_id, document_id)
+        return {"ok": True}
+
+    return _run(member, action)
+
+
+class StatusFromIn(BaseModel):
+    status_id: UUID
+    effective_from: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    summary: str = Field(default="", max_length=300)
+
+
+@router.post("/contracts/{contract_id}/status-from", status_code=201)
+def contract_status_from(contract_id: UUID, body: StatusFromIn, member: Member = Depends(editor)) -> dict[str, Any]:
+    """Статус договора с даты: приостановка, возобновление, расторжение."""
+    from datetime import date
+
+    def action(session, workspace, access):
+        amendment = changes.status_from(
+            session, workspace, access, _actor(member), contract_id, body.status_id,
+            date.fromisoformat(body.effective_from), summary=body.summary,
+        )
+        return {"id": str(amendment.id)}
+
+    return _run(member, action)

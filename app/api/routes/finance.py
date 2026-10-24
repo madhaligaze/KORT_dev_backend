@@ -2547,6 +2547,15 @@ def write_bill(bill_id: str, body: BillBookIn, member: Member = Depends(require_
     # Книга такая, какой её перечитали, - и тогда, когда писать было нечего:
     # повтор записи, ответ на которую потерялся, тоже должен убрать счёт из списка.
     bills_module.mark(workspace_id, bill.key, saved.after)
+    # Ядро: выставленный отсюда счёт KORT знает сам, документом месяца договора
+    # (`core/billing.py`). В книгу уже записано - сбой здесь запись не отменяет.
+    try:
+        from app.finance.core import billing as core_billing
+
+        with finance_session() as session:
+            core_billing.record(session, _workspace(session, member), bill, saved.after)
+    except Exception:  # noqa: BLE001 - запись в книгу прошла, документ дождётся сверки
+        log.exception("счёт не записан документом ядра: %s", bill.key)
     if saved.changed:
         number, issued_at = saved.after["bill_no"], saved.after["bill_date"]
         if number and not saved.before["bill_no"]:

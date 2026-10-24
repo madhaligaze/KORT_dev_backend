@@ -293,7 +293,7 @@ def listing(session: Session, workspace: Workspace, contract_id: uuid.UUID) -> l
     )
     out = []
     for row in rows:
-        key = row.effect if row.effect in ("executor", "customer", "amount", "end_date") else None
+        key = row.effect if row.effect in ("executor", "customer", "amount", "end_date", "status") else None
         out.append(
             {
                 "id": str(row.id),

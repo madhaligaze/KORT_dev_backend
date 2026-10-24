@@ -88,7 +88,7 @@ DMY = DateReading(order="dmy", evidence="дата в карточке или л�
 
 #: Поля, значения которых - идентификаторы из справочников.
 LIST_KEYS = frozenset(SYSTEM_LISTS)
-DATE_KEYS = frozenset({"signed_at", "planned_end_at", "end_date"})
+DATE_KEYS = frozenset({"signed_at", "planned_end_at", "end_date", "billing_from"})
 TEXT_KEYS = frozenset(
     {"number", "folder_url", "amendments_text", "amendments_summary_text", "note", "amount_terms"}
 )
@@ -1784,6 +1784,9 @@ class Mode:
     number: str = ""
     signed_at: date | None = None
     summary: str = ""
+    #: Откуда изменение с даты (`AMENDMENT_ORIGINS`): из API - всегда
+    #: `change`; сверка с книгой ставит `book` сама.
+    origin: str = "change"
 
     @classmethod
     def parse(cls, raw: Any) -> Mode | None:
@@ -1897,6 +1900,14 @@ def _set_field(
         if text and text not in END_KINDS:
             raise FinanceError("Смысл даты окончания: расторжение, исполнение или не ясен")
         contract.end_kind = text
+    elif key == "period_day":
+        text = str(raw if raw is not None else "").strip().rstrip("-гоеяй").strip()
+        if not text:
+            contract.period_day = None
+        elif not text.isdigit() or not 1 <= int(text) <= 31:
+            raise FinanceError(f"{title}: число от 1 до 31")
+        else:
+            contract.period_day = int(text)
     elif key == "currency":
         contract.currency = (str(raw or "").strip().upper() or "KZT")[:3]
     elif key in TEXT_KEYS:
@@ -2470,7 +2481,7 @@ def _amend(
         effective_from=mode.effective_from,
         before={key: before_value},
         after={key: after_value, **({"amount_terms": scratch.amount_terms} if key == "amount" else {})},
-        origin="change",
+        origin=mode.origin,
         position=_next_amendment_position(session, contract.id),
         created_by=actor.user_id,
     )
@@ -2507,6 +2518,9 @@ def _apply_amendment(contract: Contract, amendment: ContractAmendment, registry:
     elif amendment.effect == "end_date":
         value = after.get("end_date")
         contract.end_date = date.fromisoformat(value) if value else None
+    elif amendment.effect == "status":
+        value = after.get("status")
+        contract.status_id = uuid.UUID(value) if value else None
     amendment.applied_at = _now()
 
 
@@ -2674,7 +2688,7 @@ def apply_due(session: Session) -> int:
                 ContractAmendment.applied_at.is_(None),
                 ContractAmendment.effective_from.is_not(None),
                 ContractAmendment.effective_from <= today(),
-                ContractAmendment.effect.in_(("executor", "customer", "amount", "end_date")),
+                ContractAmendment.effect.in_(("executor", "customer", "amount", "end_date", "status")),
             )
             .order_by(ContractAmendment.effective_from, ContractAmendment.position)
             .limit(500)

@@ -116,6 +116,10 @@ SYSTEM_FIELDS: tuple[FieldDef, ...] = (
     # Ниже - поля, которых в файле BBC нет колонкой: они выводятся или
     # задаются в карточке.
     FieldDef("billing", "choice", "Начисление"),
+    # Ядро, фаза 2: период начисления - «Период с» книги-сводки. Пусто - от
+    # даты договора (`core/accruals.py`).
+    FieldDef("period_day", "number", "День периода"),
+    FieldDef("billing_from", "date", "Начислять с"),
     FieldDef("economic_role", "list", "Хозяйственный смысл", fill="list"),
     FieldDef("amount_terms", "text", "Условие суммы"),
     FieldDef("end_kind", "choice", "Смысл даты окончания"),
