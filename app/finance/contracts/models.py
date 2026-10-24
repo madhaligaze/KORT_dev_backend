@@ -607,6 +607,8 @@ class SummarySource(FinanceBase):
 
 RESTORE_KINDS = (
     "contracts_delete", "contracts_create", "values", "view", "field_add", "order",
+    # Сведение двух участников в одного (ядро, `core/participants.py`).
+    "party_merge",
 )
 
 

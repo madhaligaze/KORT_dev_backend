@@ -130,7 +130,10 @@ def allocate(session: Session, workspace: Workspace, registry: Registry, contrac
     for party_id, party in registry.parties_for(theirs_ids).items():
         by_key.setdefault(party_key(party.name), set()).add(party_id)
         entity = registry.own.get(party_id)
-        bin_value = str((party.details or {}).get("bin") or (entity.bin if entity is not None else "") or "").strip()
+        # БИН - колонка участника (ядро, 24.10.2026); `details.bin` - прежнее место.
+        bin_value = str(
+            party.bin or (party.details or {}).get("bin") or (entity.bin if entity is not None else "") or ""
+        ).strip()
         if bin_value:
             by_bin.setdefault(bin_value, set()).add(party_id)
     for normalized, party_id in session.execute(
@@ -188,7 +191,7 @@ def allocate(session: Session, workspace: Workspace, registry: Registry, contrac
             matches = {payer.id}
         else:
             matches = set(by_key.get(party_key(payer.name), set()))
-            payer_bin = str((payer.details or {}).get("bin") or "").strip()
+            payer_bin = str(payer.bin or (payer.details or {}).get("bin") or "").strip()
             if payer_bin:
                 matches |= by_bin.get(payer_bin, set())
         if not matches:

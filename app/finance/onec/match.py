@@ -200,7 +200,8 @@ def build_index(session: Session, workspace_id: uuid.UUID) -> Index:
             index.names[party.id] = party.name
             index.party_keys.setdefault(party.id, set()).add(side_key(party.name))
             index.party_loose.setdefault(party.id, set()).add(loose_key(party.name))
-            bin_value = str((party.details or {}).get("bin") or "").strip()
+            # БИН - колонка участника (ядро, 24.10.2026); `details.bin` - прежнее место.
+            bin_value = str(party.bin or (party.details or {}).get("bin") or "").strip()
             if bin_value:
                 index.party_bins.setdefault(party.id, set()).add(bin_value)
         for party_id, normalized, name in session.execute(

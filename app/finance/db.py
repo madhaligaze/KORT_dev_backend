@@ -72,6 +72,7 @@ def init_finance_database() -> None:
     from app.finance import models as _models  # noqa: F401
     from app.finance import support_model as _support  # noqa: F401
     from app.finance.contracts import models as _contracts  # noqa: F401
+    from app.finance.core import models as _core  # noqa: F401
     from app.finance.onec import models as _onec  # noqa: F401
 
     engine = get_engine()

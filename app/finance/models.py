@@ -250,13 +250,21 @@ class Category(FinanceBase):
 
 
 class Counterparty(FinanceBase):
-    """Тот, с кем расчёты: клиент, поставщик, сотрудник, кредитор, налоговая."""
+    """Участник: клиент, поставщик, наше юрлицо, сотрудник, налоговая.
+
+    С 24.10.2026 (ядро, `app/finance/core`) участник узнаётся по БИН или ИИН, а
+    название - одно из его имён (`counterparty_names`): банк пишет
+    «Товарищество с ограниченной ответственностью "Х"», реестр - «ТОО Х», 1С -
+    «ТОО "Х"», и ключ по имени заводил одного клиента дважды (17 двойников на
+    проде 24.10).
+    """
 
     __tablename__ = "counterparties"
     __table_args__ = (
         sa.CheckConstraint(_in("role", COUNTERPARTY_ROLES), name="counterparty_role"),
         sa.UniqueConstraint("workspace_id", "role", "normalized_name", name="uq_counterparties_name"),
         sa.Index("ix_counterparties_workspace_id_role", "workspace_id", "role"),
+        sa.Index("ix_counterparties_workspace_bin", "workspace_id", "bin"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(sa.Uuid, primary_key=True, default=_uuid)
@@ -269,6 +277,18 @@ class Counterparty(FinanceBase):
     #: Реквизиты и заметки - свободная форма. Это не CRM: поля, которые
     #: понадобятся одной компании, не должны становиться колонками у всех.
     details: Mapped[dict] = mapped_column(JSONB, server_default=sa.text("'{}'"))
+    #: БИН или ИИН, двенадцать цифр с верной контрольной (`core/bin.py`); пусто -
+    #: ещё не знаем. Один номер - один участник в компании (держит сервис).
+    bin: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("''"))
+    #: Вид лица: `org`, `person`, `ip`; пусто - неизвестно. Выводится из БИН.
+    kind: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("''"))
+    #: Полное наименование - как в 1С или выписке; показывается рядом с именем.
+    full_name: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("''"))
+    #: Участник сведён в другого: запись остаётся в архиве, чтобы журнал и
+    #: точка восстановления знали, куда он делся.
+    merged_into_id: Mapped[uuid.UUID | None] = mapped_column(
+        sa.Uuid, sa.ForeignKey("counterparties.id", ondelete="SET NULL")
+    )
     position: Mapped[int] = mapped_column(sa.Integer, server_default=sa.text("0"))
     archived_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True))
 

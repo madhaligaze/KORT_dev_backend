@@ -18,6 +18,7 @@ import app.finance.accounts_model  # noqa: F401 - учётки
 import app.finance.contracts.models  # noqa: F401 - реестр договоров
 import app.finance.support_model  # noqa: F401 - переписка с поддержкой
 import app.finance.onec.models  # noqa: F401 - базы 1С и их документы
+import app.finance.core.models  # noqa: F401 - ядро: налоговый профиль юрлиц, документы
 
 target_metadata = [FinanceBase.metadata]
 

@@ -287,45 +287,16 @@ def merge_parties(
     Операции журнала тоже переезжают - иначе один клиент остался бы в отчёте
     двумя строками. Сводит только человек: похожесть - повод спросить, а не
     решить.
+
+    С 24.10.2026 переносом занимается ядро (`core/participants.merge_into`):
+    раньше здесь у нашего юрлица терялись расчётные счета и базы 1С, а
+    одинаковое написание у обоих роняло сведение на уникальном ключе.
     """
-    from app.finance.contracts.models import Contract
-    from app.finance.models import Invoice, Operation, Recurrence
+    from app.finance.core.participants import merge_into
 
     if keep == drop:
         return
-    kept, dropped = session.get(Counterparty, keep), session.get(Counterparty, drop)
-    if kept is None or dropped is None or kept.workspace_id != workspace.id or dropped.workspace_id != workspace.id:
-        raise FinanceError("Контрагент не найден")
-    for column in (Contract.executor_id, Contract.customer_id):
-        session.execute(sa.update(Contract).where(column == drop).values({column.key: keep}))
-    for model in (Operation, Invoice, Recurrence):
-        session.execute(sa.update(model).where(model.counterparty_id == drop).values(counterparty_id=keep))
-    session.execute(
-        sa.update(CounterpartyName)
-        .where(CounterpartyName.counterparty_id == drop)
-        .values(counterparty_id=keep)
-    )
-    remember_alias(session, workspace.id, keep, dropped.name, source="manual")
-    if session.get(GroupEntity, drop) is not None and session.get(GroupEntity, keep) is None:
-        entity = session.get(GroupEntity, drop)
-        session.add(
-            GroupEntity(
-                counterparty_id=keep,
-                workspace_id=workspace.id,
-                code=entity.code,
-                full_name=entity.full_name,
-                bin=entity.bin,
-                vat_payer=entity.vat_payer,
-                position=entity.position,
-            )
-        )
-        session.flush()
-    session.execute(sa.delete(GroupEntity).where(GroupEntity.counterparty_id == drop))
-    from datetime import datetime, timezone
-
-    dropped.archived_at = datetime.now(timezone.utc)
-    session.flush()
-    _schema_changed(session, workspace)
+    merge_into(session, workspace, keep=keep, drop=drop)
 
 
 # ── Поля ─────────────────────────────────────────────────────────────────────

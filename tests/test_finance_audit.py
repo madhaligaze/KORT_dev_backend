@@ -482,6 +482,42 @@ def test_kazhdyy_izmenyayushchiy_marshrut_pishet_sobytie(app: FastAPI, monkeypat
               json={"values": {"bill_no": "312", "bill_date": "2026-10-22"}, "expect": card["book"]["fields"]})
     bill_book.forget()
 
+    # ── ядро: участники, режим наших юрлиц, налоговые годы ──────────────
+    from app.finance.core import book as core_book
+
+    def customer_of(name: str, number: str) -> str:
+        created = owner.post(f"{BASE}/contracts", json=contract_values(name, number))
+        assert created.status_code < 400, created.text
+        return created.json()["contract"]["values"]["customer"]
+
+    berg = customer_of("ТОО Бергауф Астана", "ОБО/1")
+    berg_twin = customer_of("Бергауф Астана", "ОБО/2")
+    walk.call(owner, "PUT", "/core/participants/{party_id}/bin", party_id=berg, json={"bin": "260540028486"})
+    walk.call(owner, "PATCH", "/core/participants/{party_id}", party_id=berg, json={"full_name": "ТОО «Бергауф Астана»"})
+    aliases = walk.call(owner, "POST", "/core/participants/{party_id}/aliases", party_id=berg,
+                        json={"name": "BERGAUF ASTANA LLP", "source": "bank"}).json()["aliases"]
+    alias_id = next(item["id"] for item in aliases if item["name"] == "BERGAUF ASTANA LLP")
+    walk.call(owner, "DELETE", "/core/participants/{party_id}/aliases/{alias_id}", party_id=berg, alias_id=alias_id)
+    walk.call(owner, "POST", "/core/participants/{party_id}/bin/reject", party_id=berg_twin, json={"bin": "090540002228"})
+    walk.call(owner, "POST", "/core/participants/distinct",
+              json={"ids": [customer_of("ТОО Гамма", "ОБО/3"), customer_of("ТОО Дельта", "ОБО/4")]})
+    walk.call(owner, "POST", "/core/participants/merge", json={"keep": berg, "drop": berg_twin})
+    company = uuid.UUID(owner.get(f"{BASE}/auth/me").json()["company"]["id"])
+    core_book.put(company, core_book.build_book(
+        [["Наша Фирма", "Заказчик (Название Фирмы)", "По Выписке Банка", "№ Договора"],
+         ["BBC", "ТОО Альфа", "ТОО \"АЛЬФА\" БИН 260540028486", "ЮО/141"]],
+        title="Сводка", worksheet="Сводка",
+    ))
+    assert owner.get(f"{BASE}/core/participants-harvest").json()["matched"] == 1
+    walk.call(owner, "POST", "/core/participants-harvest")
+    core_book.forget()
+    walk.call(owner, "POST", "/core/entities/{entity_id}/tax", entity_id=entity,
+              json={"valid_from": "2026-01-01", "regime": "general", "vat_payer": True})
+    period = owner.get(f"{BASE}/core/participants/{entity}").json()["own"]["tax"][0]["id"]
+    walk.call(owner, "DELETE", "/core/entities/{entity_id}/tax/{period_id}", entity_id=entity, period_id=period)
+    walk.call(owner, "PUT", "/core/tax-years/{year}", year=2027,
+              json={"mrp": "4600", "threshold_mrp": 10000, "vat_rate": "16"})
+
     walk.call(owner, "DELETE", "/contracts/setup/summary")
 
     # ── загрузка реестра ────────────────────────────────────────────────

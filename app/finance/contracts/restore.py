@@ -698,6 +698,11 @@ def restore_point(
             _drop_field(session, workspace, actor, payload, done, skipped)
     elif point.kind == "order":
         _restore_order(session, workspace, access, actor, payload, done, skipped)
+    elif point.kind == "party_merge":
+        from app.finance.core import participants
+
+        _require_setup(access)
+        participants.undo_merge(session, workspace, payload, done, skipped)
     point.restored_at = _now()
     point.restored_by = actor.user_id
     session.flush()
@@ -867,6 +872,7 @@ _KIND_WORDS = {
     "view": "лист станет прежним",
     "field_add": "колонка уйдёт, поле - в корзину",
     "order": "строки встанут на прежние места",
+    "party_merge": "участники снова отдельно, договоры - у прежних сторон",
 }
 
 
