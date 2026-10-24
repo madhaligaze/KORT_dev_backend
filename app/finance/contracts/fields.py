@@ -120,6 +120,8 @@ SYSTEM_FIELDS: tuple[FieldDef, ...] = (
     # даты договора (`core/accruals.py`).
     FieldDef("period_day", "number", "День периода"),
     FieldDef("billing_from", "date", "Начислять с"),
+    # Ядро, фаза 7: НДС договора, когда исполнитель - плательщик НДС.
+    FieldDef("vat_mode", "choice", "НДС"),
     FieldDef("economic_role", "list", "Хозяйственный смысл", fill="list"),
     FieldDef("amount_terms", "text", "Условие суммы"),
     FieldDef("end_kind", "choice", "Смысл даты окончания"),
@@ -149,6 +151,7 @@ BOOKS = ("", "oneoff")
 CHOICES = {
     "billing": (("month", "В месяц"), ("total", "Вся сумма"), ("terms", "Условие")),
     "end_kind": (("terminated", "Расторжение"), ("fulfilled", "Исполнение"), ("unknown", "Не ясен")),
+    "vat_mode": (("included", "В сумме"), ("on_top", "Сверху"), ("none", "Без НДС")),
 }
 #: Какие способы заполнения есть у типа поля. Первый - умолчание своего поля:
 #: так свои списки вели себя и до настройки (новое значение заводилось само).

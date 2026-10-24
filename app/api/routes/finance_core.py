@@ -384,6 +384,111 @@ def contract_adjustment_remove(contract_id: UUID, document_id: UUID, member: Mem
     return _run(member, action)
 
 
+# ── НДС и порог ──────────────────────────────────────────────────────────────
+
+
+def _turnover(session, workspace, access, year: int):
+    from app.finance.core import vat
+
+    _setup_only(access)
+    if not 2000 <= year <= 2100:
+        raise HTTPException(status_code=400, detail="Год - от 2000 до 2100")
+    return vat.Turnover(session, workspace, access, year, today=contracts_service.today())
+
+
+def _acts(session, workspace, access) -> dict:
+    """АВР книги-сводки по юрлицу и месяцу - уже прочитанная книга, без ожидания Google."""
+    from app.finance.core import vat
+
+    book, _error = book_module.current(session, workspace.id, wait=0)
+    if book is None:
+        return {}
+    reconciler = shadow_module.Reconciler(session, workspace, access, book)
+    return vat.book_acts(reconciler)
+
+
+@router.get("/vat")
+def vat_year(year: int = Query(ge=2000, le=2100), member: Member = Depends(viewer)) -> dict[str, Any]:
+    """Оборот наших юрлиц за год к порогу НДС: факт, прогноз, месяц перехода порога."""
+    from app.finance.core import vat
+
+    def action(session, workspace, access):
+        turnover = _turnover(session, workspace, access, year)
+        return vat.year_out(turnover, turnover.run(acts=_acts(session, workspace, access)))
+
+    return _run(member, action)
+
+
+@router.get("/vat/clients")
+def vat_clients(
+    year: int = Query(ge=2000, le=2100), entity: UUID = Query(), member: Member = Depends(viewer)
+) -> dict[str, Any]:
+    """Договоры юрлица, которые можно перевести: оборот каждого до конца года."""
+    return _run(member, lambda s, w, a: {"items": _turnover(s, w, a, year).clients(entity)})
+
+
+class MoveIn(BaseModel):
+    contract_id: UUID
+    target: UUID
+    since: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+
+
+class MovesIn(BaseModel):
+    year: int = Field(ge=2000, le=2100)
+    moves: list[MoveIn] = Field(min_length=1, max_length=500)
+
+
+def _moves(body: MovesIn) -> list:
+    from datetime import date
+
+    from app.finance.core import vat
+
+    return [vat.Move(item.contract_id, item.target, date.fromisoformat(item.since)) for item in body.moves]
+
+
+@router.post("/vat/preview")
+def vat_preview(body: MovesIn, member: Member = Depends(viewer)) -> dict[str, Any]:
+    """Перевод до записи: оборот затронутых юрлиц к концу года - до и после. Ничего не пишет."""
+
+    def action(session, workspace, access):
+        turnover = _turnover(session, workspace, access, body.year)
+        moves = _moves(body)
+        before, after = turnover.run(), turnover.run(moves)
+        threshold = turnover.tax_year.threshold
+        touched = {item.target for item in moves}
+        for contract in turnover.contracts:
+            if any(item.contract_id == contract.id for item in moves) and contract.executor_id:
+                touched.add(contract.executor_id)
+        return {
+            "entities": [
+                {
+                    "entity_id": str(entity_id),
+                    "code": after[entity_id].code,
+                    "name": after[entity_id].name,
+                    "before": format(before[entity_id].forecast, "f"),
+                    "after": format(after[entity_id].forecast, "f"),
+                    "crossing_before": before[entity_id].crossing(threshold),
+                    "crossing_after": after[entity_id].crossing(threshold),
+                }
+                for entity_id in touched
+                if entity_id in after
+            ]
+        }
+
+    return _run(member, action)
+
+
+@router.post("/vat/transfer")
+def vat_transfer(body: MovesIn, member: Member = Depends(editor)) -> dict[str, Any]:
+    """Перевести договоры к другому нашему юрлицу с дня - пачкой, с точкой восстановления."""
+
+    def action(session, workspace, access):
+        _setup_only(access)
+        return changes.transfer(session, workspace, access, _actor(member), _moves(body))
+
+    return _run(member, action)
+
+
 class StatusFromIn(BaseModel):
     status_id: UUID
     effective_from: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")

@@ -36,6 +36,7 @@ ALLOWED: dict[tuple[str, str], str] = {
     ("POST", "/auth/phone/start"): "шаг входа: только отвечает, какой экран показать, ничего не меняет",
     ("POST", "/contracts/{contract_id}/amendments/parse"): "читает текст соглашений, в базу не пишет",
     ("POST", "/contracts/setup/views/preview"): "считает договоры под правило листа, в базу не пишет",
+    ("POST", "/core/vat/preview"): "считает оборот юрлиц до и после перевода клиентов, в базу не пишет",
     ("POST", "/contracts/imports/{batch_id}/decide"): (
         "решения протокола - черновик разбора; события пишут загрузка файла и заведение"
     ),
@@ -550,6 +551,14 @@ def test_kazhdyy_izmenyayushchiy_marshrut_pishet_sobytie(app: FastAPI, monkeypat
     walk.call(owner, "POST", "/core/shadow/apply-all", json={"kind": "period_day"})
     walk.call(owner, "POST", "/core/shadow/create", json={"key": view["unknown"][0]["key"]})
     core_book.forget()
+    # Порог НДС: предпросмотр перевода ничего не пишет, перевод - пачка «исполнитель с даты».
+    # Договор уже у BBCL - переводим ко второму нашему юрлицу.
+    other = owner.post(f"{BASE}/contracts/setup/entities", json={"name": "BBC Astana", "code": "BBCAS"})
+    assert other.status_code < 400, other.text
+    move = {"year": 2026, "moves": [{"contract_id": omega, "target": other.json()["id"], "since": "2026-12-01"}]}
+    assert owner.get(f"{BASE}/core/vat", params={"year": 2026}).status_code == 200
+    assert owner.post(f"{BASE}/core/vat/preview", json=move).status_code == 200
+    walk.call(owner, "POST", "/core/vat/transfer", json=move)
 
     walk.call(owner, "DELETE", "/contracts/setup/summary")
 

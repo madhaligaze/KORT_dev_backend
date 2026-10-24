@@ -63,6 +63,7 @@ from app.finance.contracts.fields import (
 from app.finance.contracts.models import (
     BILLING_KINDS,
     END_KINDS,
+    VAT_MODES,
     Contract,
     ContractAmendment,
     ContractDepartment,
@@ -1900,6 +1901,11 @@ def _set_field(
         if text and text not in END_KINDS:
             raise FinanceError("Смысл даты окончания: расторжение, исполнение или не ясен")
         contract.end_kind = text
+    elif key == "vat_mode":
+        text = str(raw or "").strip()
+        if text and text not in VAT_MODES:
+            raise FinanceError("НДС: в сумме, сверху или без НДС")
+        contract.vat_mode = text
     elif key == "period_day":
         text = str(raw if raw is not None else "").strip().rstrip("-гоеяй").strip()
         if not text:

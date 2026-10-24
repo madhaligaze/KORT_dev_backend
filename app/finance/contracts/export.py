@@ -142,7 +142,7 @@ def _text(
         return age_months(contract.signed_at)
     if key in DATE_KEYS:
         return getattr(contract, key)
-    if key in ("billing", "end_kind"):
+    if key in ("billing", "end_kind", "vat_mode"):
         # Выбор - словами, как на экране: «Расторжение», а не «terminated».
         raw = getattr(contract, key) or None
         return dict(CHOICES[key]).get(raw, raw) if raw else None

@@ -483,10 +483,110 @@ def create_from_book(
     return contract
 
 
+def transfer(
+    session: Session, workspace: Workspace, access: Access, actor: Actor, moves: list[Any]
+) -> dict[str, Any]:
+    """Перевод договоров к другому нашему юрлицу с дня - пачкой, с точкой восстановления.
+
+    Каждый перевод - обычное изменение «исполнитель с даты» (`service.patch`
+    с режимом `from_date`): видно в «Соглашениях» договора, день настал -
+    исполнитель меняется, впереди - ждёт своего дня. Точка `core_transfer`
+    помнит, что заведено, и «Восстановление» разносит всё обратно.
+    """
+    from app.finance.contracts import restore
+    from app.finance.contracts.service import Mode, patch
+
+    _require_edit(access)
+    if not access.setup:
+        raise PermissionError("Переводит клиентов между юрлицами владелец или администратор")
+    registry = Registry(session, workspace)
+    items: list[dict[str, Any]] = []
+    skipped: list[str] = []
+    targets: set[uuid.UUID] = set()
+    for move in moves:
+        if not registry.is_own(move.target):
+            raise ChangeError("Переводят только к нашему юрлицу")
+        try:
+            contract = get_contract(session, workspace, move.contract_id)
+        except NotFound:
+            skipped.append("договор удалён")
+            continue
+        label = _label(contract)
+        if contract.executor_id == move.target:
+            skipped.append(f"{label}: исполнитель и так этот")
+            continue
+        before = contract.executor_id
+        try:
+            with session.begin_nested():
+                mode = Mode(kind="from_date", effective_from=move.since, summary="перевод клиента между юрлицами")
+                patch(session, workspace, access, actor, contract.id, {"executor": {"id": str(move.target)}}, known_seq=None, mode=mode)
+        except (FinanceError, PermissionError) as exc:
+            skipped.append(f"{label}: {exc}")
+            continue
+        amendment = session.scalars(
+            sa.select(ContractAmendment)
+            .where(ContractAmendment.contract_id == contract.id, ContractAmendment.effect == "executor")
+            .order_by(ContractAmendment.position.desc())
+        ).first()
+        items.append(
+            {
+                "contract_id": str(contract.id),
+                "amendment_id": str(amendment.id) if amendment else None,
+                "executor_before": str(before) if before else None,
+                "label": label,
+            }
+        )
+        targets.add(move.target)
+    if not items:
+        return {"done": 0, "skipped": skipped, "point": None}
+    names = ", ".join(sorted(registry.own[item].code or "" for item in targets if item in registry.own)) or "наше юрлицо"
+    title = f"перевод к {names}: {len(items)} договор(ов) с {min(move.since for move in moves):%d.%m.%Y}"
+    point = restore._point(session, workspace, actor, "core_transfer", title, {"items": items})
+    history.write(
+        session, workspace, kind="core.transfer", entity="contract", entity_id=uuid.UUID(items[0]["contract_id"]),
+        title=title, after={"items": [item["label"] for item in items], "skipped": skipped}, actor=actor.email,
+    )
+    return {"done": len(items), "skipped": skipped, "point": {"id": str(point.id), "title": point.title, "kind": point.kind}}
+
+
+def undo_transfer(
+    session: Session, workspace: Workspace, access: Access, actor: Actor, payload: dict[str, Any], done: list[str], skipped: list[str]
+) -> None:
+    """Вернуть перевод: соглашения «исполнитель с даты» убрать, применённые - вернуть исполнителя."""
+    from app.finance.contracts.service import Mode, patch
+
+    for item in payload.get("items") or []:
+        label = item.get("label") or "договор"
+        contract = session.get(Contract, uuid.UUID(item["contract_id"]))
+        if contract is None or contract.deleted_at is not None:
+            skipped.append(f"{label}: договор удалён")
+            continue
+        amendment = session.get(ContractAmendment, uuid.UUID(item["amendment_id"])) if item.get("amendment_id") else None
+        moved_to = (amendment.after or {}).get("executor") if amendment is not None else None
+        applied = amendment is not None and amendment.applied_at is not None
+        if amendment is not None:
+            session.delete(amendment)
+            session.flush()
+        if applied and moved_to and str(contract.executor_id) == moved_to:
+            before = item.get("executor_before")
+            try:
+                with session.begin_nested():
+                    patch(
+                        session, workspace, access, actor, contract.id, {"executor": {"id": before} if before else None},
+                        known_seq=None, mode=Mode(kind="fix"),
+                    )
+            except (FinanceError, PermissionError) as exc:
+                skipped.append(f"{label}: {exc}")
+                continue
+        done.append(f"{label}: исполнитель прежний")
+
+
 __all__ = [
     "ChangeError",
     "ORIGINS",
     "apply_all",
+    "transfer",
+    "undo_transfer",
     "apply_proposal",
     "create_from_book",
     "history_change",

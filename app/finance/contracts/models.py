@@ -52,6 +52,8 @@ from app.finance.models import JSONB, MONEY, _in
 #: Как начислять по договору. `terms` - условие текстом («20% по разовым»):
 #: график по такому договору не ставится никогда.
 BILLING_KINDS = ("month", "total", "terms")
+#: НДС договора у плательщика: в сумме, сверху, без НДС (пусто - в сумме).
+VAT_MODES = ("included", "on_top", "none")
 #: Смысл даты окончания. Одна колонка файла «дата расторжения / дата
 #: исполнения разового» держит два смысла; какой - хранится явно.
 END_KINDS = ("terminated", "fulfilled", "unknown")
@@ -353,6 +355,9 @@ class Contract(FinanceBase):
         sa.CheckConstraint(
             "period_day IS NULL OR period_day BETWEEN 1 AND 31", name="contract_period_day"
         ),
+        sa.CheckConstraint(
+            "vat_mode = '' OR " + _in("vat_mode", VAT_MODES), name="contract_vat_mode"
+        ),
         sa.CheckConstraint(_in("source", CONTRACT_SOURCES), name="contract_source"),
         sa.Index("ix_contracts_workspace_seq", "workspace_id", "seq"),
         sa.Index("ix_contracts_workspace_number_key", "workspace_id", "number_key"),
@@ -393,6 +398,10 @@ class Contract(FinanceBase):
     period_day: Mapped[int | None] = mapped_column(sa.SmallInteger)
     #: С какого дня начислять: пусто - с даты договора.
     billing_from: Mapped[date | None] = mapped_column(sa.Date)
+    #: Как сумма договора относится к НДС, когда исполнитель - плательщик НДС
+    #: (`core/vat.py`): пусто или `included` - в сумме, `on_top` - сверху,
+    #: `none` - без НДС.
+    vat_mode: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("''"))
     amount: Mapped[Decimal | None] = mapped_column(MONEY)
     #: Условие суммы текстом, когда числа нет: «20% по разовым, 40% по абон.».
     amount_terms: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("''"))
@@ -621,6 +630,8 @@ RESTORE_KINDS = (
     "contracts_delete", "contracts_create", "values", "view", "field_add", "order",
     # Сведение двух участников в одного (ядро, `core/participants.py`).
     "party_merge",
+    # Перевод клиентов между нашими юрлицами пачкой (ядро, `core/vat.py`).
+    "core_transfer",
 )
 
 
