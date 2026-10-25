@@ -34,7 +34,7 @@ from sqlalchemy.orm import Session
 
 from app.finance import history
 from app.finance.contracts.fields import bump, party_key
-from app.finance.contracts.models import Contract, CounterpartyName, GroupEntity, ListValue, RestorePoint
+from app.finance.contracts.models import Contract, CounterpartyName, GroupEntity, ListValue
 from app.finance.contracts.service import Access, Actor, Registry, people_of, visible_to
 from app.finance.core import bin as bins
 from app.finance.core import book as book_module
@@ -191,6 +191,57 @@ def _own_entities(session: Session, workspace: Workspace) -> dict[uuid.UUID, Gro
             sa.select(GroupEntity).where(GroupEntity.workspace_id == workspace.id, GroupEntity.archived_at.is_(None))
         )
     }
+
+
+#: Организационная форма внутри названия счёта: «Kaspi Юр. ТОО "BBC HR"»,
+#: «Депозит TOO "…"» (латиницей - так тоже пишут).
+_FORM_INSIDE = re.compile(r"(?:^|[\s.,(])(тоо|too|ип|ао|llp|ооо)(?=[\s\"«“'])", re.IGNORECASE)
+
+
+def legal_tail(name: str) -> str:
+    """Имя после организационной формы, ключом: «Kaspi Юр. ТОО "BBC HR"» → «bbchr».
+
+    «Товарищество с ограниченной ответственностью» - тоже форма. Формы нет -
+    пусто: имя без формы может быть чем угодно, хоть «Пополнение».
+    """
+    text = _expand(name)
+    forms = list(_FORM_INSIDE.finditer(text))
+    return party_key(text[forms[-1].end(1):]) if forms else ""
+
+
+def entities_of_accounts(session: Session, workspace: Workspace, names: Iterable[str]) -> dict[str, GroupEntity]:
+    """Чьё наше юрлицо названо в счёте: «Kaspi Юр. ТОО "BBC HR"» → BBC HR.
+
+    Имя после формы сравнивается целиком - с именем, полным наименованием и
+    написаниями нашего юрлица: «BBC» внутри «BBC HR» - не BBC, а «ТОО "BBC
+    Marketing and Sales"» без такого юрлица - никто. Ни одного или два
+    юрлица под одно имя - предложения нет, решает человек.
+    """
+    own = _own_entities(session, workspace)
+    if not own:
+        return {}
+    texts: dict[uuid.UUID, list[str]] = {party_id: [entity.full_name] for party_id, entity in own.items()}
+    for party in session.scalars(sa.select(Counterparty).where(Counterparty.id.in_(list(own)))):
+        texts[party.id] += [party.name, party.full_name or ""]
+    for party_id, alias in session.execute(
+        sa.select(CounterpartyName.counterparty_id, CounterpartyName.name).where(
+            CounterpartyName.counterparty_id.in_(list(own))
+        )
+    ):
+        texts[party_id].append(alias)
+    keys: dict[str, set[uuid.UUID]] = {}
+    for party_id, items in texts.items():
+        for text in items:
+            key = bare_key(text)
+            if key:
+                keys.setdefault(key, set()).add(party_id)
+    out: dict[str, GroupEntity] = {}
+    for name in names:
+        tail = legal_tail(name or "")
+        hits = keys.get(tail, set()) if tail else set()
+        if len(hits) == 1:
+            out[name] = own[next(iter(hits))]
+    return out
 
 
 def _hit(
@@ -1031,15 +1082,20 @@ class Harvest:
     aliases: dict[str, int] = field(default_factory=dict)
     codes: list[dict[str, Any]] = field(default_factory=list)
     conflicts: list[dict[str, Any]] = field(default_factory=list)
+    #: Написания, общие для нескольких клиентов (банк-посредник), - не записаны.
+    shared: int = 0
 
 
 def harvest(session: Session, workspace: Workspace, access: Access, actor: Actor, book: book_module.Book, *, apply: bool) -> dict[str, Any]:
     """Написания «Заказчик / По Выписке Банка / По 1C» - клиенту договора строки; коды «Наша Фирма» - юрлицам.
 
     Написание пишется, только если строка однозначно нашла договор (номер и
-    клиент). Код юрлица ставится, если все строки с этим кодом нашли договоры
-    одного и того же нашего юрлица, а у юрлица кода ещё нет. Без `apply` -
-    только показать, что будет записано.
+    клиент) и это написание - одного клиента: «Филиал "Южная столица" АО
+    "Kaspi Bank"» в «По Выписке Банка» стоит у семи клиентов, платящих через
+    Kaspi, и написанием ни одного из них не является (25.10.2026). Код юрлица
+    ставится, если все строки с этим кодом нашли договоры одного и того же
+    нашего юрлица, а у юрлица кода ещё нет. Без `apply` - только показать, что
+    будет записано.
     """
     _require_setup(access, "Собирает написания из сводки")
     matcher = book_module.Matcher(session, workspace.id)
@@ -1078,8 +1134,16 @@ def harvest(session: Session, workspace: Workspace, access: Access, actor: Actor
             sa.select(CounterpartyName.counterparty_id, CounterpartyName.normalized).where(CounterpartyName.workspace_id == workspace.id)
         )
     }
+    owners: dict[str, set[uuid.UUID]] = {}
+    for party_id, key in wanted:
+        owners.setdefault(key, set()).add(party_id)
+    # Не «имя другого участника»: контрагент, которого завела выписка, - это и
+    # есть банковское написание клиента, и такая проверка не дала бы связать ни одно.
     for (party_id, key), packed in wanted.items():
         if (party_id, key) in existing:
+            continue
+        if len(owners[key]) > 1:
+            result.shared += 1
             continue
         source, name = packed.split("\u0000", 1)
         result.aliases[source] = result.aliases.get(source, 0) + 1
@@ -1124,6 +1188,7 @@ def harvest(session: Session, workspace: Workspace, access: Access, actor: Actor
         "rows": result.rows,
         "matched": result.matched,
         "aliases": result.aliases,
+        "shared": result.shared,
         "codes": result.codes,
         "conflicts": result.conflicts,
         "applied": apply,

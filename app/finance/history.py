@@ -117,6 +117,7 @@ OPERATION_FIELDS = (
     "category_id",
     "counterparty_id",
     "comment",
+    "contract_ref",
     "deleted_at",
 )
 

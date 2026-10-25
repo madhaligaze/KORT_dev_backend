@@ -632,6 +632,8 @@ RESTORE_KINDS = (
     "party_merge",
     # Перевод клиентов между нашими юрлицами пачкой (ядро, `core/vat.py`).
     "core_transfer",
+    # Входящее сальдо договоров из книги пачкой (ядро, `core/opening.py`).
+    "core_opening",
 )
 
 

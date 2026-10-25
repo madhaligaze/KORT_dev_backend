@@ -550,6 +550,24 @@ def test_kazhdyy_izmenyayushchiy_marshrut_pishet_sobytie(app: FastAPI, monkeypat
     walk.call(owner, "POST", "/core/shadow/apply", json={key: first_day[key] for key in ("contract_id", "kind", "value")})
     walk.call(owner, "POST", "/core/shadow/apply-all", json={"kind": "period_day"})
     walk.call(owner, "POST", "/core/shadow/create", json={"key": view["unknown"][0]["key"]})
+    # Оплаты: начало учёта, входящее сальдо из книги и руками, поступление без договора.
+    walk.call(owner, "PUT", "/core/payments/settings", json={"since": "2026-06-01"})
+    core_book.put(company, core_book.build_book(
+        [["Мес", "Техн. 1", "Наша Фирма", "Заказчик (Название Фирмы)", "Сумма Договора", "№ Договора",
+          "Период с (нач.)", "Период по (зав.)", "Сальдо Начало (без АВР)"],
+         ["6", "ИЮНЬ 2026", "BBC", "ТОО Омегаком", "500 000", "ОБО/8", "01.06.2026", "30.06.2026", "120 000"]],
+        title="Сводка", worksheet="Сводка",
+    ))
+    overview = owner.get(f"{BASE}/core/payments")
+    assert overview.status_code == 200, overview.text
+    assert overview.json()["opening"]["counts"]["new"] == 1
+    walk.call(owner, "POST", "/core/payments/opening")
+    walk.call(owner, "PUT", "/core/contracts/{contract_id}/opening", contract_id=sigma, json={"amount": "50000"})
+    stray = owner.post(f"{BASE}/operations", json={"kind": "income", "paid_at": "2026-06-15", "amount": "7000",
+                                                     "account_to_id": reserve, "comment": "непонятный приход"})
+    assert stray.status_code < 400, stray.text
+    walk.call(owner, "POST", "/core/payments/{operation_id}/decide", operation_id=stray.json()["id"], json={"action": "none"})
+    walk.call(owner, "PUT", "/core/payments/ignore", json={"kind": "payers", "name": "Вознаграждение"})
     core_book.forget()
     # Порог НДС: предпросмотр перевода ничего не пишет, перевод - пачка «исполнитель с даты».
     # Договор уже у BBCL - переводим ко второму нашему юрлицу.

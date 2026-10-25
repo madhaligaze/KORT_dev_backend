@@ -322,7 +322,10 @@ def create_account(
     starting_balance: Decimal | float | str = 0,
     excluded_from_reports: bool = False,
     number: str = "",
+    group_entity_id: uuid.UUID | None = None,
 ) -> Account:
+    """Завести счёт. `group_entity_id` - чей он из наших юрлиц: оплата на него -
+    оплата договоров этого юрлица (`contracts/payments.py`); проверяет вызывающий."""
     clean = (name or "").strip()
     if not clean:
         raise FinanceError("У счёта должно быть название")
@@ -343,6 +346,7 @@ def create_account(
         excluded_from_reports=excluded_from_reports,
         number=_check_number(session, workspace.id, number),
         position=_next_position(session, Account, workspace.id),
+        group_entity_id=group_entity_id,
     )
     session.add(account)
     session.flush()
@@ -648,6 +652,10 @@ class OperationInput:
     category_id: uuid.UUID | None = None
     counterparty_id: uuid.UUID | None = None
     comment: str = ""
+    #: Номер договора, как его написал источник (`Operation.contract_ref`).
+    contract_ref: str = ""
+    #: Период словами источника, когда это не месяц (`Operation.period_label`).
+    period_label: str = ""
     projects: Sequence[tuple[uuid.UUID, Decimal]] = ()
     #: Дробление по статьям: один платёж на несколько статей.
     categories: Sequence[tuple[uuid.UUID, Decimal]] = ()
@@ -785,6 +793,8 @@ def create_operation(
         category_id=data.category_id if data.kind != "transfer" else None,
         counterparty_id=data.counterparty_id,
         comment=data.comment or "",
+        contract_ref=(data.contract_ref or "").strip(),
+        period_label=(data.period_label or "").strip(),
         split_state=_split_state(amount, data.projects),
         source=data.source,
         recurrence_id=data.recurrence_id,
@@ -1162,10 +1172,12 @@ def apply_batch(
     )
     known = _known_keys(session, workspace.id)
     remembered = _remember_statement_number(session, workspace, batch, accounts)
+    # БИН участника - колонка `bin` (ядро, 24.10.2026); `details.bin` - то, что
+    # записали прошлые выписки, до того как БИН стал участником.
     by_bin = {
-        str((item.details or {}).get("bin")): item
+        str(item.bin or (item.details or {}).get("bin")): item
         for item in list_counterparties(session, workspace.id)
-        if (item.details or {}).get("bin")
+        if item.bin or (item.details or {}).get("bin")
     }
 
     imported = 0
@@ -1240,6 +1252,8 @@ def apply_batch(
             category_id=category.id if category else None,
             counterparty_id=counterparty.id if counterparty else None,
             comment=values.get("comment") or "",
+            contract_ref=values.get("contract_ref") or "",
+            period_label=values.get("period_label") or "",
             projects=projects,
             tags=tags,
             source="import",
@@ -1363,7 +1377,7 @@ _FIXABLE = frozenset(
     {
         "paid_at", "accrued_at", "period_start", "period_end", "amount", "kind", "currency",
         "account_from", "account_to", "category", "subcategory", "counterparty", "project",
-        "subproject", "comment", "tags",
+        "subproject", "comment", "tags", "contract_ref", "period_label",
     }
 )
 

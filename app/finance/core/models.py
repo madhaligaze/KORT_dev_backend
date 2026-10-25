@@ -4,9 +4,10 @@
 ───────────────────────────────────
 **Правда** - документы договора за месяц (`documents`: поправка начисления,
 счёт, АВР, ЭСФ, входящее сальдо), режим нашего юрлица с даты
-(`entity_tax_periods`) и поправки компании к налоговым числам года
-(`tax_years`): МРП, порог постановки на учёт по НДС в МРП, ставка. Без
-поправки действуют числа РК из `core/tax.py`.
+(`entity_tax_periods`), поправки компании к налоговым числам года
+(`tax_years`): МРП, порог постановки на учёт по НДС в МРП, ставка (без
+поправки действуют числа РК из `core/tax.py`), и настройки ядра компании
+(`core_settings`): с какого дня ведутся оплаты и откуда они у каждого юрлица.
 
 **Производное** - начисления (`core/accruals.py` - из условий договора),
 оборот юрлица к порогу, НДС в документе, прогноз по месяцам: считаются из
@@ -165,4 +166,36 @@ class TaxYear(FinanceBase):
     )
 
 
-__all__ = ["DOCUMENT_KINDS", "DOCUMENT_SOURCES", "Document", "EntityTaxPeriod", "TAX_REGIMES", "TaxYear"]
+class CoreSettings(FinanceBase):
+    """Настройки ядра компании - решения человека, которых нет в данных.
+
+    `data` - словарь по разделам (`core/settings.py` знает ключи и умолчания):
+    `payments.since` - с какого дня KORT ведёт оплаты (до него долг - входящее
+    сальдо, а не неоплаченные начисления), `payments.sources` - откуда оплаты
+    нашего юрлица: журнал движения денег или 1С (один источник на юрлицо,
+    второй - для сверки).
+    """
+
+    __tablename__ = "core_settings"
+
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        sa.Uuid, sa.ForeignKey("workspaces.id", ondelete="CASCADE"), primary_key=True
+    )
+    data: Mapped[dict] = mapped_column(JSONB, server_default=sa.text("'{}'"))
+    updated_by: Mapped[uuid.UUID | None] = mapped_column(
+        sa.Uuid, sa.ForeignKey("users.id", ondelete="SET NULL")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        sa.DateTime(timezone=True), server_default=sa.func.now()
+    )
+
+
+__all__ = [
+    "CoreSettings",
+    "DOCUMENT_KINDS",
+    "DOCUMENT_SOURCES",
+    "Document",
+    "EntityTaxPeriod",
+    "TAX_REGIMES",
+    "TaxYear",
+]

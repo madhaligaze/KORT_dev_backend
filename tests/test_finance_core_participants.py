@@ -300,6 +300,21 @@ def test_napisaniya_i_kody_iz_svodki(space):
         assert participants.bin_proposals(session, workspace, FULL, book) == []
 
 
+def test_napisanie_neskolkih_klientov_ne_napisanie(space):
+    """Банк-посредник в «По Выписке Банка» у двух клиентов - написанием ни одного не становится."""
+    with finance_session() as session:
+        workspace = _ws(session, space)
+        _make(session, space, executor="BBC legal support", customer="ИП Алтын", amount="1", number="№ЮО/1")
+        _make(session, space, executor="BBC legal support", customer="ИП Жанар", amount="1", number="№ЮО/2")
+        bank = 'Филиал "Южная столица" АО "Kaspi Bank" в г. Алматы'
+        book = _book([
+            ["10", "ОКТЯБРЬ 2026", "BBCL", "Разовый", "ИП Алтын", bank, "", "1", "№ЮО/1", "", "", "", "", "", ""],
+            ["10", "ОКТЯБРЬ 2026", "BBCL", "Разовый", "ИП Жанар", bank, "", "1", "№ЮО/2", "", "", "", "", "", ""],
+        ])
+        preview = participants.harvest(session, workspace, FULL, OWNER, book, apply=False)
+        assert preview["matched"] == 2 and preview["aliases"] == {} and preview["shared"] == 2
+
+
 # ── Режим наших юрлиц ────────────────────────────────────────────────────────
 
 

@@ -45,6 +45,7 @@
 """
 from __future__ import annotations
 
+import calendar
 import hashlib
 import io
 import logging
@@ -244,9 +245,38 @@ COLUMNS: tuple[Column, ...] = (
     Column(
         key="comment",
         title="Комментарий",
+        # «Комментарии» - не опечатка «Комментария»: так колонка названа в
+        # журналах, которые ведут руками, и без этого написания назначение
+        # платежа из такого журнала терялось целиком (нечёткое совпадение
+        # «комментари-и» с «комментари-й» не берёт: ни одно не начало другого).
         names=(
-            "комментарий", "назначение платежа", "назначение", "описание", "примечание", "comment",
+            "комментарий", "комментарии", "назначение платежа", "назначение", "описание", "примечание", "comment",
             "детали операции", "содержание операции",
+        ),
+        required=False,
+    ),
+    # Номер договора, как его написал источник. Довод разнесения оплаты по
+    # договорам: платит нередко не сам клиент (Kaspi Pay от физлица, другое
+    # ТОО), и по плательщику оплату не отнести, а по номеру - можно.
+    Column(
+        key="contract_ref",
+        title="№ договора",
+        names=(
+            "№ дог.", "№ дог", "№ договора", "номер договора", "договор №", "№ контракта", "номер контракта",
+            "contract no", "contract number",
+        ),
+        required=False,
+    ),
+    # За какой месяц платёж: «ИЮНЬ 2026» в колонке «ОПиУ период» журнала. Это
+    # месяц отчёта о прибылях (дата начисления) и подсказка, какой месяц
+    # договора оплачен. Не «ДДС Месяц»: тот - месяц движения денег, он и так
+    # есть в дате платежа.
+    Column(
+        key="period_month",
+        title="Месяц начисления",
+        names=(
+            "опиу период", "период опиу", "месяц опиу", "опиу месяц", "месяц начисления", "отчетный месяц",
+            "за месяц", "месяц услуги", "период услуги",
         ),
         required=False,
     ),
@@ -886,6 +916,71 @@ def parse_date(raw: Any, reading: DateReading) -> date | None:
         except ValueError:
             return None
     return None
+
+
+_PERIOD_WORD = re.compile(r"^([a-zа-я]+)\.?\s*(\d{4}|\d{2})\s*(?:г\.?|года?|year)?$")
+_PERIOD_MONTH_YEAR = re.compile(r"^(\d{1,2})[./\-](\d{4})$")
+_PERIOD_YEAR_MONTH = re.compile(r"^(\d{4})[./\-](\d{1,2})$")
+_PERIOD_YEAR = re.compile(r"^(\d{4})\s*(?:г\.?|года?|year)?$")
+#: «3 квартал 2026», «III кв. 2026», «Q3 2026».
+_PERIOD_QUARTER = re.compile(r"^(?:([1-4]|iv|iii|ii|i)\s*(?:-?й\s*)?(?:квартал|кв\.?)|q([1-4]))\s*(\d{4})\s*(?:г\.?|года?)?$")
+_ROMAN = {"i": 1, "ii": 2, "iii": 3, "iv": 4}
+
+
+def parse_period(raw: Any, reading: DateReading) -> tuple[date, date, str] | None:
+    """Месяц, квартал или год из колонки «за какой месяц»: начало, конец и «month»/«quarter»/«year».
+
+    Только запись целиком: «ИЮНЬ 2026», «06.2026», «2026-06», «3 квартал 2026»,
+    «2027 год», дата.
+    «Старые (до Май/Июня 2026)» - не месяц, хотя в ней есть и «май», и «июня»,
+    и год: подпись остаётся в строке источника, а месяца у операции нет.
+    """
+    if raw is None or isinstance(raw, bool):
+        return None
+    if isinstance(raw, (int, float)) and raw < 10000:
+        # «6» - номер месяца без года, а не дата Excel из 1900 года.
+        return None
+    if isinstance(raw, (datetime, date, int, float)):
+        day = parse_date(raw, reading)
+        return _month_span(day.year, day.month) if day else None
+    text = _SPACES.sub(" ", str(raw)).strip().lower().replace("ё", "е")
+    if not text:
+        return None
+
+    def year_of(value: str) -> int:
+        number = int(value)
+        return number + (2000 if number < 70 else 1900) if number < 100 else number
+
+    match = _PERIOD_WORD.match(text)
+    if match and match.group(1)[:3] in _MONTH_NAMES:
+        return _month_span(year_of(match.group(2)), _MONTH_NAMES[match.group(1)[:3]])
+    match = _PERIOD_MONTH_YEAR.match(text)
+    if match:
+        return _month_span(int(match.group(2)), int(match.group(1)))
+    match = _PERIOD_YEAR_MONTH.match(text)
+    if match:
+        return _month_span(int(match.group(1)), int(match.group(2)))
+    match = _PERIOD_YEAR.match(text)
+    if match:
+        year = int(match.group(1))
+        return date(year, 1, 1), date(year, 12, 31), "year"
+    match = _PERIOD_QUARTER.match(text)
+    if match:
+        raw_quarter = match.group(1) or match.group(2)
+        quarter = int(raw_quarter) if raw_quarter.isdigit() else _ROMAN[raw_quarter]
+        year = int(match.group(3))
+        last = quarter * 3
+        return date(year, last - 2, 1), date(year, last, calendar.monthrange(year, last)[1]), "quarter"
+    if _date_parts(text):
+        day = parse_date(text, reading)
+        return _month_span(day.year, day.month) if day else None
+    return None
+
+
+def _month_span(year: int, month: int) -> tuple[date, date, str] | None:
+    if not 1 <= month <= 12 or not 1900 <= year <= 2200:
+        return None
+    return date(year, month, 1), date(year, month, calendar.monthrange(year, month)[1]), "month"
 
 
 # ── Реквизиты выписки ────────────────────────────────────────────────────────
@@ -1735,6 +1830,22 @@ def _parse_row(
     for key in ("period_start", "period_end"):
         value = parse_date(cell(key), reading)
         row.values[key] = value.isoformat() if value else None
+    # «За какой месяц» - период начисления, а у месяца ещё и дата начисления:
+    # по ней отчёт о прибылях кладёт платёж в свой месяц. Колонки периода и
+    # даты начисления, если они есть в файле, точнее - их не перебиваем.
+    span = parse_period(cell("period_month"), reading)
+    row.values["period_label"] = ""
+    if span is not None:
+        start, end, unit = span
+        if not row.values["period_start"] and not row.values["period_end"]:
+            row.values["period_start"], row.values["period_end"] = start.isoformat(), end.isoformat()
+        if unit == "month" and not row.values["accrued_at"]:
+            row.values["accrued_at"] = start.isoformat()
+    elif _has_value(cell("period_month")):
+        # Период назван, но не месяцем: «Старые (до Май/Июня 2026)». Месяца у
+        # операции нет, а подпись остаётся - оплата не за месяцы учёта.
+        row.values["period_label"] = _text(cell("period_month")) or ""
+    row.values["contract_ref"] = _text(cell("contract_ref")) or ""
 
     # Сумма и вид операции разбираются вместе: в двухколоночной выписке вид
     # задаёт как раз то, в какой из колонок стоит число.
@@ -1788,7 +1899,12 @@ def _parse_row(
         if found:
             return found
         close = [real for key_, real in ctx.accounts_by_name.items() if key_.startswith(norm(name)[:4])]
-        ctx.missing_accounts.add(name)
+        # Строка без даты и без суммы - не операция, а повтор шапки внутри
+        # данных («Дата | ТОО | Сумма» во второй строке выгрузки Kaspi Pay): её
+        # «ТОО» в колонке счёта просило завести счёт «ТОО». Замечание у строки
+        # остаётся, в список «завести счета» она не идёт.
+        if paid_at is not None or amount is not None:
+            ctx.missing_accounts.add(name)
         row.state = "failed"
         hint = f"; похожие есть: {', '.join(sorted(close)[:3])}" if close else ""
         row.problem(key, f"счёт «{name}» не найден{hint}")
@@ -1981,5 +2097,6 @@ __all__ = [
     "fingerprint",
     "parse_date",
     "parse_money",
+    "parse_period",
     "read_rows",
 ]

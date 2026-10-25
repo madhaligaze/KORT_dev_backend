@@ -1073,13 +1073,20 @@ class AccountIn(BaseModel):
     excluded_from_reports: bool = False
     #: Номер счёта в банке (IBAN). По нему выписка находит свой счёт.
     number: str = ""
+    #: Чей счёт из наших юрлиц (`Account.group_entity_id`); пусто - ничей.
+    group_entity_id: UUID | None = None
 
 
 @router.post("/accounts")
 def create_account(body: AccountIn, member: Member = Depends(require_access("dictionaries", "edit"))) -> dict[str, Any]:
     _guard()
+    from app.finance.contracts.models import GroupEntity
+
     with finance_session() as session:
         workspace = _workspace(session, member)
+        entity = session.get(GroupEntity, body.group_entity_id) if body.group_entity_id else None
+        if body.group_entity_id and (entity is None or entity.workspace_id != workspace.id or entity.archived_at is not None):
+            raise HTTPException(status_code=422, detail="Такого нашего юрлица нет")
         try:
             account = service.create_account(
                 session,
@@ -1090,16 +1097,24 @@ def create_account(body: AccountIn, member: Member = Depends(require_access("dic
                 starting_balance=_money(body.starting_balance, field="starting_balance"),
                 excluded_from_reports=body.excluded_from_reports,
                 number=body.number,
+                group_entity_id=entity.counterparty_id if entity is not None else None,
             )
         except FinanceError as exc:
             raise _fail(exc) from exc
+        owner = session.get(Counterparty, entity.counterparty_id) if entity is not None else None
         history.write(
             session, workspace, kind="account.create", entity="account", entity_id=account.id,
-            title=f"счёт заведён: «{account.name}»",
+            title=f"счёт заведён: «{account.name}»" + (f" · юрлицо {owner.name}" if owner is not None else ""),
             after={"name": account.name, "kind": account.kind, "currency": account.currency,
-                   "starting_balance": str(account.starting_balance), "number": account.number or ""},
+                   "starting_balance": str(account.starting_balance), "number": account.number or "",
+                   "group_entity_id": str(account.group_entity_id) if account.group_entity_id else None},
         )
-        return {"id": str(account.id), "name": account.name, "number": account.number}
+        return {
+            "id": str(account.id),
+            "name": account.name,
+            "number": account.number,
+            "group_entity_id": str(account.group_entity_id) if account.group_entity_id else None,
+        }
 
 
 class EntryIn(BaseModel):
@@ -1334,6 +1349,8 @@ def _operation_out(
         "split_state": operation.split_state,
         "tags": [str(tag_id) for tag_id in tags.get(operation.id, [])],
         "comment": operation.comment,
+        "contract_ref": operation.contract_ref or "",
+        "period_label": operation.period_label or "",
         "source": operation.source,
         "import_batch_id": str(operation.import_batch_id) if operation.import_batch_id else None,
     }
@@ -1518,6 +1535,8 @@ class OperationIn(BaseModel):
     category_id: UUID | None = None
     counterparty_id: UUID | None = None
     comment: str = ""
+    #: Номер договора, к которому оплата (подсказка разнесения, `Operation.contract_ref`).
+    contract_ref: str = ""
     projects: list[ProjectSplitIn] = Field(default_factory=list)
     categories: list[CategorySplitIn] = Field(default_factory=list)
     tags: list[UUID] = Field(default_factory=list)
@@ -1546,6 +1565,7 @@ def create_operation(body: OperationIn, member: Member = Depends(require_access(
             category_id=body.category_id,
             counterparty_id=body.counterparty_id,
             comment=body.comment,
+            contract_ref=body.contract_ref,
             projects=[(item.project_id, _money(item.amount, field="projects")) for item in body.projects],
             categories=[
                 (item.category_id, _money(item.amount, field="categories")) for item in body.categories
@@ -1582,6 +1602,7 @@ class OperationPatch(BaseModel):
     category_id: UUID | None = None
     counterparty_id: UUID | None = None
     comment: str | None = None
+    contract_ref: str | None = None
     projects: list[ProjectSplitIn] | None = None
     categories: list[CategorySplitIn] | None = None
     tags: list[UUID] | None = None
@@ -1607,6 +1628,8 @@ def patch_operation(
             changes[key] = value
     if body.comment is not None:
         changes["comment"] = body.comment
+    if body.contract_ref is not None:
+        changes["contract_ref"] = body.contract_ref.strip()
     if body.projects is not None:
         changes["projects"] = [(item.project_id, _money(item.amount, field="projects")) for item in body.projects]
     if body.categories is not None:
@@ -2229,6 +2252,28 @@ def _preview_response(
         title=f"разбор «{preview.file_name}»: {len(preview.rows)} строк",
         after={"file_name": preview.file_name, "rows": len(preview.rows)},
     )
+    # Счета, которых нет, заводятся с юрлицом: по нему оплата на счёт - оплата
+    # договоров этого юрлица. Юрлицо предлагается, только если оно названо в
+    # счёте целиком («Kaspi ТОО "BBC HR"»); выбирает человек.
+    entities: list[dict[str, Any]] = []
+    suggested: dict[str, str] = {}
+    if preview.accounts_missing:
+        from app.finance.contracts.models import GroupEntity
+        from app.finance.core import participants
+
+        entities = [
+            {"id": str(party.id), "name": party.name, "code": entity.code}
+            for entity, party in session.execute(
+                sa.select(GroupEntity, Counterparty)
+                .join(Counterparty, Counterparty.id == GroupEntity.counterparty_id)
+                .where(GroupEntity.workspace_id == workspace.id, GroupEntity.archived_at.is_(None))
+                .order_by(GroupEntity.position, Counterparty.name)
+            )
+        ]
+        suggested = {
+            name: str(entity.counterparty_id)
+            for name, entity in participants.entities_of_accounts(session, workspace, preview.accounts_missing).items()
+        }
     return {
         "batch_id": str(batch.id),
         "file_name": preview.file_name,
@@ -2240,6 +2285,8 @@ def _preview_response(
         "mapping": preview.mapping,
         "unused_columns": preview.unused_columns,
         "accounts_missing": preview.accounts_missing,
+        "accounts_entities": suggested,
+        "entities": entities,
         "accounts_suggested": preview.accounts_suggested,
         # Сверка с остатками, которые напечатал банк, - PDF или таблицей.
         "bank": service.reconcile_statement(session, workspace, preview),

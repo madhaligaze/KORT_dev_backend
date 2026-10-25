@@ -408,6 +408,13 @@ class Operation(FinanceBase):
     )
 
     comment: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("''"))
+    #: Номер договора, как его написал источник («№ЮО/84» в журнале). Довод
+    #: разнесения оплат по договорам (`contracts/payments.py`), а не адрес:
+    #: к какому договору оплата относится, считается при чтении.
+    contract_ref: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("''"))
+    #: «За какой период» словами источника, когда это не месяц и не год
+    #: («Старые (до Май/Июня 2026)»): оплата не за месяцы учёта.
+    period_label: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("''"))
     split_state: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("'none'"))
 
     source: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("'app'"))

@@ -18,7 +18,9 @@
   кавычек, регистра и пробелов (`party_key`) или тот же БИН. Банк пишет
   «ТОО "ТЕПЛОБЕТОНСТРОЙ"», реестр - «ТОО Теплобетонстрой», и выписка заводит
   себе отдельную запись контрагента: по одному идентификатору оплаты не
-  нашлись бы никогда;
+  нашлись бы никогда. Латиница-двойник - та же буква (`visual_key`): банк
+  набрал «ТОО "ЕСО Bazar"» кириллицей, реестр - «ТОО ECO Bazar» латиницей, и 26
+  оплат на 14,4 млн на копии прода лежали без договора (25.10.2026);
 * **наше юрлицо**: счёт операции привязан к юрлицу договора («Наши юрлица» →
   счета). Счёт без юрлица не мешает - тогда решает сторона.
 
@@ -31,6 +33,20 @@
 бы спорным всё). Нашёлся один - его. Иначе платёж **спорный**:
 виден у каждого кандидата с «Отнести к этому договору» и в «Оплачено» не
 входит - угадывать нельзя (правило проекта «не угадывать»).
+
+**Номер договора из источника** (`Operation.contract_ref`, «№ЮО/84» в
+журнале, 25.10.2026) - довод сильнее плательщика: платит нередко не сам
+клиент (Kaspi Pay от физлица, другое ТОО), и по имени такая оплата не
+находилась никогда. Номер ищется среди договоров того же направления и, если
+счёт привязан к юрлицу, этого юрлица; другая рука («ОБО-62» вместо «ОБО/62») -
+тот же номер, если такой договор один. Плательщик не узнан - решает номер.
+Плательщик узнан и это сторона договора с этим номером - тем более. Узнан, но
+это другой клиент - спорный: номер и плательщик спорят, решает человек.
+Номера среди договоров юрлица нет («№ЮО/35-2», которого нет в реестре, или
+договор другого юрлица) - оплата ничья: источник назвал другой договор, и
+отдать её договору того же клиента по имени значило бы угадать (так оплаты
+«ЮО/35-2» ложились в «ЮО/35», 25.10.2026). Её решает человек в «Оплатах без
+договора».
 
 «Остаток» - только у договора на всю сумму: сумма минус оплачено. У
 абонентских и аренды остаток - это начисления по месяцам; в файле BBC эти
@@ -48,7 +64,7 @@ import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
 from app.finance import history
-from app.finance.contracts.fields import party_key
+from app.finance.contracts.fields import number_key, party_key
 from app.finance.contracts.models import Contract, ContractPayment, CounterpartyName
 from app.finance.contracts.service import (
     Access,
@@ -61,6 +77,7 @@ from app.finance.contracts.service import (
     visible_to,
 )
 from app.finance.models import Account, Counterparty, Operation, Workspace
+from app.finance.onec.match import number_loose, visual_key
 from app.finance.service import FinanceError
 
 #: Срок договора для выбора между несколькими: предоплата - за месяц до даты
@@ -81,6 +98,8 @@ class Side:
     end: date | None
     #: Сумма договора (у абонентского - месячная): платёж ровно на неё - довод.
     amount: Decimal | None = None
+    #: Номер договора без оформления (`number_key`): по нему находит оплата с «№» источника.
+    number: str = ""
 
     def holds(self, day: date) -> bool:
         if self.start is not None and day < self.start - WINDOW_BEFORE:
@@ -92,7 +111,8 @@ class Side:
 
 @dataclass
 class Allocation:
-    #: Договор → операции, отнесённые к нему, и как («auto» / «manual»).
+    #: Договор → операции, отнесённые к нему, и как: «auto» - по стороне,
+    #: «number» - по номеру договора из источника, «manual» - решил человек.
     paid: dict[uuid.UUID, list[tuple[Operation, str]]] = field(default_factory=dict)
     #: Договор → спорные операции, для которых он один из кандидатов.
     open: dict[uuid.UUID, list[Operation]] = field(default_factory=dict)
@@ -109,8 +129,32 @@ def _sides(contracts: Iterable[Contract], registry: Registry) -> list[Side]:
             ours, theirs, kind = contract.customer_id, contract.executor_id, "expense"
         else:
             continue
-        out.append(Side(contract.id, ours, theirs, kind, contract.signed_at, contract.end_date, contract.amount))
+        out.append(
+            Side(
+                contract.id, ours, theirs, kind, contract.signed_at, contract.end_date, contract.amount,
+                number_key(contract.number),
+            )
+        )
     return out
+
+
+def _narrow(candidates: dict[uuid.UUID, Side], operation: Operation) -> dict[uuid.UUID, Side]:
+    """Из нескольких договоров - по сроку, сумме и известной дате (см. описание модуля)."""
+    if len(candidates) < 2:
+        return candidates
+    fitting = {cid: side for cid, side in candidates.items() if side.holds(operation.paid_at)} or candidates
+    exact = {cid: side for cid, side in fitting.items() if side.amount == operation.amount_base}
+    dated = {cid: side for cid, side in fitting.items() if side.start is not None}
+    if len(fitting) == 1:
+        return fitting
+    if len(exact) == 1:
+        return exact
+    if len(dated) == 1:
+        # Договор без даты «подходит по сроку» к любому платежу: без этой
+        # ступени заведённый без даты второй договор клиента делал спорными
+        # все его прошлые оплаты.
+        return dated
+    return fitting
 
 
 def allocate(session: Session, workspace: Workspace, registry: Registry, contracts: Iterable[Contract]) -> Allocation:
@@ -129,6 +173,7 @@ def allocate(session: Session, workspace: Workspace, registry: Registry, contrac
     by_bin: dict[str, set[uuid.UUID]] = {}
     for party_id, party in registry.parties_for(theirs_ids).items():
         by_key.setdefault(party_key(party.name), set()).add(party_id)
+        by_key.setdefault(visual_key(party.name), set()).add(party_id)
         entity = registry.own.get(party_id)
         # БИН - колонка участника (ядро, 24.10.2026); `details.bin` - прежнее место.
         bin_value = str(
@@ -136,12 +181,20 @@ def allocate(session: Session, workspace: Workspace, registry: Registry, contrac
         ).strip()
         if bin_value:
             by_bin.setdefault(bin_value, set()).add(party_id)
-    for normalized, party_id in session.execute(
-        sa.select(CounterpartyName.normalized, CounterpartyName.counterparty_id).where(
+    for normalized, name, party_id in session.execute(
+        sa.select(CounterpartyName.normalized, CounterpartyName.name, CounterpartyName.counterparty_id).where(
             CounterpartyName.workspace_id == workspace.id, CounterpartyName.counterparty_id.in_(theirs_ids)
         )
     ):
         by_key.setdefault(normalized, set()).add(party_id)
+        by_key.setdefault(visual_key(name), set()).add(party_id)
+
+    by_number: dict[tuple[str, str], list[Side]] = {}
+    by_loose: dict[tuple[str, str], list[Side]] = {}
+    for side in sides:
+        if side.number:
+            by_number.setdefault((side.number, side.kind), []).append(side)
+            by_loose.setdefault((number_loose(side.number), side.kind), []).append(side)
 
     entity_of_account = dict(
         session.execute(
@@ -155,20 +208,17 @@ def allocate(session: Session, workspace: Workspace, registry: Registry, contrac
                 Operation.deleted_at.is_(None),
                 Operation.status == "fact",
                 Operation.kind.in_(("income", "expense")),
-                Operation.counterparty_id.is_not(None),
+                sa.or_(Operation.counterparty_id.is_not(None), Operation.contract_ref != ""),
             )
         )
     )
     if not operations:
         return result
+    payer_ids = {operation.counterparty_id for operation in operations if operation.counterparty_id}
     payers = {
         party.id: party
-        for party in session.scalars(
-            sa.select(Counterparty).where(
-                Counterparty.id.in_({operation.counterparty_id for operation in operations})
-            )
-        )
-    }
+        for party in session.scalars(sa.select(Counterparty).where(Counterparty.id.in_(payer_ids)))
+    } if payer_ids else {}
     manual = dict(
         session.execute(
             sa.select(ContractPayment.operation_id, ContractPayment.contract_id).where(
@@ -184,42 +234,67 @@ def allocate(session: Session, workspace: Workspace, registry: Registry, contrac
             if chosen in known:
                 result.paid.setdefault(chosen, []).append((operation, "manual"))
             continue
-        payer = payers.get(operation.counterparty_id)
-        if payer is None:
-            continue
-        if payer.id in theirs_ids:
-            matches = {payer.id}
-        else:
-            matches = set(by_key.get(party_key(payer.name), set()))
-            payer_bin = str(payer.bin or (payer.details or {}).get("bin") or "").strip()
-            if payer_bin:
-                matches |= by_bin.get(payer_bin, set())
-        if not matches:
-            continue
+        payer = payers.get(operation.counterparty_id) if operation.counterparty_id else None
+        matches: set[uuid.UUID] = set()
+        if payer is not None:
+            if payer.id in theirs_ids:
+                matches = {payer.id}
+            else:
+                matches = set(by_key.get(party_key(payer.name), set())) | by_key.get(visual_key(payer.name), set())
+                if len(matches) > 1:
+                    # Одно написание у нескольких клиентов - посредник, а не сторона:
+                    # «Филиал "Южная столица" АО "Kaspi Bank"» было написанием семи
+                    # клиентов, и платёж уходил тому, чья сумма совпала (25.10.2026).
+                    matches = set()
+                payer_bin = str(payer.bin or (payer.details or {}).get("bin") or "").strip()
+                if payer_bin:
+                    matches |= by_bin.get(payer_bin, set())
         account = operation.account_to_id if operation.kind == "income" else operation.account_from_id
         entity = entity_of_account.get(account) if account else None
+
+        def ours(side: Side) -> bool:
+            return entity is None or side.ours == entity
+
+        ref = number_key(operation.contract_ref) if operation.contract_ref else ""
+        numbered = [side for side in by_number.get((ref, operation.kind), []) if ours(side)] if ref else []
+        if ref and not numbered:
+            loose = [side for side in by_loose.get((number_loose(ref), operation.kind), []) if ours(side)]
+            numbered = loose if len(loose) == 1 else []
+            if not numbered:
+                # Источник назвал договор, которого у юрлица нет, - не угадываем по имени.
+                continue
+        if numbered:
+            agreeing = {side.contract_id: side for side in numbered if not matches or side.theirs in matches}
+            if not agreeing:
+                # Номер - договор одного клиента, плательщик - другой клиент.
+                disputed = {side.contract_id for side in numbered}
+                disputed |= {
+                    side.contract_id
+                    for theirs in matches
+                    for side in by_side.get((theirs, operation.kind), [])
+                    if ours(side)
+                }
+                for contract_id in disputed:
+                    result.open.setdefault(contract_id, []).append(operation)
+                continue
+            chosen_sides = _narrow(agreeing, operation)
+            if len(chosen_sides) == 1:
+                result.paid.setdefault(next(iter(chosen_sides)), []).append((operation, "number"))
+            else:
+                for contract_id in chosen_sides:
+                    result.open.setdefault(contract_id, []).append(operation)
+            continue
+
+        if not matches:
+            continue
         candidates: dict[uuid.UUID, Side] = {}
         for theirs in matches:
             for side in by_side.get((theirs, operation.kind), []):
-                if entity is None or side.ours == entity:
+                if ours(side):
                     candidates[side.contract_id] = side
         if not candidates:
             continue
-        if len(candidates) > 1:
-            fitting = {cid: side for cid, side in candidates.items() if side.holds(operation.paid_at)} or candidates
-            exact = {cid: side for cid, side in fitting.items() if side.amount == operation.amount_base}
-            dated = {cid: side for cid, side in fitting.items() if side.start is not None}
-            if len(fitting) == 1:
-                candidates = fitting
-            elif len(exact) == 1:
-                candidates = exact
-            elif len(dated) == 1:
-                # Договор без даты «подходит по сроку» к любому платежу: без
-                # этой ступени заведённый без даты второй договор клиента
-                # делал спорными все его прошлые оплаты.
-                candidates = dated
-            else:
-                candidates = fitting
+        candidates = _narrow(candidates, operation)
         if len(candidates) == 1:
             result.paid.setdefault(next(iter(candidates)), []).append((operation, "auto"))
         else:
@@ -299,6 +374,7 @@ def _operation_out(operation: Operation, how: str, names: dict[uuid.UUID, str], 
         "counterparty": names.get(operation.counterparty_id, "") if operation.counterparty_id else "",
         "account": accounts.get(account, "") if account else "",
         "comment": (operation.comment or "")[:160],
+        "contract_ref": operation.contract_ref or "",
         "how": how,
     }
 

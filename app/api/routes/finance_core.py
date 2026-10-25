@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Any
 from uuid import UUID
 
@@ -343,13 +344,23 @@ def contract_months(contract_id: UUID, member: Member = Depends(viewer)) -> dict
     """Лента месяцев договора: начисление KORT и строка книги за месяц."""
 
     def action(session, workspace, access):
+        from app.finance.core import acts as acts_module
+        from app.finance.core import payments as payments_module
+
         contract = _opened_contract(session, workspace, access, contract_id)
         book, _error = book_module.current(session, workspace.id, wait=0)
         # Оплата и АВР книги - деньги компании: тем, кому скрыта «Оплачено (сводка)», не отдаются.
         money = "summary_paid" not in access.hidden
-        return shadow_module.contract_months(
-            session, workspace, access, contract, book, money=money, on=contracts_service.today()
-        )
+        today = contracts_service.today()
+        out = shadow_module.contract_months(session, workspace, access, contract, book, money=money, on=today)
+        out["today"] = today.isoformat()
+        # Оплаты KORT по месяцам - тем, кому открыты оплаты по выписке (нужен журнал).
+        if access.view and "paid" not in access.hidden:
+            out["money"] = payments_module.contract_money(session, workspace, access, contract, today=today)
+        # АВР месяца - KORT, 1С, книга; сумма - только с правом на деньги книги.
+        acts = acts_module.Acts(session, workspace, access, book, today=today, only=contract)
+        out["acts"] = acts.contract(contract.id, money=money)
+        return out
 
     return _run(member, action)
 
@@ -485,6 +496,255 @@ def vat_transfer(body: MovesIn, member: Member = Depends(editor)) -> dict[str, A
     def action(session, workspace, access):
         _setup_only(access)
         return changes.transfer(session, workspace, access, _actor(member), _moves(body))
+
+    return _run(member, action)
+
+
+# ── Оплаты ───────────────────────────────────────────────────────────────────
+
+
+def _entities_out(session, workspace, money) -> list[dict[str, Any]]:
+    """Наши юрлица с источником оплат и тем, сколько оплат в каждом источнике."""
+    import sqlalchemy as sa
+
+    from app.finance.contracts.models import GroupEntity
+    from app.finance.models import Counterparty
+    from app.finance.onec.models import OnecBase, OnecDocument
+
+    journal: dict[Any, int] = {}
+    for contract_id, items in money.allocation.paid.items():
+        contract = money.contracts.get(contract_id)
+        entity = money.ours(contract) if contract is not None else None
+        if entity is not None:
+            journal[entity] = journal.get(entity, 0) + len(items)
+    onec = dict(
+        session.execute(
+            sa.select(OnecBase.group_entity_id, sa.func.count(OnecDocument.id))
+            .join(OnecDocument, OnecDocument.base_id == OnecBase.id)
+            .where(
+                OnecBase.workspace_id == workspace.id,
+                OnecBase.group_entity_id.is_not(None),
+                OnecDocument.kind == "payment",
+                OnecDocument.posted.is_(True),
+                OnecDocument.deleted.is_(False),
+                OnecDocument.gone.is_(False),
+            )
+            .group_by(OnecBase.group_entity_id)
+        ).all()
+    )
+    rows = session.execute(
+        sa.select(GroupEntity, Counterparty)
+        .join(Counterparty, Counterparty.id == GroupEntity.counterparty_id)
+        .where(GroupEntity.workspace_id == workspace.id, GroupEntity.archived_at.is_(None))
+        .order_by(GroupEntity.position, Counterparty.name)
+    ).all()
+    return [
+        {
+            "id": str(entity.counterparty_id),
+            "code": entity.code,
+            "name": party.name,
+            "source": money.settings.source_of(entity.counterparty_id),
+            "journal": journal.get(entity.counterparty_id, 0),
+            "onec": onec.get(entity.counterparty_id, 0),
+        }
+        for entity, party in rows
+    ]
+
+
+@router.get("/payments")
+def payments_view(member: Member = Depends(viewer)) -> dict[str, Any]:
+    """Оплаты в ядре: начало учёта, источник по юрлицам, сверка с книгой, оплаты без договора, входящее сальдо."""
+    from app.finance.core import opening as opening_module
+    from app.finance.core import payments as payments_module
+    from app.finance.core import settings as core_settings
+
+    def action(session, workspace, access):
+        _setup_only(access)
+        today = contracts_service.today()
+        money = payments_module.Money(session, workspace, today=today)
+        book, error = book_module.current(session, workspace.id, wait=book_module.FIRST_READ_WAIT)
+        out: dict[str, Any] = {
+            "settings": core_settings.payments_out(money.settings, since_used=money.since),
+            "entities": _entities_out(session, workspace, money),
+            "without": money.without_contract(),
+            "without_hidden": money.hidden,
+            "book": _book_out(book) if book is not None else None,
+            "error": "" if book is not None else (error or "Книга-сводка компании не подключена"),
+            "shadow": None,
+            "opening": None,
+        }
+        if book is not None:
+            out["shadow"] = payments_module.reconcile_paid(session, workspace, access, book, today=today, money=money)
+            if money.since is not None:
+                out["opening"] = opening_module.plan(session, workspace, access, book, since=money.since)
+        return out
+
+    return _run(member, action)
+
+
+@router.get("/acts")
+def acts_view(member: Member = Depends(viewer)) -> dict[str, Any]:
+    """АВР и ЭСФ: 1С против книги по договору и месяцу, не подписаны, без ЭСФ после срока, нет АВР."""
+    import sqlalchemy as sa
+
+    from app.finance.contracts.models import GroupEntity
+    from app.finance.core import acts as acts_module
+    from app.finance.core.accruals import Ledger, month_key, month_start
+    from app.finance.models import Counterparty
+
+    def action(session, workspace, access):
+        _setup_only(access)
+        today = contracts_service.today()
+        book, error = book_module.current(session, workspace.id, wait=book_module.FIRST_READ_WAIT)
+        acts = acts_module.Acts(session, workspace, access, book, today=today)
+        visible = shadow_module._visible(session, workspace, access)
+        contracts = {item.id: item for item in visible}
+        current = month_key(today)
+        window = [month for month in (acts.reconciler.window if acts.reconciler else []) if month < current]
+        until = acts_module.previous_month(today)
+        since = month_start(window[0]) if window else month_start(month_key(until.replace(day=1) - timedelta(days=150)))
+        accrued = acts_module.accrued_months(Ledger(session, workspace.id, visible), visible, since=since, until=until)
+        shadow = acts.reconcile(contracts, window=window)
+        work = acts.worklists(contracts, accrued)
+        ids = {line["contract_id"] for line in shadow["lines"]} | {
+            item["contract_id"] for items in work.values() for item in items
+        }
+        names = dict(session.execute(sa.select(Counterparty.id, Counterparty.name).where(Counterparty.workspace_id == workspace.id)).all())
+        codes = {
+            entity_id: code
+            for entity_id, code in session.execute(
+                sa.select(GroupEntity.counterparty_id, GroupEntity.code).where(GroupEntity.workspace_id == workspace.id)
+            )
+            if code
+        }
+        onec = [
+            {"id": str(entity_id), "code": codes.get(entity_id, ""), "name": names.get(entity_id, "")}
+            for entity_id in sorted(acts.onec_entities, key=lambda item: codes.get(item, names.get(item, "")))
+        ]
+        return {
+            "book": _book_out(book) if book is not None else None,
+            "error": "" if book is not None else (error or "Книга-сводка компании не подключена"),
+            "window": window,
+            "onec": onec,
+            **shadow,
+            **work,
+            "contracts": {
+                key: {
+                    "id": key,
+                    "number": contracts[UUID(key)].number,
+                    "customer": names.get(contracts[UUID(key)].customer_id, ""),
+                    "executor": codes.get(contracts[UUID(key)].executor_id) or names.get(contracts[UUID(key)].executor_id, ""),
+                }
+                for key in ids
+                if UUID(key) in contracts
+            },
+            "codes": acts_module.CODE_TITLES,
+            "esf_days": acts_module.ESF_DAYS,
+        }
+
+    return _run(member, action)
+
+
+class PaymentSettingsIn(BaseModel):
+    #: Начало учёта оплат: дата или `null` - по первой оплате. Не передано - не меняется.
+    since: str | None = Field(default="keep", pattern=r"^(keep|\d{4}-\d{2}-\d{2})$")
+    entity_id: UUID | None = None
+    source: str | None = Field(default=None, pattern="^(journal|1c)$")
+
+
+@router.put("/payments/settings")
+def payments_settings(body: PaymentSettingsIn, member: Member = Depends(editor)) -> dict[str, Any]:
+    """Начало учёта оплат и откуда оплаты нашего юрлица - журнал или 1С."""
+    from datetime import date
+
+    from app.finance.core import settings as core_settings
+
+    since: Any = "keep"
+    if "since" in body.model_fields_set:
+        since = None if body.since is None else (date.fromisoformat(body.since) if body.since != "keep" else "keep")
+
+    def action(session, workspace, access):
+        value = core_settings.set_payments(
+            session, workspace, access, _actor(member), since=since, entity_id=body.entity_id, source=body.source
+        )
+        return core_settings.payments_out(value, since_used=value.since)
+
+    return _run(member, action)
+
+
+class PaymentIgnoreIn(BaseModel):
+    kind: str = Field(pattern="^(categories|payers)$")
+    name: str = Field(min_length=1, max_length=500)
+    #: `true` - «не оплаты по договорам», `false` - снова оплаты.
+    on: bool = True
+
+
+@router.put("/payments/ignore")
+def payments_ignore(body: PaymentIgnoreIn, member: Member = Depends(editor)) -> dict[str, Any]:
+    """Статья или плательщик целиком - «не оплаты по договорам» (проценты, переводы, продажи маркетплейса)."""
+    from app.finance.core import settings as core_settings
+
+    def action(session, workspace, access):
+        value = core_settings.set_ignore(session, workspace, access, _actor(member), kind=body.kind, name=body.name, on=body.on)
+        return core_settings.payments_out(value, since_used=value.since)
+
+    return _run(member, action)
+
+
+@router.post("/payments/opening")
+def payments_opening(member: Member = Depends(editor)) -> dict[str, Any]:
+    """Перенести входящее сальдо договоров на начало учёта из книги - пачкой, с точкой восстановления."""
+    from app.finance.core import opening as opening_module
+    from app.finance.core import payments as payments_module
+
+    def action(session, workspace, access):
+        _setup_only(access)
+        money = payments_module.Money(session, workspace, today=contracts_service.today())
+        if money.since is None:
+            raise HTTPException(status_code=409, detail="Начало учёта оплат не задано и оплат ещё нет")
+        return opening_module.apply(session, workspace, access, _actor(member), _book(session, workspace), since=money.since)
+
+    return _run(member, action)
+
+
+class PaymentDecisionIn(BaseModel):
+    action: str = Field(pattern="^(link|none|auto)$")
+    contract_id: UUID | None = None
+
+
+@router.post("/payments/{operation_id}/decide")
+def payment_decide(operation_id: UUID, body: PaymentDecisionIn, member: Member = Depends(editor)) -> dict[str, Any]:
+    """Поступление без договора: отнести к договору, «не по договору» или снять решение."""
+    from app.finance.core import payments as payments_module
+
+    return _run(
+        member,
+        lambda s, w, a: payments_module.decide(s, w, a, _actor(member), operation_id, action=body.action, contract_id=body.contract_id),
+    )
+
+
+class OpeningIn(BaseModel):
+    #: Сальдо на начало учёта; `null` - снять.
+    amount: str | None = Field(default=None, max_length=40)
+
+
+@router.put("/contracts/{contract_id}/opening")
+def contract_opening(contract_id: UUID, body: OpeningIn, member: Member = Depends(editor)) -> dict[str, Any]:
+    """Входящее сальдо одного договора руками - книга его потом не перебивает."""
+    from app.finance.core import opening as opening_module
+    from app.finance.core import payments as payments_module
+
+    def action(session, workspace, access):
+        value = None
+        if body.amount is not None:
+            value, terms = contracts_service.read_money(body.amount, field="Сальдо")
+            if value is None:
+                raise HTTPException(status_code=422, detail=f"Сальдо: «{terms}» не похоже на число")
+        money = payments_module.Money(session, workspace, today=contracts_service.today())
+        if money.since is None:
+            raise HTTPException(status_code=409, detail="Начало учёта оплат не задано и оплат ещё нет")
+        opening_module.set_one(session, workspace, access, _actor(member), contract_id, since=money.since, amount=value)
+        return {"ok": True}
 
     return _run(member, action)
 

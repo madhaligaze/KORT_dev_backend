@@ -89,6 +89,15 @@ def loose_key(name: str) -> str:
     return _FORMS.sub("", key).translate(_LOOKALIKE)
 
 
+def visual_key(name: str) -> str:
+    """Ключ стороны, в котором латиница-двойник - кириллица: «ТОО ECO Bazar» = «ТОО ЕСО Bazar».
+
+    Не нечёткое сравнение: это одна и та же строка на глаз, банк просто набрал
+    её другой раскладкой. Форма и всё остальное имя остаются, как в `side_key`.
+    """
+    return side_key(name).translate(_LOOKALIKE)
+
+
 def number_loose(number: str) -> str:
     """Номер без разделителей: «ОБОиНО-62» = «ОБОиНО/62»."""
     return _NUMBER_JUNK.sub("", number_key(number))
@@ -377,4 +386,4 @@ def resolve(documents: Iterable[OnecDocument], bases: dict[uuid.UUID, OnecBase],
     return out
 
 
-__all__ = ["Index", "Match", "Resolved", "build_index", "match_own", "month_key", "resolve", "same_client"]
+__all__ = ["Index", "Match", "Resolved", "build_index", "match_own", "month_key", "resolve", "same_client", "visual_key"]
