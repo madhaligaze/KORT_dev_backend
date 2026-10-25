@@ -987,6 +987,59 @@ def switch_set(link: str, entity_id: UUID, body: SwitchIn, member: Member = Depe
     return _run(member, action)
 
 
+# ── Первые шаги: от сводной таблицы до «Долгов» (фаза 9) ─────────────────────
+
+
+@router.get("/start")
+def start_plan(member: Member = Depends(viewer)) -> dict[str, Any]:
+    """Что KORT заведёт по сводной таблице: юрлица, договоры, начало учёта и сальдо - и долги после."""
+    from app.finance.contracts.summary import source_of
+    from app.finance.core import onboarding
+
+    def action(session, workspace, access):
+        _setup_only(access)
+        connected = source_of(session, workspace.id) is not None
+        if not connected:
+            return {"connected": False, "book": None, "error": ""}
+        book, error = book_module.current(session, workspace.id, wait=book_module.FIRST_READ_WAIT)
+        if book is None:
+            return {"connected": True, "book": None, "error": error or "Сводная таблица ещё читается - попробуйте через минуту"}
+        return {"connected": True, "error": "", **onboarding.plan(session, workspace, access, book, today=contracts_service.today())}
+
+    return _run(member, action)
+
+
+class StartIn(BaseModel):
+    #: Начало учёта оплат для шага `since`, если его ещё нет; пусто - предложенное по таблице.
+    since: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+
+
+@router.post("/start/{step}")
+def start_step(step: str, body: StartIn | None = None, member: Member = Depends(editor)) -> dict[str, Any]:
+    """Шаг первых шагов: `entities` - наши юрлица по кодам, `contracts` - договоры по строкам, `since` - начало учёта и сальдо."""
+    from datetime import date as date_type
+
+    from app.finance.core import onboarding
+    from app.finance.service import FinanceError
+
+    def action(session, workspace, access):
+        _setup_only(access)
+        if step not in onboarding.STEPS:
+            raise FinanceError("Такого шага нет")
+        book, error = book_module.current(session, workspace.id, wait=book_module.FIRST_READ_WAIT)
+        if book is None:
+            raise FinanceError(error or "Сводная таблица не подключена")
+        actor = _actor(member)
+        if step == "entities":
+            return onboarding.add_entities(session, workspace, access, actor, book)
+        if step == "contracts":
+            return onboarding.add_contracts(session, workspace, access, actor, book)
+        since = date_type.fromisoformat(body.since) if body is not None and body.since else None
+        return onboarding.start_since(session, workspace, access, actor, book, today=contracts_service.today(), since=since)
+
+    return _run(member, action)
+
+
 # ── Виды: пустые разделы ─────────────────────────────────────────────────────
 
 

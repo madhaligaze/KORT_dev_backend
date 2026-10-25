@@ -584,6 +584,18 @@ def test_kazhdyy_izmenyayushchiy_marshrut_pishet_sobytie(app: FastAPI, monkeypat
     assert owner.get(f"{BASE}/bills").json()["source"]["kort"] == ["BBCL"]
     back = owner.put(f"{BASE}/core/switch/bills/{entity}", json={"source": "book"})
     assert back.status_code == 200 and back.json()["sources"]["bills"] == {}, back.text
+    # Первые шаги: юрлицо по новому коду, договор по строкам таблицы, сальдо на начало учёта.
+    core_book.put(company, core_book.build_book(
+        [["Мес", "Техн. 1", "Наша Фирма", "Заказчик (Название Фирмы)", "Сумма Договора", "№ Договора",
+          "Период с (нач.)", "Период по (зав.)", "Сальдо Начало (без АВР)"],
+         ["6", "ИЮНЬ 2026", "СТАРТ", "ТОО Стартап", "40 000", "СТ/1", "01.06.2026", "30.06.2026", "15 000"]],
+        title="Сводка", worksheet="Сводка",
+    ))
+    assert owner.get(f"{BASE}/core/start").json()["contracts"]["missing"] == 1
+    walk.call(owner, "POST", "/core/start/{step}", step="entities")
+    walk.call(owner, "POST", "/core/start/{step}", step="contracts")
+    walk.call(owner, "POST", "/core/start/{step}", step="since")
+    core_book.forget()
 
     walk.call(owner, "DELETE", "/contracts/setup/summary")
 

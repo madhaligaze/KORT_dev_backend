@@ -52,6 +52,13 @@ def empty_sections(session: Session, workspace: Workspace) -> list[str]:
     )
     if not invoices:
         out.append("invoices")
+    # «Первые шаги» нужны, пока компания не заведена: договоры есть и учёт оплат начат - в «Ещё».
+    from app.finance.contracts.models import Contract
+    from app.finance.core.settings import payments as payment_settings
+
+    started = payment_settings(session, workspace).since is not None or operations
+    if started and _any(session, sa.select(Contract.id).where(Contract.workspace_id == workspace.id, Contract.deleted_at.is_(None))):
+        out.append("start")
     return out
 
 

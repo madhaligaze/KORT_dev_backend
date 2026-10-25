@@ -115,6 +115,7 @@ def test_pustye_razdely_uhodyat_iz_kolonki(space, audit):
         workspace = finance_service.get_workspace(session, space)
         empty = set(usage.empty_sections(session, workspace))
         assert {"journal", "cash", "projects", "plan", "recurrences", "rules", "invoices"} <= empty
+        assert "start" not in empty, "договоров нет - «Первые шаги» в колонке"
         account = finance_service.create_account(session, workspace, name="Касса в офисе")
         finance_service.create_operation(
             session, workspace,
@@ -123,6 +124,8 @@ def test_pustye_razdely_uhodyat_iz_kolonki(space, audit):
         empty = set(usage.empty_sections(session, workspace))
         assert "journal" not in empty and "cash" not in empty, "одна операция - раздел уже чей-то рабочий"
         assert "projects" in empty and "plan" in empty
+        service.create(session, workspace, FULL, OWNER, {"executor": "BBC", "customer": "ТОО Альфа", "number": "№1", "amount": "1000"})
+        assert "start" in usage.empty_sections(session, workspace), "договоры есть и деньги идут - «Первые шаги» в «Ещё»"
 
 
 def test_karta_gruppy_svoi_perevody_i_lyudi(space, audit):

@@ -445,24 +445,28 @@ def create_from_book(
     начисления по числу месяцев. Вида и предмета услуги из сокращений книги
     не угадываем - их дописывают в карточке.
     """
-    from collections import Counter
-
-    from app.finance.contracts.service import create
-    from app.finance.core.book import Matcher
     from app.finance.core.shadow import Reconciler
-    from app.finance.layout import norm
 
     _require_edit(access)
     reconciler = Reconciler(session, workspace, access, book)
     rows = reconciler.unknown_rows(key)
     if not rows:
         raise ChangeError("Таких строк в таблице уже нет - сверка обновилась")
+    return contract_from_rows(session, workspace, access, actor, rows, entity_by_code=reconciler.matcher.entity_by_code)
+
+
+def book_values(rows: list[Any], entity_by_code: dict[str, uuid.UUID]) -> dict[str, Any]:
+    """Поля договора из его строк таблицы: то, что в них есть, без догадок."""
+    from collections import Counter
+
+    from app.finance.layout import norm
+
     first, last = rows[0], rows[-1]
     months = sorted({row.month for row in rows})
     spans = [(row.period_to - row.period_from).days for row in rows if row.period_from and row.period_to]
     monthly = len(months) >= 2 or bool(spans and all(27 <= span <= 31 for span in spans))
     values: dict[str, Any] = {"number": first.number, "customer": first.customer, "billing": "month" if monthly else "total"}
-    entity = Matcher(session, workspace.id).entity_by_code.get(norm(first.own))
+    entity = entity_by_code.get(norm(first.own))
     if entity is not None:
         values["executor"] = {"id": str(entity)}
     if last.amount is not None:
@@ -474,10 +478,21 @@ def create_from_book(
         days = Counter(row.period_from.day for row in rows if row.period_from)
         if monthly and days:
             values["period_day"] = days.most_common(1)[0][0]
-    contract = create(session, workspace, access, actor, values)
+    return values
+
+
+def contract_from_rows(
+    session: Session, workspace: Workspace, access: Access, actor: Actor, rows: list[Any], *, entity_by_code: dict[str, uuid.UUID]
+) -> Contract:
+    """Завести договор по строкам таблицы - с журналом «заведён по сводной таблице»."""
+    from app.finance.contracts.service import create
+
+    _require_edit(access)
+    months = sorted({row.month for row in rows})
+    contract = create(session, workspace, access, actor, book_values(rows, entity_by_code))
     history.write(
         session, workspace, kind="contract.from_book", entity="contract", entity_id=contract.id,
-        title=f"договор {contract.number or ''} заведён по сводной таблице: {first.customer}, {len(months)} мес.".replace("  ", " "),
+        title=f"договор {contract.number or ''} заведён по сводной таблице: {rows[0].customer}, {len(months)} мес.".replace("  ", " "),
         after={"lines": [row.line for row in rows], "months": months}, actor=actor.email,
     )
     return contract

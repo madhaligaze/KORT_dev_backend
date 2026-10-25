@@ -669,6 +669,10 @@ class Reconciler:
     def unknown_rows(self, key: str) -> list[book_module.BookRow]:
         return sorted((row for row, _match in self.unmatched if self.unknown_key(row) == key), key=lambda row: row.month)
 
+    def unknown_groups(self) -> list[dict[str, Any]]:
+        """Строки таблицы без договора в KORT - группами по юрлицу, клиенту и номеру, как «Нет в реестре»."""
+        return self._unknown()
+
     def _unknown(self) -> list[dict[str, Any]]:
         groups: dict[str, dict[str, Any]] = {}
         contracts = {item.id: item for item in self.contracts}
