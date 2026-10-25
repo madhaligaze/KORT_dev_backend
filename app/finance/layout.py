@@ -348,12 +348,51 @@ def resolve_layout(sheet: str, columns: Iterable[Column], header: Sequence[str])
     return layout
 
 
+def inspect_layout(columns: Iterable[Column], header: Sequence[str]) -> list[dict[str, Any]]:
+    """Шапка глазами человека: каждая колонка - нашлась ли, где и как, или почему нет.
+
+    Для экрана сопоставления (словарь колонок компании): в отличие от
+    `resolve_layout` не падает на первой беде, а говорит о каждой колонке.
+    """
+    headers = [str(value or "") for value in header]
+    out: list[dict[str, Any]] = []
+    taken: dict[int, str] = {}
+    for column in columns:
+        found, how = _candidates(column, headers)
+        item: dict[str, Any] = {
+            "key": column.key,
+            "title": column.title,
+            "required": column.required,
+            "strict": column.strict,
+            "index": None,
+            "header": "",
+            "how": how,
+            "problem": "",
+        }
+        if not found:
+            item["problem"] = "нет в таблице" if column.required else ""
+        else:
+            try:
+                index = _pick(column, found, how)
+            except LayoutError as exc:
+                item["problem"] = str(exc)
+            else:
+                if index in taken:
+                    item["problem"] = f"та же колонка, что у «{taken[index]}»"
+                else:
+                    taken[index] = column.title
+                    item.update(index=index, header=headers[index].strip())
+        out.append(item)
+    return out
+
+
 __all__ = [
     "Column",
     "Drift",
     "Layout",
     "LayoutError",
     "Placement",
+    "inspect_layout",
     "norm",
     "resolve_layout",
     "squash",

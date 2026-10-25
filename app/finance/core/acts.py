@@ -289,19 +289,34 @@ class Acts:
 
     # ── Сверка и списки ──────────────────────────────────────────────────────
 
-    def reconcile(self, contracts: dict[uuid.UUID, Contract], *, window: list[str]) -> dict[str, Any]:
-        """1С против книги по договору и месяцу - у юрлиц с подключённой 1С."""
+    def reconcile(
+        self, contracts: dict[uuid.UUID, Contract], *, window: list[str], entity: uuid.UUID | None = None
+    ) -> dict[str, Any]:
+        """1С против таблицы по договору и месяцу - у юрлиц с подключённой 1С.
+
+        Юрлицо месяца - «Наша Фирма» строки таблицы, иначе исполнитель договора:
+        месяцы до перевода клиента сверяются с 1С прежнего ТОО. `entity` -
+        только месяцы этого юрлица (как считает «Переход»).
+        """
+        from app.finance.core.shadow import EntityTally, month_owner
+
         lines: list[dict[str, Any]] = []
         counts = {"months": 0, "same": 0, **{code: 0 for code in CODES}}
+        tally = EntityTally()
+        grouped = self.reconciler.grouped if self.reconciler is not None else {}
         for contract_id, months in self.months.items():
             contract = contracts.get(contract_id)
-            if contract is None or contract.executor_id not in self.onec_entities:
+            if contract is None:
                 continue
             for month, slot in months.items():
                 if window and month not in window:
                     continue
+                owner = month_owner(contract, None, grouped.get(contract_id, {}).get(month))
+                if owner not in self.onec_entities or (entity is not None and owner != entity):
+                    continue
                 codes = slot.codes()
                 counts["months"] += 1
+                tally.add(owner, contract_id, not codes, month)
                 if not codes:
                     counts["same"] += 1
                     continue
@@ -317,7 +332,8 @@ class Acts:
                     }
                 )
         lines.sort(key=lambda line: (line["month"], line["contract_id"]), reverse=True)
-        return {"counts": counts, "lines": lines}
+        #: `by_entity` - по нашим юрлицам месяца, для «Перехода».
+        return {"counts": counts, "lines": lines, "by_entity": tally.out()}
 
     def worklists(self, contracts: dict[uuid.UUID, Contract], accrued: dict[uuid.UUID, set[str]]) -> dict[str, list[dict[str, Any]]]:
         """Не подписаны, без ЭСФ после срока, месяц начислен - АВР нет.

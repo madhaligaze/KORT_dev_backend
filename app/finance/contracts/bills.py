@@ -27,6 +27,11 @@
 * **Колонки - по названиям** (`app.finance.layout`): рядом с «Счет» стоят «№
   Счета», «Счет за Период» и «Счет2», и прибитая буква однажды читала бы
   соседнюю.
+* **Юрлицо, переведённое на KORT** («Сверка → Переход», `core/switch.py`), -
+  исключение из первого пункта: его счета считает KORT по начислениям
+  договоров (`switched`), словами той же формулы, а месяц без строки в
+  таблице приходит счётом без строки (`line = 0`), который записывается в
+  KORT. Строка без договора в KORT остаётся словами таблицы.
 
 Чтение - одно на компанию раз в `CACHE_TTL`, как у сводки оплат; его делят
 раздел «Счета», число у пункта колонки и бот (`bills_bot.py`).
@@ -198,6 +203,10 @@ class Bill:
     bill_period: str = ""
     onec_name: str = ""
     signed_at: str = ""
+    #: `kort` - счета юрлица ведёт KORT (`core/switch.py`): состояние посчитано по
+    #: начислениям договора, а не словами таблицы; `line == 0` - строки в таблице нет.
+    source: str = ""
+    contract_id: str = ""
 
     @property
     def key(self) -> str:
@@ -231,6 +240,8 @@ class Bill:
             "bill_period": self.bill_period,
             "onec_name": self.onec_name,
             "signed_at": self.signed_at,
+            "source": self.source,
+            "contract_id": self.contract_id or None,
         }
 
 
@@ -256,6 +267,10 @@ class Board:
     issued: set[str] = field(default_factory=set)
     #: Выставленные строки целиком - для «Выставлены» и карточки счёта.
     done: list[Bill] = field(default_factory=list)
+    #: Юрлица, чьи счета ведёт KORT (коды), и отказ расчёта, если был:
+    #: тогда их строки - словами таблицы, как до перехода.
+    kort: tuple[str, ...] = ()
+    kort_error: str = ""
 
     def of(self, group: str) -> list[Bill]:
         return [bill for bill in self.bills if bill.group == group]
@@ -518,6 +533,21 @@ def get(session: Session, workspace_id: uuid.UUID, *, wait: float = FIRST_READ_W
     return slot
 
 
+def switched(session: Session, workspace_id: uuid.UUID, board: Board) -> Board:
+    """Сводка, где счета юрлиц, переведённых на KORT, посчитаны KORT (`core/switch.py`).
+
+    Сбой расчёта не роняет раздел и бот: строки таких юрлиц остаются словами
+    таблицы, а причина - в `kort_error`, и раздел её показывает.
+    """
+    try:
+        from app.finance.core import switch
+
+        return switch.bills_board(session, workspace_id, board)
+    except Exception as exc:  # noqa: BLE001 - список счетов важнее расчёта KORT
+        log.exception("счета: KORT не посчитал счета юрлиц")
+        return dataclasses.replace(board, kort_error=f"Счета юрлиц, переведённых на KORT, сейчас из таблицы: {exc}")
+
+
 def current(session: Session, workspace_id: uuid.UUID, **kwargs: Any) -> tuple[Board | None, str]:
     """Книга с записанным из KORT и отказ чтения, если был. `(None, "")` - книга не подключена."""
     slot = get(session, workspace_id, **kwargs)
@@ -525,7 +555,7 @@ def current(session: Session, workspace_id: uuid.UUID, **kwargs: Any) -> tuple[B
         return None, ""
     with _guard:
         board, error = slot.board, slot.error
-    return (view(workspace_id, board) if board is not None else None), error
+    return (view(workspace_id, switched(session, workspace_id, board)) if board is not None else None), error
 
 
 def forget(workspace_id: uuid.UUID) -> None:
@@ -577,6 +607,8 @@ def board_out(session: Session, workspace_id: uuid.UUID, *, force: bool = False)
             "read_at": board.read_at.isoformat() if board else None,
             "drift": board.drift if board else "",
             "error": error,
+            "kort": list(board.kort) if board else [],
+            "kort_error": board.kort_error if board else "",
         },
         "items": [bill.out() for bill in board.bills] if board else [],
         "issued": [bill.out() for bill in recent(board)] if board else [],
@@ -594,7 +626,7 @@ def badge(session: Session, workspace_id: uuid.UUID) -> dict[str, int] | None:
         board = slot.board
     if board is None:
         return None
-    counts = view(workspace_id, board).counts()
+    counts = view(workspace_id, switched(session, workspace_id, board)).counts()
     return {OVERDUE: counts[OVERDUE], SOON: counts[SOON]}
 
 
@@ -622,6 +654,7 @@ __all__ = [
     "read_date",
     "recent",
     "state_of",
+    "switched",
     "view",
     "window_start",
 ]

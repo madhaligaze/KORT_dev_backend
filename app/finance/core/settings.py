@@ -15,6 +15,14 @@
   («Вознаграждение» - проценты по депозиту) целиком. Иначе в «Оплатах без
   договора» на копии прода лежали 2 828 поступлений, из них 1 442 - проценты,
   и настоящие оплаты клиентов в них терялись (25.10.2026).
+
+Словарь колонок сводной таблицы (`book_columns`, фаза 9, R14)
+──────────────────────────────────────────────────────────────
+Ядро читает сводную таблицу по названиям колонок (`core/book.py`, `COLUMNS`),
+и эти названия - шапка таблицы BBC. Другая компания назовёт «Сумма Договора»
+«Сумма по договору» - и лист не прочитается. Словарь - названия колонок
+компании, добавленные к названиям ядра: ключ колонки → написания. Только
+названия, не номера (правило проекта «колонки - по названиям»).
 """
 from __future__ import annotations
 
@@ -187,6 +195,57 @@ def set_ignore(
     return payments(session, workspace)
 
 
+def book_columns(session: Session, workspace_id: uuid.UUID) -> dict[str, list[str]]:
+    """Словарь колонок компании: ключ колонки сводной таблицы → её написания у компании."""
+    row = session.get(CoreSettings, workspace_id)
+    raw = ((row.data if row is not None else None) or {}).get("book_columns") or {}
+    return {str(key): [str(name) for name in names if str(name).strip()] for key, names in raw.items() if isinstance(names, list)}
+
+
+def set_book_column(
+    session: Session, workspace: Workspace, access: Access, actor: Actor, *, key: str, name: str, on: bool, known: dict[str, str]
+) -> dict[str, list[str]]:
+    """Добавить (`on`) или убрать написание колонки сводной таблицы. `known` - ключи ядра → подписи."""
+    if not access.setup:
+        raise PermissionError("Словарь колонок меняет владелец или администратор")
+    if key not in known:
+        raise FinanceError("Такой колонки у ядра нет")
+    clean = " ".join(str(name or "").split())
+    if not clean or len(clean) > 200:
+        raise FinanceError("Название колонки - как в шапке таблицы, до 200 знаков")
+    row = _row(session, workspace)
+    if row is None:
+        row = CoreSettings(workspace_id=workspace.id, data={})
+        session.add(row)
+    data = dict(row.data or {})
+    columns = {column: list(names) for column, names in (data.get("book_columns") or {}).items()}
+    before = list(columns.get(key, []))
+    items = [item for item in before if norm(item) != norm(clean)]
+    if on:
+        items.append(clean)
+    if items:
+        columns[key] = items
+    else:
+        columns.pop(key, None)
+    data["book_columns"] = columns
+    row.data = data
+    row.updated_by = actor.user_id
+    row.updated_at = datetime.now(timezone.utc)
+    session.flush()
+    history.write(
+        session,
+        workspace,
+        kind="core.settings",
+        entity="core_settings",
+        entity_id=None,
+        title=f"колонка «{known[key]}» сводной таблицы {'читается и как' if on else 'больше не читается как'} «{clean}»",
+        before={"book_columns": {key: before}},
+        after={"book_columns": {key: items}},
+        actor=actor.email,
+    )
+    return book_columns(session, workspace.id)
+
+
 def payments_out(value: Payments, *, since_used: date | None) -> dict[str, Any]:
     return {
         "since": value.since.isoformat() if value.since else None,
@@ -201,8 +260,10 @@ __all__ = [
     "PAYMENT_SOURCES",
     "Payments",
     "SOURCE_TITLES",
+    "book_columns",
     "payments",
     "payments_out",
+    "set_book_column",
     "set_ignore",
     "set_payments",
 ]

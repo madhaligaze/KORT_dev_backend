@@ -125,6 +125,57 @@ def test_pustye_razdely_uhodyat_iz_kolonki(space, audit):
         assert "projects" in empty and "plan" in empty
 
 
+def test_karta_gruppy_svoi_perevody_i_lyudi(space, audit):
+    from app.finance.core import changes, group_map, vat
+
+    with finance_session() as session:
+        workspace = finance_service.get_workspace(session, space)
+        setup.add_entity(session, workspace, name="BBCA", code="BBCA")
+        bbc, bbca = (session.scalar(sa.select(GroupEntity.counterparty_id).where(GroupEntity.code == code)) for code in ("BBC", "BBCA"))
+        service.create(
+            session, workspace, FULL, OWNER,
+            {"executor": "BBCA", "customer": "BBC", "number": "FIN/72", "amount": "30000", "billing": "month", "signed_at": "2026-01-01"},
+        )
+        client = service.create(
+            session, workspace, FULL, OWNER,
+            {"executor": "BBC", "customer": "ТОО Альфаком", "number": "№ОКР/1", "amount": "100000", "billing": "month",
+             "signed_at": "2026-01-01"},
+        )
+        changes.transfer(session, workspace, FULL, OWNER, [vat.Move(client.id, bbca, date(2026, 9, 1))])
+        for code, entity in (("BBC", bbc), ("BBCA", bbca)):
+            account = finance_service.create_account(session, workspace, name=f"Счёт {code}", group_entity_id=entity)
+            person = finance_service.ensure_counterparty(session, workspace.id, "Иванов Иван Иванович", role="supplier")
+            firm = finance_service.ensure_counterparty(session, workspace.id, "ТОО Поставщик", role="supplier")
+            for party in (person, firm):
+                finance_service.create_operation(
+                    session, workspace,
+                    finance_service.OperationInput(kind="expense", paid_at=date(2026, 7, 5), amount=Decimal("50000"),
+                                                   account_from_id=account.id, counterparty_id=party.id),
+                )
+        out = group_map.group_map(session, workspace, FULL, year=2026, today=TODAY)
+        nodes = {node["id"]: node for node in out["nodes"]}
+        assert {node["code"] for node in out["nodes"]} == {"BBC", "BBCA"}
+        intra = [edge for edge in out["edges"] if edge["kind"] == "intra"]
+        assert [(nodes[edge["from"]]["code"], nodes[edge["to"]]["code"], edge["contracts"]) for edge in intra] == [("BBCA", "BBC", 1)]
+        assert intra[0]["amount"] == "300000.00", "десять месяцев по 30 000 к октябрю"
+        moves = [edge for edge in out["edges"] if edge["kind"] == "transfer"]
+        assert [(nodes[edge["from"]]["code"], nodes[edge["to"]]["code"], edge["contracts"], edge["month"]) for edge in moves] == [
+            ("BBC", "BBCA", 1, "2026-09")
+        ]
+        assert [item["name"] for item in out["people"]] == ["Иванов Иван Иванович"], "ТОО - не человек, хоть и платят ему оба"
+        assert {item["code"] for item in out["people"][0]["entities"]} == {"BBC", "BBCA"}
+
+        core_settings.set_payments(session, workspace, FULL, OWNER, since=date(2026, 1, 1))
+        numbers = group_map.entity_numbers(session, workspace, FULL, bbca, today=TODAY)
+        assert numbers["vat"]["status"] == "unknown" and numbers["vat"]["forecast"] == "400000.00", "FIN/72 - не выручка; клиент с сентября - 4 месяца"
+        assert numbers["debts"] == {"owed": "200000.00", "d90plus": "0.00", "advance": "0.00", "contracts": 1}, "сентябрь и октябрь клиента"
+        old = group_map.entity_numbers(session, workspace, FULL, bbc, today=TODAY)
+        assert old["debts"]["owed"] == "800000.00" and old["debts"]["d90plus"] == "700000.00", "январь - август остаются долгом BBC"
+        rows = {row["title"]: row for row in core_debts.Debts(session, workspace, FULL, day=TODAY).rows("entity")}
+        assert (rows["BBC"]["owed"], rows["BBCA"]["owed"]) == ("800000.00", "200000.00"), "«Юрлица» в «Долгах» - те же месяцы"
+        assert rows["BBCA"]["contracts"][0]["fraction"] == "20.00" and rows["BBCA"]["contracts"][0]["whole"] == "1000000.00"
+
+
 @pytest.fixture
 def app(finance_db, monkeypatch) -> FastAPI:
     from app.core.config import settings

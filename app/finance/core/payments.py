@@ -132,6 +132,9 @@ class Bucket:
     parts: list[Part] = field(default_factory=list)
     #: Срок оплаты - «Период с» начисления (у сальдо и месяца без начисления - нет).
     due: date | None = None
+    #: Наше юрлицо месяца - исполнитель на день периода: после перевода клиента
+    #: старые месяцы остаются долгом прежнему ТОО (`core/debts.py`).
+    executor: uuid.UUID | None = None
 
     @property
     def paid(self) -> Decimal:
@@ -442,8 +445,14 @@ class Money:
             )
             for accrual in schedule.accruals:
                 amount = _ZERO if accrual.skipped else (accrual.amount or _ZERO)
-                bucket = buckets.setdefault(accrual.month, Bucket(accrual.month, _ZERO, due=accrual.period_from))
+                bucket = buckets.setdefault(
+                    accrual.month, Bucket(accrual.month, _ZERO, due=accrual.period_from, executor=accrual.executor_id)
+                )
                 bucket.accrued += amount
+            if OPENING in buckets:
+                # Сальдо на начало учёта - долг тому, кто был исполнителем тогда: первому месяцу учёта.
+                first_month = next((key for key in sorted(buckets) if key != OPENING), None)
+                buckets[OPENING].executor = buckets[first_month].executor if first_month else contract.executor_id
             accrues = any(bucket.accrued > 0 for key, bucket in buckets.items() if key != OPENING)
             first = month_key(self.since)
             # «За май», когда учёт с июня, - оплата входящего сальдо: её гасит порядок.
@@ -635,7 +644,8 @@ def _book_paid(month: Any) -> Decimal | None:
 
 
 def reconcile_paid(
-    session: Session, workspace: Workspace, access: Access, book: Any, *, today: date, money: Money | None = None
+    session: Session, workspace: Workspace, access: Access, book: Any, *, today: date, money: Money | None = None,
+    entity: uuid.UUID | None = None,
 ) -> dict[str, Any]:
     """Оплаты KORT против «Сумма Факт Поступ.» книги-сводки - по договору и месяцу.
 
@@ -644,8 +654,10 @@ def reconcile_paid(
     может разойтись только раскладкой (книга положила двойную оплату в один
     месяц, KORT - в два), а итог по договору - нет; расхождение итога - это
     оплата, которую одна сторона не видит.
+
+    `entity` - только месяцы, где это наше юрлицо исполнитель (как считает «Переход»).
     """
-    from app.finance.core.shadow import Reconciler
+    from app.finance.core.shadow import EntityTally, Reconciler, month_owner
 
     reconciler = Reconciler(session, workspace, access, book)
     current = month_key(today)
@@ -654,6 +666,7 @@ def reconcile_paid(
     contracts_out: dict[str, dict[str, Any]] = {}
     lines: list[dict[str, Any]] = []
     counts = {"contracts": 0, "same": 0, "months": 0, "months_same": 0, **{code: 0 for code in PAID_CODES}}
+    tally = EntityTally()
     for contract in reconciler.contracts:
         book_months = reconciler.grouped.get(contract.id, {})
         item = money.contract(contract, reconciler.ledger)
@@ -663,6 +676,9 @@ def reconcile_paid(
             kort = item.paid_in(month)
             theirs = _book_paid(book_months.get(month))
             if not kort and not theirs:
+                continue
+            owner = month_owner(contract, item.buckets.get(month), book_months.get(month))
+            if entity is not None and owner != entity:
                 continue
             kort_total += kort
             book_total += theirs or _ZERO
@@ -679,6 +695,7 @@ def reconcile_paid(
                 counts[code] += 1
             else:
                 counts["months_same"] += 1
+            tally.add(owner, contract.id, not code, month)
             months.append({"month": month, "kort": _money(kort), "book": _money(theirs), "code": code})
         if not months:
             continue
@@ -708,6 +725,8 @@ def reconcile_paid(
         "counts": counts,
         "contracts": contracts_out,
         "lines": lines,
+        #: По нашим юрлицам месяца - для «Перехода».
+        "by_entity": tally.out(),
     }
 
 

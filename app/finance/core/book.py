@@ -35,7 +35,7 @@ import re
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Sequence
@@ -129,6 +129,28 @@ _MONTH_IN_TEXT = re.compile(r"(январь|февраль|март|апрель
 
 class BookError(Exception):
     """Книгу нельзя прочитать - с текстом для человека."""
+
+
+class LayoutBroken(BookError):
+    """Шапка не разобралась: колонки ядра не нашлись по названиям. `header` - для экрана сопоставления."""
+
+    def __init__(self, message: str, header: list[str]):
+        super().__init__(message)
+        self.header = header
+
+
+def columns_for(extra: dict[str, list[str]] | None) -> tuple[Column, ...]:
+    """Колонки ядра с написаниями компании (словарь `core/settings.book_columns`)."""
+    if not extra:
+        return COLUMNS
+    return tuple(
+        replace(column, names=column.names + tuple(name for name in extra.get(column.key, ()) if name not in column.names))
+        for column in COLUMNS
+    )
+
+
+def _signature(extra: dict[str, list[str]] | None) -> str:
+    return "|".join(f"{key}={','.join(sorted(names))}" for key, names in sorted((extra or {}).items()))
 
 
 def blank(value: Any) -> bool:
@@ -273,16 +295,26 @@ class Book:
     rows: list[BookRow] = field(default_factory=list)
     drift: str = ""
     rev: str = ""
+    #: Шапка листа как есть - для словаря колонок компании.
+    header: list[str] = field(default_factory=list)
 
 
-def build_book(values: Sequence[Sequence[Any]], *, title: str, worksheet: str, spreadsheet_id: str = "") -> Book:
+def build_book(
+    values: Sequence[Sequence[Any]],
+    *,
+    title: str,
+    worksheet: str,
+    spreadsheet_id: str = "",
+    columns: Sequence[Column] = COLUMNS,
+) -> Book:
     """Разобрать значения листа. Шапка - первая строка; строка листа 2 - первая данных."""
     if not values:
         raise BookError(f"Лист «{worksheet}» пуст")
+    header = [str(cell) for cell in values[0]]
     try:
-        layout = resolve_layout(worksheet, COLUMNS, [str(cell) for cell in values[0]])
+        layout = resolve_layout(worksheet, columns, header)
     except LayoutError as exc:
-        raise BookError(str(exc)) from exc
+        raise LayoutBroken(str(exc), header) from exc
     rows: list[BookRow] = []
     digest = hashlib.sha1()
     for offset, raw in enumerate(values[1:]):
@@ -355,6 +387,7 @@ def build_book(values: Sequence[Sequence[Any]], *, title: str, worksheet: str, s
         rows=rows,
         drift=layout.describe_drift(),
         rev=digest.hexdigest()[:16],
+        header=header,
     )
 
 
@@ -454,18 +487,22 @@ class Matcher:
 
 @dataclass
 class _Slot:
-    source: tuple[str, str]
+    #: Таблица, лист и подпись словаря колонок: новое написание - перечитать.
+    source: tuple[str, ...]
     book: Book | None = None
     error: str = ""
     at: float = 0.0
     reading: threading.Event | None = None
+    extra: dict[str, list[str]] = field(default_factory=dict)
+    #: Шапка листа, который не разобрался, - чтобы её можно было сопоставить.
+    header: list[str] = field(default_factory=list)
 
 
 _slots: dict[uuid.UUID, _Slot] = {}
 _guard = threading.Lock()
 
 
-def _read(spreadsheet_id: str, worksheet: str) -> Book:
+def _read(spreadsheet_id: str, worksheet: str, extra: dict[str, list[str]] | None = None) -> Book:
     if not google.is_configured():
         raise BookError("Не заданы креды Google - таблицу прочитать нечем")
     try:
@@ -473,14 +510,19 @@ def _read(spreadsheet_id: str, worksheet: str) -> Book:
         values = google.fetch_tab_values(spreadsheet_id, worksheet, fresh=True)
     except google.GoogleError as exc:
         raise BookError(str(exc)) from exc
-    return build_book(values, title=meta.get("title", ""), worksheet=worksheet, spreadsheet_id=spreadsheet_id)
+    return build_book(
+        values, title=meta.get("title", ""), worksheet=worksheet, spreadsheet_id=spreadsheet_id, columns=columns_for(extra)
+    )
 
 
 def _refresh(slot: _Slot, done: threading.Event) -> None:
     try:
-        book = _read(*slot.source)
+        book = _read(slot.source[0], slot.source[1], slot.extra)
         with _guard:
-            slot.book, slot.error = book, ""
+            slot.book, slot.error, slot.header = book, "", book.header
+    except LayoutBroken as exc:
+        with _guard:
+            slot.error, slot.header = str(exc), exc.header
     except BookError as exc:
         with _guard:
             slot.error = str(exc)
@@ -499,16 +541,19 @@ def current(
     session: Session, workspace_id: uuid.UUID, *, wait: float = FIRST_READ_WAIT, force: bool = False
 ) -> tuple[Book | None, str]:
     """Книга компании и отказ чтения. `(None, "")` - книга-сводка не подключена."""
+    from app.finance.core import settings as core_settings
+
     source = source_of(session, workspace_id)
     if source is None:
         return None, ""
-    key = (source.spreadsheet_id, source.worksheet)
+    extra = core_settings.book_columns(session, workspace_id)
+    key = (source.spreadsheet_id, source.worksheet, _signature(extra))
     with _guard:
         slot = _slots.get(workspace_id)
         if slot is not None and slot.source == ANY:
             return slot.book, slot.error
         if slot is None or slot.source != key:
-            slot = _slots[workspace_id] = _Slot(source=key)
+            slot = _slots[workspace_id] = _Slot(source=key, extra=extra)
         age = time.monotonic() - slot.at
         stale = force or age >= (ERROR_RETRY if slot.book is None and slot.error else CACHE_TTL) or (
             slot.book is None and not slot.error
@@ -550,16 +595,43 @@ def rows_of(book: Book, matcher: Matcher) -> Iterable[tuple[BookRow, RowMatch]]:
         yield row, matcher.match(row)
 
 
+def layout_of(session: Session, workspace_id: uuid.UUID, *, wait: float = FIRST_READ_WAIT) -> dict[str, Any]:
+    """Шапка сводной таблицы и как в ней нашлась каждая колонка ядра - для словаря колонок компании.
+
+    Шапка есть и у листа, который не разобрался: экран сопоставления нужен
+    именно тогда.
+    """
+    from app.finance.core import settings as core_settings
+    from app.finance.layout import inspect_layout
+
+    if source_of(session, workspace_id) is None:
+        return {"connected": False, "header": [], "columns": [], "error": ""}
+    book, error = current(session, workspace_id, wait=wait)
+    with _guard:
+        slot = _slots.get(workspace_id)
+        header = list(book.header if book is not None and book.header else (slot.header if slot is not None else []))
+    extra = core_settings.book_columns(session, workspace_id)
+    base = {column.key: column for column in COLUMNS}
+    columns = [
+        {**item, "names": list(base[item["key"]].names), "extra": extra.get(item["key"], [])}
+        for item in inspect_layout(columns_for(extra), header)
+    ] if header else []
+    return {"connected": True, "header": [cell.strip() for cell in header], "columns": columns, "error": error}
+
+
 __all__ = [
     "Book",
     "BookError",
     "BookRow",
     "COLUMNS",
+    "LayoutBroken",
     "Matcher",
     "Payment",
     "RowMatch",
     "build_book",
+    "columns_for",
     "current",
+    "layout_of",
     "date_of",
     "flag_of",
     "forget",

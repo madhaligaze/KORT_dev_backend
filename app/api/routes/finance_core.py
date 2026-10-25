@@ -237,6 +237,19 @@ def _setup_only(access) -> None:
         raise PermissionError("Сверку со сводной таблицей ведёт владелец или администратор")
 
 
+def _entity_code(session, workspace, entity: UUID | None) -> str:
+    """Код нашего юрлица для фильтра сверки «по ТОО» (`entity`); чужой или несуществующий - отказ словами."""
+    if entity is None:
+        return ""
+    from app.finance.contracts.models import GroupEntity
+    from app.finance.service import FinanceError
+
+    row = session.get(GroupEntity, entity)
+    if row is None or row.workspace_id != workspace.id:
+        raise FinanceError("Такого нашего юрлица нет")
+    return row.code or ""
+
+
 def _book_out(book: book_module.Book) -> dict[str, Any]:
     return {
         "title": book.title,
@@ -248,33 +261,41 @@ def _book_out(book: book_module.Book) -> dict[str, Any]:
 
 
 @router.get("/shadow")
-def shadow_view(member: Member = Depends(viewer)) -> dict[str, Any]:
-    """Сверка начислений KORT с книгой-сводкой: совпало, расходится, предложения, нет в реестре."""
+def shadow_view(entity: UUID | None = Query(default=None), member: Member = Depends(viewer)) -> dict[str, Any]:
+    """Сверка начислений KORT с книгой-сводкой: совпало, расходится, предложения, нет в реестре.
+
+    `entity` - одно наше юрлицо, как его считает «Переход» (`Shadow.of_entity`).
+    """
 
     def action(session, workspace, access):
         _setup_only(access)
+        code = _entity_code(session, workspace, entity)
         book, error = book_module.current(session, workspace.id, wait=book_module.FIRST_READ_WAIT)
         if book is None:
             return {"book": None, "error": error or "Сводная таблица компании не подключена", "window": [], "counts": {},
                     "contracts": {}, "lines": [], "proposals": [], "unknown": []}
         reconciler = shadow_module.Reconciler(session, workspace, access, book)
-        return {"book": _book_out(book), "error": "", **reconciler.out(reconciler.run(), money=True)}
+        shadow = reconciler.run()
+        if entity is not None:
+            shadow = shadow.of_entity(entity, code)
+        return {"book": _book_out(book), "error": "", **reconciler.out(shadow, money=True)}
 
     return _run(member, action)
 
 
 @router.get("/shadow/bills")
-def shadow_bills(member: Member = Depends(viewer)) -> dict[str, Any]:
+def shadow_bills(entity: UUID | None = Query(default=None), member: Member = Depends(viewer)) -> dict[str, Any]:
     """«Не выставлены» KORT против списка книги: совпало, срок другой, только в книге, только у KORT."""
     from app.finance.core import billing
 
     def action(session, workspace, access):
         _setup_only(access)
+        _entity_code(session, workspace, entity)
         book, error = book_module.current(session, workspace.id, wait=book_module.FIRST_READ_WAIT)
         if book is None:
             return {"book": None, "error": error or "Сводная таблица компании не подключена", "window": [], "counts": {},
                     "lines": [], "contracts": {}}
-        out = billing.reconcile_bills(session, workspace, access, book, today=contracts_service.today())
+        out = billing.reconcile_bills(session, workspace, access, book, today=contracts_service.today(), entity=entity)
         return {"book": _book_out(book), "error": "", **out}
 
     return _run(member, action)
@@ -556,14 +577,18 @@ def _entities_out(session, workspace, money) -> list[dict[str, Any]]:
 
 
 @router.get("/payments")
-def payments_view(member: Member = Depends(viewer)) -> dict[str, Any]:
-    """Оплаты в ядре: начало учёта, источник по юрлицам, сверка с книгой, оплаты без договора, входящее сальдо."""
+def payments_view(entity: UUID | None = Query(default=None), member: Member = Depends(viewer)) -> dict[str, Any]:
+    """Оплаты в ядре: начало учёта, источник по юрлицам, сверка с книгой, оплаты без договора, входящее сальдо.
+
+    `entity` сужает только сверку с таблицей - до месяцев одного нашего юрлица, как в «Переходе».
+    """
     from app.finance.core import opening as opening_module
     from app.finance.core import payments as payments_module
     from app.finance.core import settings as core_settings
 
     def action(session, workspace, access):
         _setup_only(access)
+        _entity_code(session, workspace, entity)
         today = contracts_service.today()
         money = payments_module.Money(session, workspace, today=today)
         book, error = book_module.current(session, workspace.id, wait=book_module.FIRST_READ_WAIT)
@@ -578,7 +603,7 @@ def payments_view(member: Member = Depends(viewer)) -> dict[str, Any]:
             "opening": None,
         }
         if book is not None:
-            out["shadow"] = payments_module.reconcile_paid(session, workspace, access, book, today=today, money=money)
+            out["shadow"] = payments_module.reconcile_paid(session, workspace, access, book, today=today, money=money, entity=entity)
             if money.since is not None:
                 out["opening"] = opening_module.plan(session, workspace, access, book, since=money.since)
         return out
@@ -587,8 +612,11 @@ def payments_view(member: Member = Depends(viewer)) -> dict[str, Any]:
 
 
 @router.get("/acts")
-def acts_view(member: Member = Depends(viewer)) -> dict[str, Any]:
-    """АВР и ЭСФ: 1С против книги по договору и месяцу, не подписаны, без ЭСФ после срока, нет АВР."""
+def acts_view(entity: UUID | None = Query(default=None), member: Member = Depends(viewer)) -> dict[str, Any]:
+    """АВР и ЭСФ: 1С против книги по договору и месяцу, не подписаны, без ЭСФ после срока, нет АВР.
+
+    `entity` - одно наше юрлицо: сверка - его месяцы, списки - его договоры (исполнитель сейчас).
+    """
     import sqlalchemy as sa
 
     from app.finance.contracts.models import GroupEntity
@@ -598,18 +626,21 @@ def acts_view(member: Member = Depends(viewer)) -> dict[str, Any]:
 
     def action(session, workspace, access):
         _setup_only(access)
+        _entity_code(session, workspace, entity)
         today = contracts_service.today()
         book, error = book_module.current(session, workspace.id, wait=book_module.FIRST_READ_WAIT)
         acts = acts_module.Acts(session, workspace, access, book, today=today)
         visible = shadow_module._visible(session, workspace, access)
         contracts = {item.id: item for item in visible}
+        # Списки «не подписаны / без ЭСФ / нет АВР» - по договорам юрлица; сверка 1С - по его месяцам.
+        mine = {key: item for key, item in contracts.items() if item.executor_id == entity} if entity is not None else contracts
         current = month_key(today)
         window = [month for month in (acts.reconciler.window if acts.reconciler else []) if month < current]
         until = acts_module.previous_month(today)
         since = month_start(window[0]) if window else month_start(month_key(until.replace(day=1) - timedelta(days=150)))
         accrued = acts_module.accrued_months(Ledger(session, workspace.id, visible), visible, since=since, until=until)
-        shadow = acts.reconcile(contracts, window=window)
-        work = acts.worklists(contracts, accrued)
+        shadow = acts.reconcile(contracts, window=window, entity=entity)
+        work = acts.worklists(mine, {key: months for key, months in accrued.items() if key in mine})
         ids = {line["contract_id"] for line in shadow["lines"]} | {
             item["contract_id"] for items in work.values() for item in items
         }
@@ -821,6 +852,141 @@ def revenue_view(
     return _run(member, action)
 
 
+# ── Словарь колонок сводной таблицы (фаза 9, R14) ────────────────────────────
+
+
+@router.get("/book/columns")
+def book_columns_view(member: Member = Depends(viewer)) -> dict[str, Any]:
+    """Шапка сводной таблицы и как в ней нашлась каждая колонка ядра."""
+
+    def action(session, workspace, access):
+        _setup_only(access)
+        return book_module.layout_of(session, workspace.id)
+
+    return _run(member, action)
+
+
+class BookColumnIn(BaseModel):
+    key: str = Field(min_length=1, max_length=40)
+    name: str = Field(min_length=1, max_length=200)
+    #: `true` - читать колонку и под этим названием, `false` - больше не читать.
+    on: bool = True
+
+
+@router.put("/book/columns")
+def book_columns_set(body: BookColumnIn, member: Member = Depends(editor)) -> dict[str, Any]:
+    """Название колонки компании для колонки ядра - и сразу перечитать таблицу с ним."""
+    from app.finance.core import settings as core_settings
+
+    def action(session, workspace, access):
+        known = {column.key: column.title for column in book_module.COLUMNS}
+        core_settings.set_book_column(
+            session, workspace, access, _actor(member), key=body.key, name=body.name, on=body.on, known=known
+        )
+        session.flush()
+        return book_module.layout_of(session, workspace.id)
+
+    return _run(member, action)
+
+
+# ── Карта группы ─────────────────────────────────────────────────────────────
+
+
+@router.get("/group")
+def group_view(year: int = Query(ge=2000, le=2100), member: Member = Depends(viewer)) -> dict[str, Any]:
+    """Наши ТОО и что между ними: оборот и НДС, договоры между своими, переводы клиентов, люди с выплатами из нескольких ТОО."""
+    from app.finance.core import group_map
+
+    def action(session, workspace, access):
+        # Выплаты людям и обороты всех ТОО - то, что видит владелец или администратор.
+        _setup_only(access)
+        return group_map.group_map(session, workspace, access, year=year, today=contracts_service.today())
+
+    return _run(member, action)
+
+
+@router.get("/entities/{entity_id}/numbers")
+def entity_numbers(entity_id: UUID, member: Member = Depends(viewer)) -> dict[str, Any]:
+    """Досье нашего ТОО «в цифрах»: НДС и оборот за год, кто ему должен."""
+    from app.finance.core import group_map
+
+    def action(session, workspace, access):
+        _setup_only(access)
+        return group_map.entity_numbers(session, workspace, access, entity_id, today=contracts_service.today())
+
+    return _run(member, action)
+
+
+# ── Переход с таблицы на KORT (фаза 10) ──────────────────────────────────────
+
+
+@router.get("/switch")
+def switch_sources(member: Member = Depends(viewer)) -> dict[str, Any]:
+    """Звенья, их названия и какое звено какого юрлица уже ведётся в KORT - без сверок."""
+    from app.finance.core import switch
+
+    def action(session, workspace, access):
+        _setup_only(access)
+        return {
+            "links": [{"key": key, "title": switch.LINK_TITLES[key], "switchable": key in switch.SWITCHABLE} for key in switch.LINKS],
+            "sources": switch.sources(session, workspace.id),
+        }
+
+    return _run(member, action)
+
+
+@router.get("/switch/{link}")
+def switch_link(link: str, member: Member = Depends(viewer)) -> dict[str, Any]:
+    """Одно звено по нашим юрлицам: месяцев сверено, совпало, строк таблицы без договора, откуда сейчас.
+
+    По звену - свой запрос: сверка каждого звена читает всю таблицу, и экран
+    показывает готовое звено, не дожидаясь остальных.
+    """
+    from app.finance.core import switch
+
+    def action(session, workspace, access):
+        _setup_only(access)
+        return switch.link_tally(session, workspace, access, link, today=contracts_service.today())
+
+    return _run(member, action)
+
+
+@router.get("/switch/bills/{entity_id}/preview")
+def switch_bills_preview(
+    entity_id: UUID, source: str = Query(pattern="^(book|kort)$"), member: Member = Depends(viewer)
+) -> dict[str, Any]:
+    """Что станет со «Счетами → Не выставлены» юрлица после перехода: какие счета появятся, уйдут, сменят срок."""
+    from app.finance.core import switch
+
+    def action(session, workspace, access):
+        _setup_only(access)
+        return switch.preview_bills(session, workspace.id, entity_id, source, today=contracts_service.today())
+
+    return _run(member, action)
+
+
+class SwitchIn(BaseModel):
+    #: `kort` - звено юрлица ведётся в KORT, `book` - снова из таблицы.
+    source: str = Field(pattern="^(book|kort)$")
+
+
+@router.put("/switch/{link}/{entity_id}")
+def switch_set(link: str, entity_id: UUID, body: SwitchIn, member: Member = Depends(editor)) -> dict[str, Any]:
+    """Перевести звено юрлица на KORT или вернуть на таблицу. Пишет журнал (`core.settings`).
+
+    Список счетов, число у пункта и бот читают источник при каждом обращении
+    (`bills.current`), так что переход виден сразу, без нового чтения таблицы.
+    """
+    from app.finance.core import switch
+
+    def action(session, workspace, access):
+        out = switch.set_source(session, workspace, access, _actor(member), link=link, entity_id=entity_id, source=body.source)
+        switch.forget(workspace.id)
+        return {"sources": out}
+
+    return _run(member, action)
+
+
 # ── Виды: пустые разделы ─────────────────────────────────────────────────────
 
 
@@ -902,18 +1068,23 @@ def today_participants(member: Member = Depends(viewer)) -> dict[str, Any]:
 
 @router.get("/debts/shadow")
 def debts_shadow(
-    basis: str = Query(default="accruals", pattern="^(accruals|acts)$"), member: Member = Depends(viewer)
+    basis: str = Query(default="accruals", pattern="^(accruals|acts)$"),
+    entity: UUID | None = Query(default=None),
+    member: Member = Depends(viewer),
 ) -> dict[str, Any]:
     """Сальдо KORT на конец месяца против «Сальдо Конец» книги-сводки - по начислениям или по АВР."""
     from app.finance.core import debts as debts_module
 
     def action(session, workspace, access):
         _setup_only(access)
+        _entity_code(session, workspace, entity)
         book, error = book_module.current(session, workspace.id, wait=book_module.FIRST_READ_WAIT)
         if book is None:
             return {"book": None, "error": error or "Сводная таблица компании не подключена", "basis": basis, "window": [],
                     "counts": {}, "contracts": {}, "lines": []}
-        out = debts_module.reconcile_saldo(session, workspace, access, book, today=contracts_service.today(), basis=basis)
+        out = debts_module.reconcile_saldo(
+            session, workspace, access, book, today=contracts_service.today(), basis=basis, entity=entity
+        )
         return {"book": _book_out(book), "error": "", **out}
 
     return _run(member, action)

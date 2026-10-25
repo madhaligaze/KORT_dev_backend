@@ -105,11 +105,38 @@ class ContractDebt:
     #: Оплачено вперёд и переплата (положительное число).
     advance: Decimal = _ZERO
     paid: Decimal = _ZERO
+    #: Неоплаченное по нашим юрлицам месяцев (возраст → сумма): после перевода
+    #: клиента старые месяцы - долг прежнему ТОО. `None` - текущий исполнитель.
+    by_entity: dict[uuid.UUID | None, dict[str, Decimal]] = field(default_factory=dict)
 
     @property
     def owed(self) -> Decimal:
         """Неоплаченное - без вычета аванса: долг = неоплаченное минус аванс."""
         return sum(self.aging.values(), _ZERO)
+
+    def owners(self) -> dict[uuid.UUID | None, dict[str, Decimal]]:
+        """Наше юрлицо → неоплаченное ему по возрасту; без юрлица месяца - текущему исполнителю."""
+        out: dict[uuid.UUID | None, dict[str, Decimal]] = {}
+        for key, aging in self.by_entity.items():
+            owner = key if key is not None else self.contract.executor_id
+            merged = out.setdefault(owner, {})
+            for age, amount in aging.items():
+                merged[age] = merged.get(age, _ZERO) + amount
+        return out
+
+    def owed_to(self, entity: uuid.UUID) -> Decimal:
+        return sum(self.owners().get(entity, {}).values(), _ZERO)
+
+    def scaled(self, fraction: Decimal) -> "ContractDebt":
+        """Доля договора: все суммы - этой частью (доли отделов и людей)."""
+        return ContractDebt(
+            self.contract,
+            self.debt * fraction,
+            {key: amount * fraction for key, amount in self.aging.items()},
+            self.advance * fraction,
+            self.paid * fraction,
+            {owner: {key: amount * fraction for key, amount in aging.items()} for owner, aging in self.by_entity.items()},
+        )
 
     def out(self) -> dict[str, Any]:
         return {
@@ -125,11 +152,16 @@ def _paid(payments: Iterable[Payment], day: date) -> Decimal:
     return sum((payment.amount for payment in payments if payment.paid_at <= day), _ZERO)
 
 
-def accruals_debt(money: ContractMoney, *, day: date) -> tuple[Decimal, dict[str, Decimal], Decimal, Decimal] | None:
-    """Долг по начислениям, старение, аванс и оплачено; `None` - KORT начислений не считает."""
+#: Долг договора: всего, по возрасту, аванс, оплачено, по юрлицам месяцев.
+Found = tuple[Decimal, dict[str, Decimal], Decimal, Decimal, dict[uuid.UUID | None, dict[str, Decimal]]]
+
+
+def accruals_debt(money: ContractMoney, *, day: date) -> Found | None:
+    """Долг по начислениям, старение, аванс, оплачено и долг по юрлицам месяцев; `None` - KORT начислений не считает."""
     if not money.accrues:
         return None
     aging: dict[str, Decimal] = defaultdict(lambda: _ZERO)
+    by_entity: dict[uuid.UUID | None, dict[str, Decimal]] = defaultdict(lambda: defaultdict(lambda: _ZERO))
     advance = sum((part.amount for part in money.over if part.payment.source != "opening"), _ZERO)
     for key, bucket in money.buckets.items():
         if key != OPENING and bucket.starts > day:
@@ -140,13 +172,16 @@ def accruals_debt(money: ContractMoney, *, day: date) -> tuple[Decimal, dict[str
         if left < 0:
             advance += -left
         elif left > 0:
-            aging["opening" if key == OPENING else _age_key(max(0, (day - bucket.starts).days))] += left
-    return money.debt_on(day), dict(aging), advance, _paid(money.payments, day)
+            age = "opening" if key == OPENING else _age_key(max(0, (day - bucket.starts).days))
+            aging[age] += left
+            by_entity[bucket.executor][age] += left
+    split = {entity: dict(values) for entity, values in by_entity.items()}
+    return money.debt_on(day), dict(aging), advance, _paid(money.payments, day), split
 
 
 def acts_debt(
     acts: Iterable[Act], opening: Decimal | None, payments: Iterable[Payment], *, day: date, since: date
-) -> tuple[Decimal, dict[str, Decimal], Decimal, Decimal] | None:
+) -> Found | None:
     """Долг по АВР: сальдо по АВР и акты месяцев учёта до дня, минус оплаты; `None` - ни актов, ни сальдо."""
     first = month_key(since)
     dated = sorted(
@@ -171,7 +206,8 @@ def acts_debt(
         if amount - taken > 0:
             aging[key] += amount - taken
     debt = (opening or _ZERO) + sum((amount for _when, amount in dated), _ZERO) - paid
-    return debt, dict(aging), max(credit, _ZERO), paid
+    # АВР юрлица месяца не несёт - долг по актам у текущего исполнителя.
+    return debt, dict(aging), max(credit, _ZERO), paid, {None: dict(aging)} if aging else {}
 
 
 def fractions(
@@ -344,10 +380,10 @@ class Debts:
             if found is None:
                 self.unknowns[side_key] += 1
                 continue
-            debt, aging, advance, paid = found
+            debt, aging, advance, paid, split = found
             if not debt and not aging and not advance:
                 continue
-            self.every[side_key][contract.id] = ContractDebt(contract, debt, aging, advance, paid)
+            self.every[side_key][contract.id] = ContractDebt(contract, debt, aging, advance, paid, split)
         self.items = self.every[side]
         self.unknown = self.unknowns[side]
 
@@ -370,6 +406,29 @@ class Debts:
     def _label(self, party: uuid.UUID | None) -> str:
         return (self.codes.get(party) or self.names.get(party, "")) if party else ""
 
+    def _entity_pieces(self, item: ContractDebt, ours: uuid.UUID | None) -> list[tuple[str, ContractDebt, Decimal | None]]:
+        """Долг договора по нашим юрлицам месяцев: после перевода клиента старые месяцы - прежнему ТОО.
+
+        Аванс - у текущего исполнителя: переплата лежит на его счёте и гасит его
+        будущие месяцы. У покупки наше юрлицо - заказчик, и делить нечего.
+        """
+        whole = [(str(ours) if ours else NOBODY, item, None)]
+        if self.side == "payable":
+            return whole
+        owners = item.owners()
+        if len(owners) <= 1 and (not owners or ours in owners):
+            return whole
+        pieces: list[tuple[str, ContractDebt, Decimal | None]] = []
+        total = item.owed
+        for owner, aging in owners.items():
+            owed = sum(aging.values(), _ZERO)
+            advance = item.advance if owner == ours else _ZERO
+            piece = ContractDebt(item.contract, owed - advance, dict(aging), advance, _ZERO, {owner: dict(aging)})
+            pieces.append((str(owner) if owner else NOBODY, piece, owed / total if total else None))
+        if ours not in owners and item.advance:
+            pieces.append((str(ours) if ours else NOBODY, ContractDebt(item.contract, -item.advance, {}, item.advance), None))
+        return pieces
+
     def rows(self, group: str) -> list[dict[str, Any]]:
         """Долги, сгруппированные: вторая сторона, наше юрлицо, отдел, человек."""
         if group not in GROUPS:
@@ -382,12 +441,15 @@ class Debts:
             contract = item.contract
             party, ours = self._parties(contract)
             if group == "client":
-                owners = [(str(party) if party else NOBODY, _ONE)]
+                pieces: list[tuple[str, ContractDebt, Decimal | None]] = [(str(party) if party else NOBODY, item, None)]
             elif group == "entity":
-                owners = [(str(ours) if ours else NOBODY, _ONE)]
+                pieces = self._entity_pieces(item, ours)
             else:
-                owners = fractions.get(contract_id, [(NOBODY, _ONE)])
-            for owner, fraction in owners:
+                pieces = [
+                    (owner, item if fraction == _ONE else item.scaled(fraction), None if fraction == _ONE else fraction)
+                    for owner, fraction in fractions.get(contract_id, [(NOBODY, _ONE)])
+                ]
+            for owner, piece, fraction in pieces:
                 entry = groups.get(owner)
                 if entry is None:
                     entry = groups[owner] = {
@@ -400,18 +462,11 @@ class Debts:
                         "aging": defaultdict(lambda: _ZERO),
                         "contracts": [],
                     }
-                entry["debt"] += item.debt * fraction
-                entry["owed"] += item.owed * fraction
-                entry["advance"] += item.advance * fraction
-                for key, amount in item.aging.items():
-                    entry["aging"][key] += amount * fraction
-                part = item.out() if fraction == _ONE else ContractDebt(
-                    contract,
-                    item.debt * fraction,
-                    {key: amount * fraction for key, amount in item.aging.items()},
-                    item.advance * fraction,
-                    item.paid * fraction,
-                ).out()
+                entry["debt"] += piece.debt
+                entry["owed"] += piece.owed
+                entry["advance"] += piece.advance
+                for key, amount in piece.aging.items():
+                    entry["aging"][key] += amount
                 entry["contracts"].append(
                     {
                         "id": str(contract_id),
@@ -419,10 +474,10 @@ class Debts:
                         #: Вторая сторона (клиент, у покупки - поставщик) и наше юрлицо.
                         "party": self._label(party),
                         "entity": self._label(ours),
-                        #: Доля в процентах, когда в группе не весь договор.
-                        "fraction": format((fraction * _HUNDRED).quantize(Decimal("0.01")), "f") if fraction != _ONE else None,
-                        "whole": _money(item.debt) if fraction != _ONE else None,
-                        **part,
+                        #: Доля в процентах, когда в группе не весь договор (доли или месяцы другого юрлица).
+                        "fraction": format((fraction * _HUNDRED).quantize(Decimal("0.01")), "f") if fraction is not None else None,
+                        "whole": _money(item.owed) if fraction is not None else None,
+                        **piece.out(),
                     }
                 )
         out: list[dict[str, Any]] = []
@@ -534,10 +589,14 @@ def closing_acts(money: ContractMoney, acts: Iterable[Act], opening: Decimal | N
 
 
 def reconcile_saldo(
-    session: Session, workspace: Workspace, access: Access, book: Any, *, today: date, basis: str = "accruals"
+    session: Session, workspace: Workspace, access: Access, book: Any, *, today: date, basis: str = "accruals",
+    entity: uuid.UUID | None = None,
 ) -> dict[str, Any]:
-    """«Сальдо Конец» книги против сальдо KORT по договору и месяцу - с начала учёта до текущего месяца."""
-    from app.finance.core.shadow import Reconciler
+    """«Сальдо Конец» книги против сальдо KORT по договору и месяцу - с начала учёта до текущего месяца.
+
+    `entity` - только месяцы, где это наше юрлицо исполнитель (как считает «Переход»).
+    """
+    from app.finance.core.shadow import EntityTally, Reconciler, month_owner
 
     if basis not in BASES:
         raise ValueError("основание сальдо - по начислениям или по АВР")
@@ -552,6 +611,7 @@ def reconcile_saldo(
     lines: list[dict[str, Any]] = []
     counts = {"contracts": 0, "same": 0, "months": 0, "months_same": 0}
     contracts_out: dict[str, Any] = {}
+    tally = EntityTally()
     for contract in reconciler.contracts:
         months = reconciler.grouped.get(contract.id, {})
         if not months or not window:
@@ -574,11 +634,15 @@ def reconcile_saldo(
             values = [getattr(row, column) for row in entry.rows if getattr(row, column) is not None]
             if not values:
                 continue
+            owner = month_owner(contract, item.buckets.get(month), entry)
+            if entity is not None and owner != entity:
+                continue
             theirs = sum(values, _ZERO)
             kort = ours.get(month, _ZERO)
             same = kort == theirs
             counts["months"] += 1
             counts["months_same"] += int(same)
+            tally.add(owner, contract.id, same, month)
             rows.append({"month": month, "kort": _money(kort), "book": _money(theirs), "same": same})
         if not rows:
             continue
@@ -602,7 +666,15 @@ def reconcile_saldo(
             }
         )
     lines.sort(key=lambda line: -abs(Decimal(line["diff"] or "0")))
-    return {"basis": basis, "window": window, "counts": counts, "contracts": contracts_out, "lines": lines}
+    return {
+        "basis": basis,
+        "window": window,
+        "counts": counts,
+        "contracts": contracts_out,
+        "lines": lines,
+        #: По нашим юрлицам месяца - для «Перехода».
+        "by_entity": tally.out(),
+    }
 
 
 __all__ = [

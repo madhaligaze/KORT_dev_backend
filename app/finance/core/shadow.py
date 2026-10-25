@@ -145,6 +145,57 @@ class BookMonth:
         return out
 
 
+class EntityTally:
+    """Сверка звена по нашим юрлицам - для «Перехода» (`core/switch.py`).
+
+    Месяц договора - тому юрлицу, что было исполнителем в этом месяце: после
+    перевода клиента старые месяцы готовят к переходу прежнее ТОО, а не новое.
+    Договор у юрлица совпал, если совпали все его месяцы у этого юрлица.
+    """
+
+    def __init__(self) -> None:
+        self.months: dict[str, list[int]] = defaultdict(lambda: [0, 0])
+        self.contracts: dict[str, set[uuid.UUID]] = defaultdict(set)
+        self.dirty: dict[str, set[uuid.UUID]] = defaultdict(set)
+        #: Юрлицо → месяц → [сверено, совпало]: переход - после закрытых месяцев без расхождений.
+        self.by_month: dict[str, dict[str, list[int]]] = defaultdict(lambda: defaultdict(lambda: [0, 0]))
+
+    def add(self, entity_id: uuid.UUID | None, contract_id: uuid.UUID, same: bool, month: str = "") -> None:
+        key = str(entity_id or "")
+        tally = self.months[key]
+        tally[0] += 1
+        tally[1] += int(same)
+        self.contracts[key].add(contract_id)
+        if not same:
+            self.dirty[key].add(contract_id)
+        if month:
+            slot = self.by_month[key][month]
+            slot[0] += 1
+            slot[1] += int(same)
+
+    def out(self) -> dict[str, dict[str, Any]]:
+        return {
+            key: {
+                "months": months,
+                "same": same,
+                "contracts": len(self.contracts[key]),
+                "contracts_same": len(self.contracts[key] - self.dirty[key]),
+                "by_month": {month: list(slot) for month, slot in sorted(self.by_month[key].items())},
+            }
+            for key, (months, same) in self.months.items()
+        }
+
+
+def month_owner(contract: Contract, kort: Any = None, book: BookMonth | None = None) -> uuid.UUID | None:
+    """Наше юрлицо месяца договора: исполнитель начисления, иначе «Наша Фирма» строки таблицы, иначе договора."""
+    executor = getattr(kort, "executor_id", None) or getattr(kort, "executor", None)
+    if executor:
+        return executor
+    if book is not None and book.entity_id:
+        return book.entity_id
+    return contract.executor_id
+
+
 @dataclass
 class Line:
     contract_id: uuid.UUID
@@ -209,6 +260,16 @@ class Shadow:
     contracts: dict[uuid.UUID, ContractShadow] = field(default_factory=dict)
     #: Строки книги без договора в KORT - сгруппированные по договору книги.
     unknown: list[dict[str, Any]] = field(default_factory=list)
+
+    def of_entity(self, entity_id: uuid.UUID, code: str) -> Shadow:
+        """Сверка одного нашего юрлица - как её считает «Переход»: месяцы, где оно исполнитель, и строки таблицы с его кодом."""
+        out = Shadow(window=self.window)
+        for contract_id, item in self.contracts.items():
+            lines = [line for line in item.lines if month_owner(item.contract, line.kort, line.book) == entity_id]
+            if lines:
+                out.contracts[contract_id] = ContractShadow(item.contract, item.schedule, lines, item.proposals)
+        out.unknown = [group for group in self.unknown if norm(group["own"]) == norm(code)]
+        return out
 
     def lines(self) -> Iterable[Line]:
         for item in self.contracts.values():
@@ -758,6 +819,7 @@ __all__ = [
     "BULK_KINDS",
     "BookMonth",
     "ContractShadow",
+    "EntityTally",
     "LINE_CODES",
     "Line",
     "PROPOSAL_KINDS",
@@ -766,6 +828,7 @@ __all__ = [
     "Shadow",
     "WHY",
     "contract_months",
+    "month_owner",
     "month_title",
     "reconcile",
 ]

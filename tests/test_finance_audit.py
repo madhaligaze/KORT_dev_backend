@@ -568,6 +568,8 @@ def test_kazhdyy_izmenyayushchiy_marshrut_pishet_sobytie(app: FastAPI, monkeypat
     assert stray.status_code < 400, stray.text
     walk.call(owner, "POST", "/core/payments/{operation_id}/decide", operation_id=stray.json()["id"], json={"action": "none"})
     walk.call(owner, "PUT", "/core/payments/ignore", json={"kind": "payers", "name": "Вознаграждение"})
+    # Словарь колонок: «Сумма Договора» компании называется иначе.
+    walk.call(owner, "PUT", "/core/book/columns", json={"key": "amount", "name": "Сумма по договору"})
     core_book.forget()
     # Порог НДС: предпросмотр перевода ничего не пишет, перевод - пачка «исполнитель с даты».
     # Договор уже у BBCL - переводим ко второму нашему юрлицу.
@@ -577,6 +579,11 @@ def test_kazhdyy_izmenyayushchiy_marshrut_pishet_sobytie(app: FastAPI, monkeypat
     assert owner.get(f"{BASE}/core/vat", params={"year": 2026}).status_code == 200
     assert owner.post(f"{BASE}/core/vat/preview", json=move).status_code == 200
     walk.call(owner, "POST", "/core/vat/transfer", json=move)
+    # Переход: счета BBCL - из KORT, и снова из таблицы.
+    walk.call(owner, "PUT", "/core/switch/{link}/{entity_id}", link="bills", entity_id=entity, json={"source": "kort"})
+    assert owner.get(f"{BASE}/bills").json()["source"]["kort"] == ["BBCL"]
+    back = owner.put(f"{BASE}/core/switch/bills/{entity}", json={"source": "book"})
+    assert back.status_code == 200 and back.json()["sources"]["bills"] == {}, back.text
 
     walk.call(owner, "DELETE", "/contracts/setup/summary")
 

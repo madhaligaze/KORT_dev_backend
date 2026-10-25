@@ -2544,16 +2544,21 @@ def read_bill(bill_id: str, member: Member = Depends(require_access("invoices"))
     """
     _guard()
     from app.finance.contracts import bill_book
+    from app.finance.core import billing as core_billing
 
     with finance_session() as session:
         workspace_id = _workspace(session, member).id
         bill, summary = _bill_of(session, workspace_id, bill_id)
+        # Счёт юрлица, переведённого на KORT, без строки в таблице - пишется в KORT.
+        kort = core_billing.kort_card(session, workspace_id, bill) if bill.source == "kort" and not bill.line else None
     out: dict[str, Any] = {
         "bill": bill.out(),
-        "book": None,
+        "book": kort,
         "problem": "",
         "can_edit": member.rights.can("invoices", "edit"),
     }
+    if kort is not None:
+        return out
     try:
         out["book"] = bill_book.card(bill_book.api(), summary, bill.key)
     except bill_book.BookError as exc:
@@ -2576,6 +2581,17 @@ def write_bill(bill_id: str, body: BillBookIn, member: Member = Depends(require_
     with finance_session() as session:
         workspace_id = _workspace(session, member).id
         bill, summary = _bill_of(session, workspace_id, bill_id)
+    if bill.source == "kort" and not bill.line:
+        # Строки в таблице нет - счёт записывается документом KORT, с журналом (`core/billing.py`).
+        from app.finance.core import billing as core_billing
+
+        try:
+            with finance_session() as session:
+                return core_billing.write_kort(
+                    session, _workspace(session, member), bill, body.expect, body.values, body.defaults, actor=_actor(member)
+                )
+        except bill_book.BookError as exc:
+            raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
     where = f"{bill.customer} {bill.number}, {bill.month}".strip()
     try:
         saved = bill_book.save(bill_book.api(), summary, bill.key, body.expect, body.values, body.defaults)
