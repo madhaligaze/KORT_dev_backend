@@ -364,6 +364,9 @@ class Registry:
         self._summary: Any = _UNSET
         self._aliases: dict[uuid.UUID, list[str]] | None = None
         self._summary_matches: dict[uuid.UUID, Any] = {}
+        #: Юрлица, чьи оплаты ведёт KORT («Сверка → Переход»), и оплачено по договорам - на запрос.
+        self._kort_payments: set[uuid.UUID] | None = None
+        self._kort_paid: dict[uuid.UUID, Any] | None = None
 
     # - сводка оплат -
 
@@ -395,7 +398,11 @@ class Registry:
         return self._aliases.get(party_id, [])
 
     def summary_of(self, contract: Contract) -> Any:
-        """Что сводка знает о договоре (`summary.Match`) или `None` - сводки нет."""
+        """Что сводка знает о договоре (`summary.Match`) или `None` - сводки нет.
+
+        У юрлица, чьи оплаты ведёт KORT («Сверка → Переход»), оплачено - из
+        разнесённых оплат KORT (`core/switch.kort_paid`), а не из колонки таблицы.
+        """
         index = self.summary
         if index is None:
             return None
@@ -404,12 +411,32 @@ class Registry:
             ours, theirs = contract.executor_id, contract.customer_id
             if not self.is_own(ours) and self.is_own(theirs):
                 ours, theirs = theirs, ours
+            if ours is not None and ours in self.kort_payments():
+                from app.finance.contracts import summary as summary_module
+
+                hit = summary_module.Match("found", paid=self.kort_paid().get(contract.id, Decimal("0")), source="kort")
+                self._summary_matches[contract.id] = hit
+                return hit
             party = self.parties_for([theirs]).get(theirs) if theirs else None
             names = ([party.name] if party is not None else []) + self.aliases(theirs)
             entity = self.own.get(ours) if ours else None
             hit = index.match(contract.number, names, entity.code if entity is not None else "")
             self._summary_matches[contract.id] = hit
         return hit
+
+    def kort_payments(self) -> set[uuid.UUID]:
+        if self._kort_payments is None:
+            from app.finance.core import switch
+
+            self._kort_payments = switch.kort_entities(self.session, self.workspace.id, "payments")
+        return self._kort_payments
+
+    def kort_paid(self) -> dict[uuid.UUID, Any]:
+        if self._kort_paid is None:
+            from app.finance.core import switch
+
+            self._kort_paid = switch.kort_paid(self.session, self.workspace.id)
+        return self._kort_paid
 
     # - стороны -
 

@@ -409,19 +409,26 @@ class Money:
 
     # ── Договор ──────────────────────────────────────────────────────────────
 
+    def _counted(self, payment: Payment) -> bool:
+        """Оплата - в учёте KORT на `today`.
+
+        Оплаты раньше начала учёта - до KORT: их место во входящем сальдо. Кроме
+        оплаты за месяц учёта: «ИЮНЬ 2026», оплаченный в мае, - июньская
+        предоплата. Оплаты позже `today` - после дня, на который считается («на дату»).
+        """
+        first_key = month_key(self.since) if self.since is not None else ""
+        return payment.paid_at <= self.today and (
+            self.since is None or payment.paid_at >= self.since or (payment.hint is not None and payment.hint[1] >= first_key)
+        )
+
+    def paid_of(self, contract_id: uuid.UUID) -> Decimal:
+        """Сколько оплачено по договору в учёте KORT - без раскладки по месяцам («Оплачено» реестра)."""
+        return sum((payment.amount for payment in self.by_contract.get(contract_id, []) if self._counted(payment)), _ZERO)
+
     def contract(self, contract: Contract, ledger: Ledger | None = None) -> ContractMoney:
         if contract.id in self._cache:
             return self._cache[contract.id]
-        # Оплаты раньше начала учёта - до KORT: их место во входящем сальдо. Кроме
-        # оплаты за месяц учёта: «ИЮНЬ 2026», оплаченный в мае, - июньская предоплата.
-        # Оплаты позже `today` - после дня, на который считается («на дату»).
-        first_key = month_key(self.since) if self.since is not None else ""
-        payments = [
-            payment
-            for payment in self.by_contract.get(contract.id, [])
-            if payment.paid_at <= self.today
-            and (self.since is None or payment.paid_at >= self.since or (payment.hint is not None and payment.hint[1] >= first_key))
-        ]
+        payments = [payment for payment in self.by_contract.get(contract.id, []) if self._counted(payment)]
         opening_doc = self.openings.get(contract.id)
         opening = opening_doc.amount if opening_doc is not None else None
         buckets: dict[str, Bucket] = {}

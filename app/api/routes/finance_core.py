@@ -889,6 +889,100 @@ def book_columns_set(body: BookColumnIn, member: Member = Depends(editor)) -> di
     return _run(member, action)
 
 
+# ── Слои настройки: шаблон → компания → отдел → человек (R15, R17) ───────────
+
+
+@router.get("/layers")
+def layers_view(member: Member = Depends(viewer)) -> dict[str, Any]:
+    """Что задаёт шаблон «Компания услуг по договорам», чем компания отличается от него, что - отделы и люди."""
+    from app.finance.core import layers
+
+    return _run(member, lambda s, w, a: layers.layers(s, w, a))
+
+
+# ── Слова компании в колонках таблицы (R12, R13) ─────────────────────────────
+
+
+def _table_words(session, workspace) -> dict[str, Any]:
+    """Значения «Счет» и «Вида Услуги» из прочитанной таблицы - со смыслом и откуда он."""
+    from collections import Counter
+
+    from app.finance import bills_bot
+    from app.finance.contracts import bills as bills_module
+    from app.finance.core import settings as core_settings
+    from app.finance.layout import norm
+
+    words = core_settings.table_words(session, workspace.id)
+    out: dict[str, Any] = {
+        "titles": core_settings.WORD_TITLES,
+        "meanings": {"bill": list(core_settings.BILL_MEANINGS), "kind": list(core_settings.KIND_MEANINGS)},
+        "seen": {"bill": [], "kind": []},
+        "error": "",
+    }
+    slot = bills_module.get(session, workspace.id)
+    if slot is None:
+        out["error"] = "Сводная таблица не подключена"
+        return out
+    with bills_module._guard:
+        board, error = slot.board, slot.error
+    if board is None:
+        out["error"] = error or "Сводная таблица ещё читается - попробуйте через минуту"
+        return out
+    rows = [*board.bills, *board.done]
+    for text, count in Counter(" ".join(bill.text.split()) for bill in rows if bill.text.strip()).most_common():
+        key = norm(text)
+        if key in words["bill"]:
+            meaning, how = words["bill"][key], "company"
+        else:
+            state = bills_module.state_of(text)
+            meaning = "issued" if state is None else state
+            how = "unknown" if state == bills_module.UNDATED else "kort"
+        out["seen"]["bill"].append({"text": text, "rows": count, "meaning": meaning, "how": how})
+    for text, count in Counter(" ".join(bill.kind.split()) for bill in rows if bill.kind.strip()).most_common():
+        key = norm(text)
+        if key in words["kind"]:
+            meaning, how = words["kind"][key], "company"
+        else:
+            kind = bills_bot.kind_of_words(text)
+            meaning = "" if kind == bills_bot.UNKNOWN else kind
+            how = "unknown" if kind == bills_bot.UNKNOWN else "kort"
+        out["seen"]["kind"].append({"text": text, "rows": count, "meaning": meaning, "how": how})
+    return out
+
+
+@router.get("/table-words")
+def table_words_view(member: Member = Depends(viewer)) -> dict[str, Any]:
+    """Слова компании в колонках «Счет» и «Вид Услуги»: что встречается в таблице и как KORT это понимает."""
+
+    def action(session, workspace, access):
+        _setup_only(access)
+        return _table_words(session, workspace)
+
+    return _run(member, action)
+
+
+class TableWordIn(BaseModel):
+    part: str = Field(pattern="^(bill|kind)$")
+    word: str = Field(min_length=1, max_length=200)
+    #: Пусто - снять смысл: слово снова понимается так, как KORT понимает сам.
+    meaning: str = Field(default="", max_length=20)
+
+
+@router.put("/table-words")
+def table_words_set(body: TableWordIn, member: Member = Depends(editor)) -> dict[str, Any]:
+    """Дать слову колонки смысл - список «Не выставлены», бот и шаблон понимают его сразу. Пишет журнал."""
+    from app.finance.core import settings as core_settings
+    from app.finance.core import switch
+
+    def action(session, workspace, access):
+        core_settings.set_table_word(session, workspace, access, _actor(member), part=body.part, word=body.word, meaning=body.meaning)
+        session.flush()
+        switch.forget(workspace.id)
+        return _table_words(session, workspace)
+
+    return _run(member, action)
+
+
 # ── Карта группы ─────────────────────────────────────────────────────────────
 
 
@@ -951,16 +1045,22 @@ def switch_link(link: str, member: Member = Depends(viewer)) -> dict[str, Any]:
     return _run(member, action)
 
 
-@router.get("/switch/bills/{entity_id}/preview")
-def switch_bills_preview(
-    entity_id: UUID, source: str = Query(pattern="^(book|kort)$"), member: Member = Depends(viewer)
+@router.get("/switch/{link}/{entity_id}/preview")
+def switch_preview(
+    link: str, entity_id: UUID, source: str = Query(pattern="^(book|kort)$"), member: Member = Depends(viewer)
 ) -> dict[str, Any]:
-    """Что станет со «Счетами → Не выставлены» юрлица после перехода: какие счета появятся, уйдут, сменят срок."""
+    """Что станет после перехода звена юрлица: счета - какие появятся, уйдут, сменят срок;
+    оплаты - у каких договоров «Оплачено» другое и на сколько."""
     from app.finance.core import switch
+    from app.finance.service import FinanceError
 
     def action(session, workspace, access):
         _setup_only(access)
-        return switch.preview_bills(session, workspace.id, entity_id, source, today=contracts_service.today())
+        if link == "bills":
+            return switch.preview_bills(session, workspace.id, entity_id, source, today=contracts_service.today())
+        if link == "payments":
+            return switch.preview_payments(session, workspace.id, entity_id, source, today=contracts_service.today())
+        raise FinanceError("Это звено пока ведётся только в таблице")
 
     return _run(member, action)
 

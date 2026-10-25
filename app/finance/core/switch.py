@@ -44,6 +44,7 @@ from app.finance.contracts.models import (
 )
 from app.finance.contracts.service import Access, Actor
 from app.finance.core import book as book_module
+from app.finance.core import settings as core_settings
 from app.finance.core.accruals import Ledger, month_key, month_start
 from app.finance.core.models import CoreSettings, Document
 from app.finance.layout import norm
@@ -58,8 +59,10 @@ LINK_TITLES = {
     "acts": "АВР: 1С и таблица",
     "saldo": "Сальдо",
 }
-#: Какие звенья уже умеют читать KORT вместо таблицы - их и можно переключать.
-SWITCHABLE = ("bills",)
+#: Какие звенья уже умеют читать KORT вместо таблицы - их и можно переключать:
+#: счета - «Не выставлены», число у пункта, бот, шаблон; оплаты - «Оплачено» и
+#: «Остаток» реестра, «Разовых», листов и выгрузки (`Registry.summary_of`).
+SWITCHABLE = ("bills", "payments")
 SOURCES = ("book", "kort")
 
 #: Весь реестр - список счетов и бот общие для компании, как и сводная таблица.
@@ -299,6 +302,8 @@ class _Context:
     values: dict[uuid.UUID, str]
     staff: dict[uuid.UUID, str]
     departments: dict[uuid.UUID, str]
+    #: Слова «Вида Услуги» компании → пост бота (`core/settings.table_words`).
+    posts: dict[str, str] = dataclasses.field(default_factory=dict)
 
 
 def _context(session: Session, workspace_id: uuid.UUID, contracts: list[Contract]) -> _Context:
@@ -333,6 +338,7 @@ def _context(session: Session, workspace_id: uuid.UUID, contracts: list[Contract
         values=dict(session.execute(sa.select(ListValue.id, ListValue.value).where(ListValue.workspace_id == workspace_id)).all()),
         staff={key: ", ".join(value) for key, value in staff.items()},
         departments={key: value[0] for key, value in departments.items() if value},
+        posts=core_settings.table_words(session, workspace_id).get("kind", {}),
     )
 
 
@@ -341,6 +347,7 @@ def _made(contract: Contract, month: str, accrual: Any, owner: uuid.UUID, doc: D
     from app.finance.contracts import bills as bills_module
 
     meta = (doc.meta or {}) if doc is not None else {}
+    kind = context.values.get(contract.type_id, "") if contract.type_id else ""
     return bills_module.Bill(
         line=0,
         group=group,
@@ -350,7 +357,7 @@ def _made(contract: Contract, month: str, accrual: Any, owner: uuid.UUID, doc: D
         number=contract.number,
         month=f"{_MONTHS[int(month[5:7]) - 1]} {month[:4]}",
         month_no=int(month[5:7]),
-        kind=context.values.get(contract.type_id, "") if contract.type_id else "",
+        kind=kind,
         staff=context.staff.get(contract.id, ""),
         department=context.departments.get(contract.id, ""),
         amount=accrual.amount,
@@ -365,6 +372,7 @@ def _made(contract: Contract, month: str, accrual: Any, owner: uuid.UUID, doc: D
         signed_at=_shown(contract.signed_at),
         source="kort",
         contract_id=str(contract.id),
+        post=context.posts.get(norm(kind), ""),
     )
 
 
@@ -493,6 +501,8 @@ def bills_board(session: Session, workspace_id: uuid.UUID, board: Any, *, today:
 def forget(workspace_id: uuid.UUID) -> None:
     with _boards_guard:
         _boards.pop(workspace_id, None)
+    with _paid_guard:
+        _paid.pop(workspace_id, None)
 
 
 def preview_bills(
@@ -516,6 +526,9 @@ def preview_bills(
             raise FinanceError("Сводная таблица компании не подключена")
         with bills_module._guard:
             raw, error = slot.board, slot.error
+        if raw is not None:
+            # Как его видят список и бот: со словами компании (`bills.prepared`).
+            raw = bills_module.worded(raw, core_settings.table_words(session, workspace_id))
         if raw is None:
             raise FinanceError(error or "Сводная таблица ещё читается - попробуйте через минуту")
     today = today or datetime.now(bills_module.TZ).date()
@@ -552,6 +565,105 @@ def preview_bills(
     }
 
 
+# ── «Оплачено» из KORT ───────────────────────────────────────────────────────
+
+_paid: dict[uuid.UUID, tuple[tuple[Any, ...], dict[uuid.UUID, Decimal]]] = {}
+_paid_guard = threading.Lock()
+
+
+def kort_paid(session: Session, workspace_id: uuid.UUID, *, today: date | None = None) -> dict[uuid.UUID, Decimal]:
+    """Оплачено по договорам в учёте KORT - для «Оплачено/Остаток» реестра у юрлиц на KORT.
+
+    Считается целиком (меньше секунды на 500 договоров) и держится до правки
+    данных или нового дня: реестр спрашивает его на каждом открытии.
+    """
+    from app.finance.contracts.service import today as contracts_today
+    from app.finance.core.payments import Money
+
+    day = today or contracts_today()
+    key = (_version(session, workspace_id), day)
+    with _paid_guard:
+        cached = _paid.get(workspace_id)
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    workspace = session.get(Workspace, workspace_id)
+    money = Money(session, workspace, today=day)
+    values = {contract_id: money.paid_of(contract_id) for contract_id in money.contracts}
+    with _paid_guard:
+        _paid[workspace_id] = (key, values)
+    return values
+
+
+def preview_payments(
+    session: Session, workspace_id: uuid.UUID, entity_id: uuid.UUID, source: str, *, today: date | None = None
+) -> dict[str, Any]:
+    """Что станет с «Оплачено» договоров юрлица после перехода: где таблица и KORT расходятся и на сколько."""
+    from app.finance.contracts import summary as summary_module
+    from app.finance.contracts.service import Registry
+
+    if source not in SOURCES:
+        raise FinanceError("Источник - таблица или KORT")
+    entity = session.get(GroupEntity, entity_id)
+    if entity is None or entity.workspace_id != workspace_id:
+        raise FinanceError("Такого нашего юрлица нет")
+    slot = summary_module.get(session, workspace_id)
+    if slot is None or slot.index is None:
+        raise FinanceError((slot.error if slot is not None else "") or "Сводная таблица компании не подключена")
+    workspace = session.get(Workspace, workspace_id)
+    registry = Registry(session, workspace)
+    registry._summary = slot.index
+    registry._kort_payments = set()  # таблица как есть - чтобы сравнить с KORT
+    paid = kort_paid(session, workspace_id, today=today)
+    contracts = list(
+        session.scalars(sa.select(Contract).where(Contract.workspace_id == workspace_id, Contract.deleted_at.is_(None)))
+    )
+    registry.parties_for({party for item in contracts for party in (item.executor_id, item.customer_id)})
+    items: list[dict[str, Any]] = []
+    counts = {"contracts": 0, "same": 0, "differ": 0, "table_only": 0, "kort_only": 0}
+    totals = {"table": Decimal("0"), "kort": Decimal("0")}
+    for contract in contracts:
+        ours = contract.executor_id if registry.is_own(contract.executor_id) else contract.customer_id
+        if ours != entity_id:
+            continue
+        match = registry.summary_of(contract)
+        table = match.paid if match is not None and match.state == "found" else None
+        kort = paid.get(contract.id, Decimal("0"))
+        if table is None and not kort:
+            continue
+        counts["contracts"] += 1
+        totals["table"] += table or Decimal("0")
+        totals["kort"] += kort
+        if table is not None and table == kort:
+            counts["same"] += 1
+            continue
+        code = "kort_only" if table is None else "table_only" if not kort else "differ"
+        counts[code] += 1
+        other = contract.customer_id if ours == contract.executor_id else contract.executor_id
+        party = registry.parties_for([other]).get(other) if other else None
+        items.append(
+            {
+                "id": str(contract.id),
+                "number": contract.number,
+                "customer": party.name if party is not None else "",
+                "table": _money(table) if table is not None else None,
+                "kort": _money(kort),
+                "code": code,
+            }
+        )
+    items.sort(key=lambda item: -abs(Decimal(item["kort"]) - Decimal(item["table"] or "0")))
+    return {
+        "entity": {"id": str(entity_id), "code": entity.code},
+        "source": source,
+        "counts": counts,
+        "totals": {"table": _money(totals["table"]), "kort": _money(totals["kort"])},
+        "items": items,
+    }
+
+
+def _money(value: Decimal | None) -> str | None:
+    return format(value, "f") if value is not None else None
+
+
 __all__ = [
     "CLOSED_MONTHS",
     "LINKS",
@@ -561,8 +673,10 @@ __all__ = [
     "build_bills",
     "forget",
     "kort_entities",
+    "kort_paid",
     "link_tally",
     "preview_bills",
+    "preview_payments",
     "set_source",
     "sources",
     "words",

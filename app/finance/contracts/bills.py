@@ -124,9 +124,16 @@ class BillsError(Exception):
     """Книгу нельзя прочитать - с текстом для человека."""
 
 
-def state_of(value: Any) -> str | None:
-    """Группа строки по значению «Счет»; `None` - счёт выставлен."""
+def state_of(value: Any, words: dict[str, str] | None = None) -> str | None:
+    """Группа строки по значению «Счет»; `None` - счёт выставлен.
+
+    `words` - слова компании (`core/settings.table_words`, колонка «Счет»):
+    смысл, который им дал человек, главнее слов BBC ниже.
+    """
     text = norm(value)
+    meaning = (words or {}).get(text)
+    if meaning:
+        return None if meaning == "issued" else meaning
     if text in ISSUED:
         return None
     if text.startswith("просрочка"):
@@ -207,6 +214,9 @@ class Bill:
     #: начислениям договора, а не словами таблицы; `line == 0` - строки в таблице нет.
     source: str = ""
     contract_id: str = ""
+    #: Пост бота по слову «Вида Услуги» из словаря компании (`abon`, `rent`, `skip`);
+    #: пусто - бот понимает вид сам (`bills_bot.kind_of`).
+    post: str = ""
 
     @property
     def key(self) -> str:
@@ -564,6 +574,35 @@ def get(session: Session, workspace_id: uuid.UUID, *, wait: float = FIRST_READ_W
     return slot
 
 
+def worded(board: Board, words: dict[str, dict[str, str]]) -> Board:
+    """Сводка со словами компании (`core/settings.table_words`): смысл слов «Счет» и пост бота по «Виду Услуги».
+
+    Применяется к прочитанному, без нового чтения таблицы: слово, которому
+    дали смысл, действует сразу.
+    """
+    bill_words, kind_words = words.get("bill") or {}, words.get("kind") or {}
+    if not bill_words and not kind_words:
+        return board
+    bills: list[Bill] = []
+    done: list[Bill] = []
+    for bill in [*board.bills, *board.done]:
+        state = state_of(bill.text, bill_words) if bill_words else (None if bill.group == DONE else bill.group)
+        group = DONE if state is None else state
+        post = kind_words.get(norm(bill.kind), "")
+        if group != bill.group or post != bill.post:
+            bill = dataclasses.replace(bill, group=group, post=post)
+        (done if bill.group == DONE else bills).append(bill)
+    bills.sort(key=_order)
+    return dataclasses.replace(board, bills=bills, done=done, issued={bill.key for bill in done})
+
+
+def prepared(session: Session, workspace_id: uuid.UUID, board: Board) -> Board:
+    """Прочитанная сводка такой, какой её видят список, число у пункта и бот: слова компании, затем юрлица на KORT."""
+    from app.finance.core import settings as core_settings
+
+    return switched(session, workspace_id, worded(board, core_settings.table_words(session, workspace_id)))
+
+
 def switched(session: Session, workspace_id: uuid.UUID, board: Board) -> Board:
     """Сводка, где счета юрлиц, переведённых на KORT, посчитаны KORT (`core/switch.py`).
 
@@ -586,7 +625,7 @@ def current(session: Session, workspace_id: uuid.UUID, **kwargs: Any) -> tuple[B
         return None, ""
     with _guard:
         board, error = slot.board, slot.error
-    return (view(workspace_id, switched(session, workspace_id, board)) if board is not None else None), error
+    return (view(workspace_id, prepared(session, workspace_id, board)) if board is not None else None), error
 
 
 def forget(workspace_id: uuid.UUID) -> None:
@@ -658,7 +697,7 @@ def badge(session: Session, workspace_id: uuid.UUID) -> dict[str, int] | None:
         board = slot.board
     if board is None:
         return None
-    counts = view(workspace_id, switched(session, workspace_id, board)).counts()
+    counts = view(workspace_id, prepared(session, workspace_id, board)).counts()
     return {OVERDUE: counts[OVERDUE], SOON: counts[SOON]}
 
 
@@ -686,8 +725,10 @@ __all__ = [
     "mark",
     "read_date",
     "recent",
+    "prepared",
     "state_of",
     "switched",
+    "worded",
     "view",
     "window_start",
 ]

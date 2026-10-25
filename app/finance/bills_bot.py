@@ -241,16 +241,25 @@ def kind_of(bill: bills.Bill) -> str:
 
     «Вид Услуги» главнее отдела. Отдел «Аренда» решает только там, где вида
     нет («нет», пусто): так заведена часть аренды BBC Omar (22.10.2026 -
-    «ТОО NKK Строй», №RENT/98). Незнакомый вид не угадывается.
+    «ТОО NKK Строй», №RENT/98). Незнакомый вид не угадывается. Слову, которому
+    компания дала смысл («Настроить реестр → Слова таблицы», `bills.worded`),
+    - его пост.
     """
-    kind = norm(bill.kind)
+    if bill.post:
+        return bill.post
+    return kind_of_words(bill.kind, bill.department)
+
+
+def kind_of_words(kind_text: str, department: str = "") -> str:
+    """Пост по словам «Вида Услуги» и отдела - как их понимает KORT без словаря компании."""
+    kind = norm(kind_text)
     if kind.startswith("абон"):
         return ABON
     if kind.startswith("аренд"):
         return RENT
     if kind.startswith(("разов", "проч")):
         return SKIP
-    if kind in ("", "нет") and norm(bill.department) == "аренда":
+    if kind in ("", "нет") and norm(department) == "аренда":
         return RENT
     return UNKNOWN
 

@@ -52,21 +52,21 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _bill_of_book(month: BookMonth | None) -> dict[str, Any] | None:
-    """Счёт месяца по книге: «№ Счета» заполнен или «Счет» = TRUE."""
+def _bill_of_book(month: BookMonth | None, words: dict[str, str] | None = None) -> dict[str, Any] | None:
+    """Счёт месяца по книге: «№ Счета» заполнен или «Счет» = TRUE (или слово компании со смыслом «выставлен»)."""
     if month is None:
         return None
     row = month.rows[0]
-    if row.bill_no or bills_module.state_of(row.bill_state) is None:
+    if row.bill_no or bills_module.state_of(row.bill_state, words) is None:
         return {"source": "book", "number": row.bill_no, "date": row.bill_date.isoformat() if row.bill_date else None}
     return None
 
 
-def _book_group(month: BookMonth | None) -> str | None:
-    """Группа строки по словам книги; `None` - счёт выставлен или строки нет."""
+def _book_group(month: BookMonth | None, words: dict[str, str] | None = None) -> str | None:
+    """Группа строки по словам книги и словам компании; `None` - счёт выставлен или строки нет."""
     if month is None:
         return None
-    return bills_module.state_of(month.rows[0].bill_state)
+    return bills_module.state_of(month.rows[0].bill_state, words)
 
 
 def kort_bills(session: Session, workspace_id: uuid.UUID) -> dict[tuple[uuid.UUID, str], Document]:
@@ -118,9 +118,12 @@ def reconcile_bills(
 
     `entity` - только месяцы, где это наше юрлицо исполнитель (как считает «Переход»).
     """
+    from app.finance.core import settings as core_settings
+
     reconciler = Reconciler(session, workspace, access, book)
     window = [month for month in reconciler.window if month <= month_key(today)]
     docs = kort_bills(session, workspace.id)
+    words = core_settings.table_words(session, workspace.id).get("bill", {})
     lines: list[BillLine] = []
     same = 0
     waiting = {"kort": 0, "book": 0}
@@ -139,14 +142,14 @@ def reconcile_bills(
             if entity is not None and owner != entity:
                 continue
             doc = docs.get((contract.id, month))
-            book_bill = _bill_of_book(row)
+            book_bill = _bill_of_book(row, words)
             bill = (
                 {"source": "kort", "number": doc.number, "date": doc.issued_on.isoformat() if doc.issued_on else None}
                 if doc is not None
                 else book_bill
             )
             kort = _kort_side(accrual, bill, today)
-            book_group = _book_group(row)
+            book_group = _book_group(row, words)
             book_side = (
                 {"group": book_group, "text": row.rows[0].bill_state, "bill": book_bill, "amount": format(row.amount, "f") if row.amount is not None else None,
                  "due": row.period_from.isoformat() if row.period_from else None}

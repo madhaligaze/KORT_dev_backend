@@ -255,15 +255,105 @@ def payments_out(value: Payments, *, since_used: date | None) -> dict[str, Any]:
     }
 
 
+# ── Слова компании в колонках таблицы (R12, R13) ────────────────────────────
+#
+# Значения колонки «Счет» пишет формула таблицы своими словами («Просрочка
+# более 5 дней», «Еще рано», TRUE у BBC), а «Вид Услуги» - человек («Абон.П.»,
+# «Аренда»). Слова BBC KORT знает сам (`contracts/bills.state_of`,
+# `bills_bot.kind_of`); слово другой компании получает смысл здесь - и
+# список «Не выставлены», бот и шаблон понимают его так же.
+
+#: Смыслы слова колонки «Счет»: выставлен, просрочен, скоро, ещё рано, без срока.
+BILL_MEANINGS = ("issued", "overdue", "soon", "early", "undated")
+#: Смыслы слова «Вида Услуги» для постов бота: абонентская плата, аренда, не присылать.
+KIND_MEANINGS = ("abon", "rent", "skip")
+WORD_PARTS = {"bill": BILL_MEANINGS, "kind": KIND_MEANINGS}
+WORD_TITLES = {
+    "issued": "выставлен",
+    "overdue": "просрочен",
+    "soon": "скоро",
+    "early": "ещё рано",
+    "undated": "без срока",
+    "abon": "абонентская плата",
+    "rent": "аренда",
+    "skip": "не присылать",
+}
+PART_TITLES = {"bill": "«Счет»", "kind": "«Вид Услуги»"}
+
+
+def table_words(session: Session, workspace_id: uuid.UUID) -> dict[str, dict[str, str]]:
+    """Слова компании: колонка → слово без оформления (`norm`) → смысл."""
+    row = session.get(CoreSettings, workspace_id)
+    raw = ((row.data if row is not None else None) or {}).get("table_words") or {}
+    return {
+        part: {norm(word): meaning for word, meaning in (raw.get(part) or {}).items() if meaning in meanings}
+        for part, meanings in WORD_PARTS.items()
+    }
+
+
+def set_table_word(
+    session: Session, workspace: Workspace, access: Access, actor: Actor, *, part: str, word: str, meaning: str
+) -> dict[str, dict[str, str]]:
+    """Дать слову колонки смысл (`meaning` пусто - снять, тогда снова как KORT понимает сам)."""
+    if not access.setup:
+        raise PermissionError("Слова таблицы задаёт владелец или администратор")
+    if part not in WORD_PARTS:
+        raise FinanceError("Такой колонки в словаре нет")
+    if meaning and meaning not in WORD_PARTS[part]:
+        raise FinanceError("Такого смысла у этой колонки нет")
+    key = norm(word)
+    if not key or len(key) > 200:
+        raise FinanceError("Слово - как в таблице, до 200 знаков")
+    row = _row(session, workspace)
+    if row is None:
+        row = CoreSettings(workspace_id=workspace.id, data={})
+        session.add(row)
+    data = dict(row.data or {})
+    words = {name: dict(items) for name, items in (data.get("table_words") or {}).items()}
+    items = words.setdefault(part, {})
+    before = items.get(key, "")
+    if meaning:
+        items[key] = meaning
+    else:
+        items.pop(key, None)
+    data["table_words"] = words
+    row.data = data
+    row.updated_by = actor.user_id
+    row.updated_at = datetime.now(timezone.utc)
+    session.flush()
+    shown = " ".join(str(word).split())
+    history.write(
+        session,
+        workspace,
+        kind="core.settings",
+        entity="core_settings",
+        entity_id=None,
+        title=(
+            f"слово «{shown}» колонки {PART_TITLES[part]} - {WORD_TITLES[meaning]}"
+            if meaning
+            else f"слово «{shown}» колонки {PART_TITLES[part]} - снова как KORT понимает сам"
+        ),
+        before={"table_words": {part: {key: before}}},
+        after={"table_words": {part: {key: meaning}}},
+        actor=actor.email,
+    )
+    return table_words(session, workspace.id)
+
+
 __all__ = [
+    "BILL_MEANINGS",
     "IGNORE_KINDS",
+    "KIND_MEANINGS",
     "PAYMENT_SOURCES",
     "Payments",
     "SOURCE_TITLES",
+    "WORD_TITLES",
     "book_columns",
     "payments",
     "payments_out",
     "set_book_column",
     "set_ignore",
     "set_payments",
+    "set_table_word",
+    "table_words",
 ]

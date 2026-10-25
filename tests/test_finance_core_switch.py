@@ -20,7 +20,7 @@ from app.finance import service as finance_service
 from app.finance.contracts import bill_book
 from app.finance.contracts import bills as bills_module
 from app.finance.contracts import service, setup
-from app.finance.contracts.models import GroupEntity
+from app.finance.contracts.models import Contract, GroupEntity
 from app.finance.core import billing, switch
 from app.finance.core import book as book_module
 from app.finance.core.models import Document
@@ -150,7 +150,7 @@ def test_perehod_okno_zapis_i_vozvrat(space, audit):
         with pytest.raises(PermissionError):
             switch.set_source(session, workspace, service.Access(view=True, edit=True), OWNER, link="bills", entity_id=bbc, source="kort")
         with pytest.raises(FinanceError, match="только в таблице"):
-            switch.set_source(session, workspace, FULL, OWNER, link="payments", entity_id=bbc, source="kort")
+            switch.set_source(session, workspace, FULL, OWNER, link="acts", entity_id=bbc, source="kort")
 
         # Окно перехода: что станет со списком BBC.
         ahead = switch.preview_bills(session, workspace.id, bbc, "kort", today=TODAY, board=board)
@@ -255,7 +255,7 @@ def test_perehod_po_pravam(app: FastAPI) -> None:
     assert [item["key"] for item in listing["links"]] == list(switch.LINKS) and listing["sources"] == {}
     assert owner.get(f"{BASE}/core/switch/bills").json()["error"], "сводная таблица не подключена - словами"
     assert owner.get(f"{BASE}/core/switch/nothing").status_code == 400
-    assert owner.put(f"{BASE}/core/switch/payments/{entity}", json={"source": "kort"}).status_code == 400
+    assert owner.put(f"{BASE}/core/switch/acts/{entity}", json={"source": "kort"}).status_code == 400
     moved = owner.put(f"{BASE}/core/switch/bills/{entity}", json={"source": "kort"})
     assert moved.status_code == 200 and moved.json()["sources"] == {"bills": {entity: "kort"}}, moved.text
     person = employee(owner, "Юристов Рысбек", "+77051140001")
@@ -263,3 +263,58 @@ def test_perehod_po_pravam(app: FastAPI) -> None:
     lawyer = activate(app, "+77051140001", ip="10.0.4.1")
     assert lawyer.get(f"{BASE}/core/switch").status_code == 403
     assert lawyer.put(f"{BASE}/core/switch/bills/{entity}", json={"source": "book"}).status_code == 403
+
+
+def test_oplacheno_iz_kort(space, audit, monkeypatch):
+    """Оплаты юрлица на KORT: «Оплачено/Остаток» реестра - из разнесённых оплат KORT, а окно
+    перехода заранее показывает договоры, где таблица и KORT расходятся."""
+    from app.finance.contracts import summary as summary_module
+    from app.finance.contracts.service import Registry
+    from app.finance.core import settings as core_settings
+
+    values = [
+        ["Наша Фирма", "Заказчик (Название Фирмы)", "№ Договора", "Сумма Факт Поступ.", "Техн. 1"],
+        ["BBC", "Альфаком", "№1", "100 000", "СЕНТЯБРЬ 2026"],
+        ["BBC", "Альфаком", "№1", "50 000", "ОКТЯБРЬ 2026"],
+        ["BBC", "Бетаком", "№2", "80 000", "ОКТЯБРЬ 2026"],
+    ]
+    monkeypatch.setattr(
+        summary_module, "_read",
+        lambda spreadsheet_id, tab, extra=None: summary_module.build_index(
+            values, title="Сводка", worksheet=tab, columns=summary_module.columns_for(extra)
+        ),
+    )
+    with finance_session() as session:
+        workspace = finance_service.get_workspace(session, space)
+        _contracts(session, workspace)
+        core_settings.set_payments(session, workspace, FULL, OWNER, since=date(2026, 9, 1))
+        account = finance_service.create_account(session, workspace, name="Касса в офисе")
+        payer = finance_service.ensure_counterparty(session, workspace.id, "ТОО Альфаком", role="client")
+        for day, amount in ((date(2026, 9, 3), "100000"), (date(2026, 10, 4), "50000")):
+            finance_service.create_operation(
+                session, workspace,
+                finance_service.OperationInput(
+                    kind="income", paid_at=day, amount=Decimal(amount), account_to_id=account.id,
+                    counterparty_id=payer.id, contract_ref="№1",
+                ),
+            )
+        summary_module.connect(session, workspace.id, link="https://docs.google.com/spreadsheets/d/abc/edit", worksheet="Сводка", user_id=None)
+        numbers = {item.number: item for item in session.scalars(sa.select(Contract))}
+        bbc = _entity(session, "BBC")
+
+        before = Registry(session, workspace)
+        table = {number: before.summary_of(numbers[number]) for number in ("№1", "№2")}
+        assert [(item.paid, item.source) for item in table.values()] == [(Decimal("150000"), ""), (Decimal("80000"), "")]
+
+        preview = switch.preview_payments(session, workspace.id, bbc, "kort", today=TODAY)
+        assert preview["counts"] == {"contracts": 2, "same": 1, "differ": 0, "table_only": 1, "kort_only": 0}
+        assert [(item["number"], item["table"], item["kort"]) for item in preview["items"]] == [("№2", "80000", "0")]
+
+        switch.set_source(session, workspace, FULL, OWNER, link="payments", entity_id=bbc, source="kort")
+        switch.forget(workspace.id)
+        after = Registry(session, workspace)
+        kort = {number: after.summary_of(numbers[number]) for number in ("№1", "№2")}
+        assert [(item.paid, item.source) for item in kort.values()] == [(Decimal("150000"), "kort"), (Decimal("0"), "kort")]
+        assert summary_module.contracts_out(session, workspace, FULL)["contracts"][str(numbers["№2"].id)]["source"] == "kort"
+        legal = numbers["№3"]
+        assert after.summary_of(legal).source == "", "BBCL на таблице - оплачено из таблицы"

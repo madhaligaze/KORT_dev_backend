@@ -586,6 +586,8 @@ def test_kazhdyy_izmenyayushchiy_marshrut_pishet_sobytie(app: FastAPI, monkeypat
     assert owner.get(f"{BASE}/bills").json()["source"]["kort"] == ["BBCL"]
     back = owner.put(f"{BASE}/core/switch/bills/{entity}", json={"source": "book"})
     assert back.status_code == 200 and back.json()["sources"]["bills"] == {}, back.text
+    # Слова компании: слово колонки «Счет» со своим смыслом.
+    walk.call(owner, "PUT", "/core/table-words", json={"part": "bill", "word": "Сегодня день выставления", "meaning": "soon"})
     # Первые шаги: юрлицо по новому коду, договор по строкам таблицы, сальдо на начало учёта.
     core_book.put(company, core_book.build_book(
         [["Мес", "Техн. 1", "Наша Фирма", "Заказчик (Название Фирмы)", "Сумма Договора", "№ Договора",

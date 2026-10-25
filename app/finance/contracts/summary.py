@@ -125,6 +125,9 @@ class Match:
     rows: int = 0
     customer: str = ""
     candidates: tuple[str, ...] = ()
+    #: `kort` - оплаты юрлица ведёт KORT («Сверка → Переход»): оплачено - из разнесённых
+    #: оплат, а не из колонки таблицы.
+    source: str = ""
 
 
 @dataclass
@@ -407,6 +410,8 @@ def contracts_out(session: Session, workspace: Any, access: Any, *, force: bool 
             continue
         match = registry.summary_of(item)
         entry: dict[str, Any] = {"state": match.state}
+        if match.source:
+            entry["source"] = match.source
         if match.state == "found":
             entry.update(
                 paid=str(match.paid),
