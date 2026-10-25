@@ -210,6 +210,14 @@ def test_svodka_zvena_po_yurlicam(space, audit, monkeypatch):
         assert (rows["BBC"]["months"], rows["BBC"]["same"], rows["BBC"]["unknown"], rows["BBC"]["clean"]) == (6, 2, 1, False)
         assert (rows["BBCL"]["months"], rows["BBCL"]["same"], rows["BBCL"]["unknown"], rows["BBCL"]["clean"]) == (2, 2, 0, True)
         assert rows["BBC"]["source"] == "book" and out["switchable"]
+        # Готово - когда два последних закрытых месяца без расхождений: 20.10 закрыт один сентябрь.
+        assert rows["BBCL"]["closed"] == [{"month": "2026-09", "checked": 1, "same": 1}] and not rows["BBCL"]["ready"]
+        later = {item["code"]: item for item in switch.link_tally(session, workspace, FULL, "bills", today=date(2026, 11, 5))["entities"]}
+        assert later["BBCL"]["ready"], "сентябрь и октябрь BBCL совпали"
+        assert later["BBC"]["closed"] == [
+            {"month": "2026-09", "checked": 3, "same": 2},
+            {"month": "2026-10", "checked": 4, "same": 0},
+        ] and not later["BBC"]["ready"], "строка без договора - тоже расхождение месяца"
         accruals = {item["code"]: item for item in switch.link_tally(session, workspace, FULL, "accruals", today=TODAY)["entities"]}
         assert accruals["BBCL"]["clean"] and accruals["BBC"]["unknown"] == 1
 
