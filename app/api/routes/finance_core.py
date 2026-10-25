@@ -160,7 +160,7 @@ def participants_distinct(body: DistinctIn, member: Member = Depends(editor)) ->
 def _book(session, workspace) -> book_module.Book:
     book, error = book_module.current(session, workspace.id, wait=book_module.FIRST_READ_WAIT)
     if book is None:
-        raise HTTPException(status_code=424, detail=error or "Книга-сводка компании не подключена или ещё читается")
+        raise HTTPException(status_code=424, detail=error or "Сводная таблица компании не подключена или ещё читается")
     return book
 
 
@@ -234,7 +234,7 @@ def _setup_only(access) -> None:
     # Сверка показывает все договоры компании с деньгами книги - это работа
     # того, кто переводит учёт в KORT: владельца или администратора.
     if not access.setup:
-        raise PermissionError("Сверку с книгой-сводкой ведёт владелец или администратор")
+        raise PermissionError("Сверку со сводной таблицей ведёт владелец или администратор")
 
 
 def _book_out(book: book_module.Book) -> dict[str, Any]:
@@ -255,7 +255,7 @@ def shadow_view(member: Member = Depends(viewer)) -> dict[str, Any]:
         _setup_only(access)
         book, error = book_module.current(session, workspace.id, wait=book_module.FIRST_READ_WAIT)
         if book is None:
-            return {"book": None, "error": error or "Книга-сводка компании не подключена", "window": [], "counts": {},
+            return {"book": None, "error": error or "Сводная таблица компании не подключена", "window": [], "counts": {},
                     "contracts": {}, "lines": [], "proposals": [], "unknown": []}
         reconciler = shadow_module.Reconciler(session, workspace, access, book)
         return {"book": _book_out(book), "error": "", **reconciler.out(reconciler.run(), money=True)}
@@ -272,7 +272,7 @@ def shadow_bills(member: Member = Depends(viewer)) -> dict[str, Any]:
         _setup_only(access)
         book, error = book_module.current(session, workspace.id, wait=book_module.FIRST_READ_WAIT)
         if book is None:
-            return {"book": None, "error": error or "Книга-сводка компании не подключена", "window": [], "counts": {},
+            return {"book": None, "error": error or "Сводная таблица компании не подключена", "window": [], "counts": {},
                     "lines": [], "contracts": {}}
         out = billing.reconcile_bills(session, workspace, access, book, today=contracts_service.today())
         return {"book": _book_out(book), "error": "", **out}
@@ -569,7 +569,7 @@ def payments_view(member: Member = Depends(viewer)) -> dict[str, Any]:
             "without": money.without_contract(),
             "without_hidden": money.hidden,
             "book": _book_out(book) if book is not None else None,
-            "error": "" if book is not None else (error or "Книга-сводка компании не подключена"),
+            "error": "" if book is not None else (error or "Сводная таблица компании не подключена"),
             "shadow": None,
             "opening": None,
         }
@@ -623,7 +623,7 @@ def acts_view(member: Member = Depends(viewer)) -> dict[str, Any]:
         ]
         return {
             "book": _book_out(book) if book is not None else None,
-            "error": "" if book is not None else (error or "Книга-сводка компании не подключена"),
+            "error": "" if book is not None else (error or "Сводная таблица компании не подключена"),
             "window": window,
             "onec": onec,
             **shadow,
@@ -726,6 +726,8 @@ def payment_decide(operation_id: UUID, body: PaymentDecisionIn, member: Member =
 class OpeningIn(BaseModel):
     #: Сальдо на начало учёта; `null` - снять.
     amount: str | None = Field(default=None, max_length=40)
+    #: По начислениям (его гасят оплаты) или по АВР (начало долга по актам).
+    basis: str = Field(default="accruals", pattern="^(accruals|acts)$")
 
 
 @router.put("/contracts/{contract_id}/opening")
@@ -743,8 +745,69 @@ def contract_opening(contract_id: UUID, body: OpeningIn, member: Member = Depend
         money = payments_module.Money(session, workspace, today=contracts_service.today())
         if money.since is None:
             raise HTTPException(status_code=409, detail="Начало учёта оплат не задано и оплат ещё нет")
-        opening_module.set_one(session, workspace, access, _actor(member), contract_id, since=money.since, amount=value)
+        opening_module.set_one(
+            session, workspace, access, _actor(member), contract_id, since=money.since, amount=value, basis=body.basis
+        )
         return {"ok": True}
+
+    return _run(member, action)
+
+
+# ── Итоги: долги ─────────────────────────────────────────────────────────────
+
+
+def _debts_access(access) -> None:
+    # Долг - сумма договора минус оплаты по выписке: кому они скрыты, тому и долг.
+    if {"amount", "paid", "remaining"} & access.hidden:
+        raise PermissionError("Долги по договорам видит тот, кому открыты сумма договора и оплаты по выписке")
+
+
+@router.get("/debts")
+def debts_view(
+    as_of: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    group: str = Query(default="client", pattern="^(client|entity|department|person)$"),
+    basis: str = Query(default="accruals", pattern="^(accruals|acts)$"),
+    side: str = Query(default="receivable", pattern="^(receivable|payable|intra)$"),
+    member: Member = Depends(require_access("reports.debts")),
+) -> dict[str, Any]:
+    """Долги по договорам на день: нам, наши (покупки), между своими; по начислениям или по АВР; по группам, со старением."""
+    from datetime import date
+
+    from app.finance.core import debts as debts_module
+
+    def action(session, workspace, access):
+        _debts_access(access)
+        day = date.fromisoformat(as_of) if as_of else contracts_service.today()
+        book, error = None, ""
+        if basis == "acts":
+            # АВР книги - часть долга по АВР у юрлиц без 1С: без книги он был бы меньше молча.
+            book, error = book_module.current(session, workspace.id, wait=book_module.FIRST_READ_WAIT)
+        out = debts_module.Debts(session, workspace, access, day=day, basis=basis, book=book, side=side).out(group)
+        out["book"] = _book_out(book) if book is not None else None
+        out["error"] = (
+            "" if basis == "accruals" or book is not None
+            else f"{error or 'Сводная таблица компании не подключена'} - АВР только KORT и 1С"
+        )
+        return out
+
+    return _run(member, action)
+
+
+@router.get("/debts/shadow")
+def debts_shadow(
+    basis: str = Query(default="accruals", pattern="^(accruals|acts)$"), member: Member = Depends(viewer)
+) -> dict[str, Any]:
+    """Сальдо KORT на конец месяца против «Сальдо Конец» книги-сводки - по начислениям или по АВР."""
+    from app.finance.core import debts as debts_module
+
+    def action(session, workspace, access):
+        _setup_only(access)
+        book, error = book_module.current(session, workspace.id, wait=book_module.FIRST_READ_WAIT)
+        if book is None:
+            return {"book": None, "error": error or "Сводная таблица компании не подключена", "basis": basis, "window": [],
+                    "counts": {}, "contracts": {}, "lines": []}
+        out = debts_module.reconcile_saldo(session, workspace, access, book, today=contracts_service.today(), basis=basis)
+        return {"book": _book_out(book), "error": "", **out}
 
     return _run(member, action)
 

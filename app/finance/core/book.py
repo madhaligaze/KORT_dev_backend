@@ -346,7 +346,7 @@ def build_book(values: Sequence[Sequence[Any]], *, title: str, worksheet: str, s
         rows.append(item)
         digest.update(f"{item.key}|{item.amount}|{item.bill_no}|{item.paid}|{item.act_no}|{item.closing_acts}\n".encode())
     if not rows:
-        raise BookError(f"В листе «{worksheet}» нет ни одной строки договора - книга, похоже, ещё собирается")
+        raise BookError(f"В листе «{worksheet}» нет ни одной строки договора - таблица, похоже, ещё собирается")
     return Book(
         read_at=datetime.now(timezone.utc),
         title=title,
@@ -467,7 +467,7 @@ _guard = threading.Lock()
 
 def _read(spreadsheet_id: str, worksheet: str) -> Book:
     if not google.is_configured():
-        raise BookError("Не заданы креды Google - книгу прочитать нечем")
+        raise BookError("Не заданы креды Google - таблицу прочитать нечем")
     try:
         meta = google.spreadsheet_meta(spreadsheet_id)
         values = google.fetch_tab_values(spreadsheet_id, worksheet, fresh=True)
@@ -485,9 +485,9 @@ def _refresh(slot: _Slot, done: threading.Event) -> None:
         with _guard:
             slot.error = str(exc)
     except Exception as exc:  # noqa: BLE001 - чтение книги не должно ронять ядро
-        log.exception("сводка ядра: книга не прочиталась")
+        log.exception("сводка ядра: таблица не прочиталась")
         with _guard:
-            slot.error = f"Книга не прочиталась: {exc}"
+            slot.error = f"Таблица не прочиталась: {exc}"
     finally:
         with _guard:
             slot.at = time.monotonic()

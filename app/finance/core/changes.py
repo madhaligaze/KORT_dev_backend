@@ -103,7 +103,7 @@ def status_from(
     текущий: пауза в прошлом не переписывает то, что было до неё.
     """
     if origin not in ORIGINS:
-        raise ChangeError("Откуда изменение: из карточки или из книги")
+        raise ChangeError("Откуда изменение: из карточки или из таблицы")
     contract, registry = _contract(session, workspace, access, contract_id)
     value = registry.values.get(status_id)
     if value is None or value.field_key != "status":
@@ -150,7 +150,7 @@ def status_from(
         session, workspace, kind="contract.status_from", entity="contract", entity_id=contract.id,
         title=(
             f"договор {contract.number or ''} · статус с {day:%d.%m.%Y}: {before_title} → {value.value}"
-            + (" (по книге-сводке)" if origin == "book" else "")
+            + (" (по сводной таблице)" if origin == "book" else "")
         ).replace("  ", " "),
         before={"status": before}, after={"status": str(status_id), "effective_from": day.isoformat(), "origin": origin},
         actor=actor.email,
@@ -281,7 +281,7 @@ def history_change(
     amendment = ContractAmendment(
         workspace_id=workspace.id,
         contract_id=contract.id,
-        summary="по книге-сводке" if origin == "book" else "",
+        summary="по сводной таблице" if origin == "book" else "",
         effect=key,
         effective_from=until,
         before={key: before_value},
@@ -301,7 +301,7 @@ def history_change(
             f"договор {contract.number or ''} · до {until:%d.%m.%Y} "
             + ("сумма была " if key == "amount" else "исполнитель был " if key == "executor" else "заказчик был ")
             + label
-            + (" (по книге-сводке)" if origin == "book" else "")
+            + (" (по сводной таблице)" if origin == "book" else "")
         ).replace("  ", " "),
         before={key: before_value}, after={**after_value, "until": until.isoformat()}, actor=actor.email,
     )
@@ -336,7 +336,7 @@ def apply_proposal(
             raise ChangeError("В предложении нет даты") from exc
 
     def dated(field: str, raw: Any, since: date) -> None:
-        mode = Mode(kind="from_date", effective_from=since, summary="по книге-сводке", origin="book")
+        mode = Mode(kind="from_date", effective_from=since, summary="по сводной таблице", origin="book")
         patch(session, workspace, access, actor, contract.id, {field: raw}, known_seq=None, mode=mode)
 
     if kind in ("billing", "period_day", "billing_from"):
@@ -350,7 +350,7 @@ def apply_proposal(
             since = day("from")
             set_adjustment(
                 session, workspace, access, actor, contract.id, month_key(since),
-                amount=value.get("amount"), reason="как в книге-сводке",
+                amount=value.get("amount"), reason="как в сводной таблице",
             )
             return f"{number}: поправка месяца"
         dated("amount", value.get("amount"), day("from"))
@@ -368,7 +368,7 @@ def apply_proposal(
     if kind == "adjust":
         set_adjustment(
             session, workspace, access, actor, contract.id, str(value.get("month") or ""),
-            amount=value.get("amount"), skip=bool(value.get("skip")), reason="как в книге-сводке",
+            amount=value.get("amount"), skip=bool(value.get("skip")), reason="как в сводной таблице",
         )
         return f"{number}: поправка месяца"
     if kind in ("pause", "stop") and (kind == "pause" or option == "pause"):
@@ -378,9 +378,9 @@ def apply_proposal(
             raise ChangeError("В статусах реестра нет приостановки - заведите статус со смыслом «приостановлен»")
         timeline = Ledger(session, workspace.id, [contract]).timeline(contract)
         was = timeline.value("status", date.fromordinal(since.toordinal() - 1))
-        status_from(session, workspace, access, actor, contract.id, suspended.id, since, origin="book", summary="по книге-сводке")
+        status_from(session, workspace, access, actor, contract.id, suspended.id, since, origin="book", summary="по сводной таблице")
         if kind == "pause" and value.get("to") and was:
-            status_from(session, workspace, access, actor, contract.id, uuid.UUID(was), day("to"), origin="book", summary="по книге-сводке")
+            status_from(session, workspace, access, actor, contract.id, uuid.UUID(was), day("to"), origin="book", summary="по сводной таблице")
         return f"{number}: приостановка с {since:%d.%m.%Y}"
     if kind in ("stop", "end"):
         end = day("end_date")
@@ -391,7 +391,7 @@ def apply_proposal(
         if kind == "stop" and ended is not None and phase not in ("terminated", "fulfilled"):
             status_from(
                 session, workspace, access, actor, contract.id, ended.id, date.fromordinal(end.toordinal() + 1),
-                origin="book", summary="по книге-сводке",
+                origin="book", summary="по сводной таблице",
             )
         return f"{number}: окончание {end:%d.%m.%Y}"
     raise ChangeError("Такого предложения нет")
@@ -421,7 +421,7 @@ def apply_all(
     point = restore.values_point(
         session, workspace, access, actor,
         items=[{"id": str(item.contract_id), "keys": [kind]} for item in proposals],
-        title=f"сверка с книгой: {titles[kind]} у {len(proposals)} договоров",
+        title=f"сверка с таблицей: {titles[kind]} у {len(proposals)} договоров",
     )
     done = 0
     skipped: list[str] = []
@@ -456,7 +456,7 @@ def create_from_book(
     reconciler = Reconciler(session, workspace, access, book)
     rows = reconciler.unknown_rows(key)
     if not rows:
-        raise ChangeError("Таких строк в книге уже нет - сверка обновилась")
+        raise ChangeError("Таких строк в таблице уже нет - сверка обновилась")
     first, last = rows[0], rows[-1]
     months = sorted({row.month for row in rows})
     spans = [(row.period_to - row.period_from).days for row in rows if row.period_from and row.period_to]
@@ -477,7 +477,7 @@ def create_from_book(
     contract = create(session, workspace, access, actor, values)
     history.write(
         session, workspace, kind="contract.from_book", entity="contract", entity_id=contract.id,
-        title=f"договор {contract.number or ''} заведён по книге-сводке: {first.customer}, {len(months)} мес.".replace("  ", " "),
+        title=f"договор {contract.number or ''} заведён по сводной таблице: {first.customer}, {len(months)} мес.".replace("  ", " "),
         after={"lines": [row.line for row in rows], "months": months}, actor=actor.email,
     )
     return contract

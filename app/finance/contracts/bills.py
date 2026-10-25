@@ -325,7 +325,7 @@ def build_board(
     if not count:
         # Пустой лист под шапкой - это сводка, которую формула ещё собирает, а не
         # «всё выставлено»: прежнее чтение остаётся, бот не правит пост в пустоту.
-        raise BillsError(f"В листе «{worksheet}» нет ни одной строки договора - книга, похоже, ещё собирается")
+        raise BillsError(f"В листе «{worksheet}» нет ни одной строки договора - таблица, похоже, ещё собирается")
     bills.sort(key=_order)
     return Board(
         read_at=datetime.now(timezone.utc),
@@ -449,7 +449,7 @@ _guard = threading.Lock()
 
 def _read(spreadsheet_id: str, worksheet: str) -> Board:
     if not google.is_configured():
-        raise BillsError("Не заданы креды Google - книгу прочитать нечем")
+        raise BillsError("Не заданы креды Google - таблицу прочитать нечем")
     try:
         meta = google.spreadsheet_meta(spreadsheet_id)
         values = google.fetch_tab_values(spreadsheet_id, worksheet, fresh=True)
@@ -467,9 +467,9 @@ def _refresh(slot: _Slot, done: threading.Event) -> None:
         with _guard:
             slot.error = str(exc)
     except Exception as exc:  # noqa: BLE001 - чтение книги не должно ронять раздел
-        log.exception("счета: книга не прочиталась")
+        log.exception("счета: таблица не прочиталась")
         with _guard:
-            slot.error = f"Книга не прочиталась: {exc}"
+            slot.error = f"Таблица не прочиталась: {exc}"
     finally:
         with _guard:
             slot.at = time.monotonic()

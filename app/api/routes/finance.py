@@ -2434,10 +2434,10 @@ def _board_of(session: Any, workspace_id: UUID) -> tuple[Any, tuple[str, str]]:
 
     source = source_of(session, workspace_id)
     if source is None:
-        raise HTTPException(status_code=404, detail="Книга-сводка не подключена")
+        raise HTTPException(status_code=404, detail="Сводная таблица не подключена")
     board, error = bills_module.current(session, workspace_id)
     if board is None:
-        raise HTTPException(status_code=503, detail=error or "Книга-сводка ещё читается - попробуйте через минуту")
+        raise HTTPException(status_code=503, detail=error or "Сводная таблица ещё читается - попробуйте через минуту")
     return board, (source.spreadsheet_id, source.worksheet)
 
 
@@ -2449,7 +2449,7 @@ def _bill_of(session: Any, workspace_id: UUID, bill_id: str) -> tuple[Any, tuple
     bill = board.find(bill_id)
     if bill is None:
         raise HTTPException(
-            status_code=404, detail="Такого счёта в книге-сводке нет - строку могли переименовать или удалить"
+            status_code=404, detail="Такого счёта в сводной таблице нет - строку могли переименовать или удалить"
         )
     return bill, summary
 
@@ -2469,7 +2469,7 @@ def _journal_bill(member: Member, bill: Any, place: Any, *, kind: str, title: st
             entity="bill",
             title=title,
             before=before,
-            after={**after, "книга": place.book.title, "вкладка": place.tab.title, "строка": place.row},
+            after={**after, "таблица": place.book.title, "вкладка": place.tab.title, "строка": place.row},
             actor=_actor(member),
         )
 
@@ -2586,7 +2586,7 @@ def write_bill(bill_id: str, body: BillBookIn, member: Member = Depends(require_
                 bill,
                 exc.place,
                 kind="bill.book.fail",
-                title=f"запись в книгу не удалась: {where}",
+                title=f"запись в таблицу не удалась: {where}",
                 before={},
                 after={"ошибка": str(exc), "поля": [bill_book.TITLES[name] for name in exc.changed]},
             )
@@ -2606,11 +2606,11 @@ def write_bill(bill_id: str, body: BillBookIn, member: Member = Depends(require_
     if saved.changed:
         number, issued_at = saved.after["bill_no"], saved.after["bill_date"]
         if number and not saved.before["bill_no"]:
-            title = f"счёт выставлен в книге: {where} - № {number}" + (f" от {issued_at}" if issued_at else "")
+            title = f"счёт выставлен в таблице: {where} - № {number}" + (f" от {issued_at}" if issued_at else "")
         elif saved.before["bill_no"] and not number:
-            title = f"отметка «выставлен» снята в книге: {where}"
+            title = f"отметка «выставлен» снята в таблице: {where}"
         else:
-            title = f"счёт исправлен в книге: {where}"
+            title = f"счёт исправлен в таблице: {where}"
         _journal_bill(
             member,
             bill,

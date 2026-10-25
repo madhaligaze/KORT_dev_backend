@@ -297,7 +297,7 @@ def test_ne_nashlas_i_neskolko_mesyatsev() -> None:
     stranger = ["BBCL", "", "ТОО Неизвестный", "", "№ЮО/99", None, datetime(2026, 10, 22), None, "1", 9, datetime(2026, 10, 22)]
     result = bill_template.parse(finance_template([stranger, THREE[2]]), board())
     assert statuses(result) == [("ТОО Неизвестный", "error"), ("ИП РАЖА", "empty")]
-    assert result["rows"][0]["problem"] == "В книге-сводке нет счёта BBCL, ТОО Неизвестный, №ЮО/99 с периодом от 22.10.2026"
+    assert result["rows"][0]["problem"] == "В сводной таблице нет счёта BBCL, ТОО Неизвестный, №ЮО/99 с периодом от 22.10.2026"
     # Без «Периода с»: у АЙЯ два месяца (сентябрь выставлен, октябрь нет) - не угадывается.
     no_period = [*THREE[1][:6], None, None, *THREE[1][8:]]
     result = bill_template.parse(finance_template([no_period]), board())
@@ -344,10 +344,10 @@ def test_uzhe_v_knige() -> None:
     template = bill_template.build([AYA])
     same = bill_template.parse(filled(template, {"N2": 248, "O2": datetime(2026, 9, 21), "Q2": AYA_SEPTEMBER.id}), board())
     [row] = [row for row in same["rows"] if row["status"] != "empty"]
-    assert (row["status"], row["note"], row["values"]) == ("same", "В книге уже № 248 от 21.09.2026", {})
+    assert (row["status"], row["note"], row["values"]) == ("same", "В таблице уже № 248 от 21.09.2026", {})
     other = bill_template.parse(filled(template, {"N2": 300, "O2": datetime(2026, 9, 21), "Q2": AYA_SEPTEMBER.id}), board())
     [row] = [row for row in other["rows"] if row["status"] != "empty"]
-    assert row["status"] == "error" and row["problem"].startswith("В книге уже № 248 от 21.09.2026 - KORT его не перезаписывает")
+    assert row["status"] == "error" and row["problem"].startswith("В таблице уже № 248 от 21.09.2026 - KORT его не перезаписывает")
 
 
 def test_nomer_s_razdelitelem_tysyach_tot_zhe() -> None:
@@ -357,7 +357,7 @@ def test_nomer_s_razdelitelem_tysyach_tot_zhe() -> None:
     other = Board(read_at=datetime(2026, 10, 22, tzinfo=timezone.utc), title="", worksheet="", spreadsheet_id="",
                   bills=[AYA], done=[issued])
     [row] = [row for row in bill_template.parse(data, other)["rows"] if row["status"] != "empty"]
-    assert row["status"] == "same" and row["note"] == "В книге уже № 990\xa0101 от 21.09.2026"
+    assert row["status"] == "same" and row["note"] == "В таблице уже № 990\xa0101 от 21.09.2026"
     # Две записи одного счёта на разных листах: «990 101» текстом и 990101 числом - одно и то же.
     template = bill_template.build([AYA], kind_of=kind)
     book = workbook(fill_sheet(template, "BBCS", {"N2": 990101, "O2": datetime(2026, 10, 22)}))

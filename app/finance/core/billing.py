@@ -36,9 +36,9 @@ from app.finance.models import Workspace
 CODES = ("group", "no_kort", "no_book", "kort_issued")
 CODE_TITLES = {
     "group": "срок другой",
-    "no_kort": "в книге ждут счёт, у KORT начисления нет",
-    "no_book": "KORT ждёт счёт, строки в книге нет",
-    "kort_issued": "счёт выставлен в KORT, книга ещё не знает",
+    "no_kort": "в таблице ждут счёт, у KORT начисления нет",
+    "no_book": "KORT ждёт счёт, строки в таблице нет",
+    "kort_issued": "счёт выставлен в KORT, таблица ещё не знает",
 }
 GROUP_TITLES = {
     bills_module.OVERDUE: "просрочен",

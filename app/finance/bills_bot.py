@@ -501,9 +501,9 @@ def _body(kind: str, p: Plan, parts: list[Section], shown: set[int], note: str) 
             f"на {money(_sum(p.tail))} ₸ - список в KORT"
         )
     if p.undated:
-        extra.append(f"Без даты «Период с» в книге: {_names(p.undated)}")
+        extra.append(f"Без даты «Период с» в таблице: {_names(p.undated)}")
     if p.unknown:
-        extra.append(f"Без вида услуги в книге: {_names(p.unknown)}")
+        extra.append(f"Без вида услуги в таблице: {_names(p.unknown)}")
     if extra:
         lines.append("")
         lines.extend(extra)
@@ -677,7 +677,7 @@ def target_workspace() -> uuid.UUID | None:
     if len(ids) == 1:
         return ids[0]
     if ids:
-        log.error("счета: книг-сводок %s - задайте FINANCE_BILLS_WORKSPACE_ID", len(ids))
+        log.error("счета: сводных таблиц %s - задайте FINANCE_BILLS_WORKSPACE_ID", len(ids))
     return None
 
 
@@ -1031,7 +1031,7 @@ def pull(api: Bot, chat: str, now: datetime | None = None) -> str:
     now = now or _now()
     workspace_id = target_workspace()
     if workspace_id is None:
-        return "Книга-сводка не подключена в KORT."
+        return "Сводная таблица не подключена в KORT."
     recent = "Списки только что обновлены - они выше."
     with _work:
         if time.monotonic() - _pulled.get(workspace_id, -PULL_GAP) < PULL_GAP:
@@ -1039,7 +1039,7 @@ def pull(api: Bot, chat: str, now: datetime | None = None) -> str:
     with finance_session() as session:
         board, _ = bills.current(session, workspace_id, wait=PULL_WAIT, force=True)
     if board is None:
-        return "Книга не прочиталась - попробуйте через минуту."
+        return "Таблица не прочиталась - попробуйте через минуту."
     _ensure(workspace_id)
     with _work:
         if time.monotonic() - _pulled.get(workspace_id, -PULL_GAP) < PULL_GAP:
@@ -1191,7 +1191,7 @@ def _on_button(api: Bot, chat: str, query: dict[str, Any]) -> None:
     if not _same_chat((query.get("message") or {}).get("chat") or {}, chat):
         answer("Кнопка работает только в канале счетов")
         return
-    if not answer("Проверяю книгу…"):
+    if not answer("Проверяю таблицу…"):
         log.info("счета: старое нажатие «Прислать сейчас» - не отрабатываю")
         return
     try:

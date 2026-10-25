@@ -130,6 +130,8 @@ class Bucket:
     month: str
     accrued: Decimal
     parts: list[Part] = field(default_factory=list)
+    #: Срок оплаты - «Период с» начисления (у сальдо и месяца без начисления - нет).
+    due: date | None = None
 
     @property
     def paid(self) -> Decimal:
@@ -138,6 +140,11 @@ class Bucket:
     @property
     def left(self) -> Decimal:
         return self.accrued - self.paid
+
+    @property
+    def starts(self) -> date:
+        """С какого дня начисление - долг: «Период с» или первое число месяца."""
+        return self.due or month_start(self.month)
 
     def out(self) -> dict[str, Any]:
         return {
@@ -175,7 +182,7 @@ class ContractMoney:
         """Долг на день: входящее сальдо и начисления с началом периода до дня, минус оплаты до дня."""
         owed = self.opening or _ZERO
         owed += sum(
-            (bucket.accrued for key, bucket in self.buckets.items() if key != OPENING and month_start(key) <= day),
+            (bucket.accrued for key, bucket in self.buckets.items() if key != OPENING and bucket.starts <= day),
             _ZERO,
         )
         return owed - sum((payment.amount for payment in self.payments if payment.paid_at <= day), _ZERO)
@@ -390,20 +397,12 @@ class Money:
         return out
 
     def _openings(self) -> dict[uuid.UUID, Document]:
+        """Сальдо по начислениям: оплаты гасят его; сальдо по АВР - начало долга по актам (`core/debts.py`)."""
+        from app.finance.core import opening as opening_module
+
         if self.since is None:
             return {}
-        return {
-            doc.contract_id: doc
-            for doc in self.session.scalars(
-                sa.select(Document).where(
-                    Document.workspace_id == self.workspace.id,
-                    Document.kind == "opening",
-                    Document.deleted_at.is_(None),
-                    Document.period == self.since,
-                    Document.contract_id.is_not(None),
-                )
-            )
-        }
+        return opening_module.current(self.session, self.workspace, self.since, "accruals")
 
     # ── Договор ──────────────────────────────────────────────────────────────
 
@@ -412,11 +411,13 @@ class Money:
             return self._cache[contract.id]
         # Оплаты раньше начала учёта - до KORT: их место во входящем сальдо. Кроме
         # оплаты за месяц учёта: «ИЮНЬ 2026», оплаченный в мае, - июньская предоплата.
+        # Оплаты позже `today` - после дня, на который считается («на дату»).
         first_key = month_key(self.since) if self.since is not None else ""
         payments = [
             payment
             for payment in self.by_contract.get(contract.id, [])
-            if self.since is None or payment.paid_at >= self.since or (payment.hint is not None and payment.hint[1] >= first_key)
+            if payment.paid_at <= self.today
+            and (self.since is None or payment.paid_at >= self.since or (payment.hint is not None and payment.hint[1] >= first_key))
         ]
         opening_doc = self.openings.get(contract.id)
         opening = opening_doc.amount if opening_doc is not None else None
@@ -441,7 +442,7 @@ class Money:
             )
             for accrual in schedule.accruals:
                 amount = _ZERO if accrual.skipped else (accrual.amount or _ZERO)
-                bucket = buckets.setdefault(accrual.month, Bucket(accrual.month, _ZERO))
+                bucket = buckets.setdefault(accrual.month, Bucket(accrual.month, _ZERO, due=accrual.period_from))
                 bucket.accrued += amount
             accrues = any(bucket.accrued > 0 for key, bucket in buckets.items() if key != OPENING)
             first = month_key(self.since)

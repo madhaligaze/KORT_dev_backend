@@ -254,7 +254,7 @@ ABON_POST = "\n".join(
         "",
         "<b>ВСЕГО: 1 счёт = 150 000 ₸</b>",
         "",
-        "Без вида услуги в книге: ADK Home",
+        "Без вида услуги в таблице: ADK Home",
     ]
 )
 
@@ -281,7 +281,7 @@ RENT_POST = "\n".join(
         "",
         "<b>ВСЕГО: 2 счёта = 0 ₸</b>",
         "",
-        "Без даты «Период с» в книге: ИП ЖАЛМҰХАН",
+        "Без даты «Период с» в таблице: ИП ЖАЛМҰХАН",
     ]
 )
 
@@ -877,7 +877,7 @@ def test_knopka_cherez_telegram(app: FastAPI, book, monkeypatch) -> None:
     monkeypatch.setattr(bills_bot, "_later", lambda seconds, action: later.append((seconds, action)))
     api = FakeBot()
     bills_bot.handle(api, CHAT, press())
-    assert api.sent("answerCallbackQuery") == [{"callback_query_id": "q1", "text": "Проверяю книгу…"}]
+    assert api.sent("answerCallbackQuery") == [{"callback_query_id": "q1", "text": "Проверяю таблицу…"}]
     *posts, note = api.sent("sendMessage")
     assert [item["text"] for item in posts] == ALL_POSTS
     assert note["text"] == f"Списки обновлены: {COUNTS}."
@@ -1017,7 +1017,7 @@ def test_kartochka_pishet_v_knigu_yurlica(app: FastAPI, book, books) -> None:
     with finance_session() as session:
         entry = session.scalars(sa.select(ActionLog).where(ActionLog.kind == "bill.book")).one()
         title, before, after, actor = entry.title, entry.before, entry.after, entry.actor
-    assert title == "счёт выставлен в книге: ТОО KENESARY AGRO №ЮО/44, ОКТЯБРЬ 2026 - № 312 от 22.10.2026"
+    assert title == "счёт выставлен в таблице: ТОО KENESARY AGRO №ЮО/44, ОКТЯБРЬ 2026 - № 312 от 22.10.2026"
     assert before == {"№ Счета": "", "Дата выстав. Счета": ""} and actor == "owner@bbc.kz"
     assert after["№ Счета"] == "312" and after["вкладка"] == "Октябрь" and after["строка"] == 6
 
@@ -1032,7 +1032,7 @@ def test_kartochka_bez_knigi_otkryvaetsya(app: FastAPI, book, books) -> None:
     connect(owner)
     adk = bill_of(owner, "ADK Home")  # его нет в книгах юрлиц
     card = owner.get(f"{BASE}/bills/{adk['id']}").json()
-    assert card["book"] is None and "не нашёл ни в одной книге" in card["problem"]
+    assert card["book"] is None and "не нашёл ни в одной таблице" in card["problem"]
     assert owner.get(f"{BASE}/bills/000000000000").status_code == 404
     assert owner.get(f"{BASE}/bills/not-an-id").status_code == 404
 

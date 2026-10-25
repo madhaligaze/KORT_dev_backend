@@ -57,7 +57,7 @@ BANKS: tuple[Bank, ...] = (
     Bank("rbk", "Bank RBK", "rbk-kz-bank.png", ("statement", "api"), "обобщённый табличный разбор"),
     Bank("eco", "EcoCenter Bank", "ecoCenterBank.jpeg", ("statement", "api"), "обобщённый табличный разбор"),
     Bank("home", "Home Credit Bank", "HomeCreditBank.png", ("statement", "api"), "обобщённый табличный разбор"),
-    Bank("sheets", "Книга Google Sheets", "", ("sheets",), "тот же разбор, что и файл"),
+    Bank("sheets", "Google Таблица", "", ("sheets",), "тот же разбор, что и файл"),
     Bank("other", "Другой банк или система", "", ("statement", "api"), "обобщённый табличный разбор и OCR"),
 )
 

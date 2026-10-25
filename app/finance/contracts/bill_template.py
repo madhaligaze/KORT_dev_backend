@@ -410,11 +410,11 @@ def _match(
     where = ", ".join(part for part in (own, customer, number) if part)
     if not candidates:
         when = f" с периодом от {period:%d.%m.%Y}" if period else ""
-        return None, f"В книге-сводке нет счёта {where}{when}"
+        return None, f"В сводной таблице нет счёта {where}{when}"
     if len(candidates) > 1:
         if period is None:
-            return None, f"У договора {where} в книге-сводке несколько месяцев - впишите «Период с», KORT не угадывает"
-        return None, f"В книге-сводке несколько строк {where} за этот период - какую брать, KORT не угадывает"
+            return None, f"У договора {where} в сводной таблице несколько месяцев - впишите «Период с», KORT не угадывает"
+        return None, f"В сводной таблице несколько строк {where} за этот период - какую брать, KORT не угадывает"
     return candidates[0], ""
 
 
@@ -467,10 +467,10 @@ def _read_row(
     if bill.group == DONE:
         if _number(bill.bill_no) == _number(bill_no):
             row.status = SAME
-            row.note = f"В книге уже № {bill.bill_no}" + (f" от {bill.bill_date}" if bill.bill_date else "")
+            row.note = f"В таблице уже № {bill.bill_no}" + (f" от {bill.bill_date}" if bill.bill_date else "")
             return row
         row.fail(
-            f"В книге уже № {bill.bill_no}" + (f" от {bill.bill_date}" if bill.bill_date else "")
+            f"В таблице уже № {bill.bill_no}" + (f" от {bill.bill_date}" if bill.bill_date else "")
             + " - KORT его не перезаписывает. Исправить - в карточке счёта"
         )
         return row

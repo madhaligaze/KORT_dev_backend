@@ -373,7 +373,7 @@ class Reconciler:
             add(
                 "billing",
                 {"billing": "month" if monthly else "total"},
-                f"начислять {'в месяц' if monthly else 'всю сумму разово'} - в книге {len(months)} "
+                f"начислять {'в месяц' if monthly else 'всю сумму разово'} - в таблице {len(months)} "
                 + ("месяц" if len(months) == 1 else "месяца" if len(months) < 5 else "месяцев"),
                 months,
             )
@@ -381,7 +381,7 @@ class Reconciler:
         start = schedule.start
         if start is None:
             first = book[months[0]].period_from or month_start(months[0])
-            add("billing_from", {"billing_from": first.isoformat()}, f"начислять с {first:%d.%m.%Y} - как первый месяц в книге", months[:1])
+            add("billing_from", {"billing_from": first.isoformat()}, f"начислять с {first:%d.%m.%Y} - как первый месяц в таблице", months[:1])
             return out
         if contract.billing == "total":
             self._propose_total(schedule, book, add)
@@ -393,7 +393,7 @@ class Reconciler:
                 add(
                     "end",
                     {"end_date": end.isoformat()},
-                    f"договор закончился, а дата окончания не указана: в книге последний - {month_title(last)}, окончание {end:%d.%m.%Y}",
+                    f"договор закончился, а дата окончания не указана: в таблице последний - {month_title(last)}, окончание {end:%d.%m.%Y}",
                     [last],
                 )
             return out
@@ -402,7 +402,7 @@ class Reconciler:
         if started_inside:
             first = book[months[0]].period_from
             if first and first != start and not (contract.billing_from == first):
-                add("billing_from", {"billing_from": first.isoformat()}, f"начислять с {first:%d.%m.%Y} - так первый месяц в книге", months[:1])
+                add("billing_from", {"billing_from": first.isoformat()}, f"начислять с {first:%d.%m.%Y} - так первый месяц в таблице", months[:1])
         self._propose_executor(contract, kort, book, add)
         self._propose_amount(contract, kort, book, add)
         self._propose_gaps(contract, kort, book, months, add)
@@ -421,7 +421,7 @@ class Reconciler:
             add(
                 "period_day",
                 {"period_day": day},
-                f"период с {day}-го числа - так в книге"
+                f"период с {day}-го числа - так в таблице"
                 + (f" (сейчас с {schedule.period_day}-го)" if schedule.period_day else ""),
                 months,
             )
@@ -474,7 +474,7 @@ class Reconciler:
                 add(
                     "executor_from",
                     {"executor": str(target), "from": since.isoformat()},
-                    f"исполнитель с {since:%d.%m.%Y}: {code} - так в книге с {month_from(months[0])}",
+                    f"исполнитель с {since:%d.%m.%Y}: {code} - так в таблице с {month_from(months[0])}",
                     months,
                 )
                 continue
@@ -484,7 +484,7 @@ class Reconciler:
                 add(
                     "executor_before",
                     {"executor": str(target), "until": change.isoformat(), "after": str(after)},
-                    f"до {change - timedelta(days=1):%d.%m.%Y} исполнитель {code} - так в книге за {_months_word(months)}",
+                    f"до {change - timedelta(days=1):%d.%m.%Y} исполнитель {code} - так в таблице за {_months_word(months)}",
                     months,
                 )
 
@@ -505,12 +505,12 @@ class Reconciler:
             for month in months:
                 value = book[month].amount
                 if value in (None, _ZERO):
-                    add("adjust", {"month": month, "skip": True}, f"{month_title(month)}: не начислять - в книге за месяц пусто", [month])
+                    add("adjust", {"month": month, "skip": True}, f"{month_title(month)}: не начислять - в таблице за месяц пусто", [month])
                 else:
                     add(
                         "adjust",
                         {"month": month, "amount": _money(value)},
-                        f"{month_title(month)}: {_amount_text(value)} вместо {_amount_text(kort[month].amount)} - так в книге",
+                        f"{month_title(month)}: {_amount_text(value)} вместо {_amount_text(kort[month].amount)} - так в таблице",
                         [month],
                     )
 
@@ -526,7 +526,7 @@ class Reconciler:
                 add(
                     "amount_from",
                     {"amount": _money(target), "from": since.isoformat()},
-                    f"сумма {_amount_text(target)} с {since:%d.%m.%Y} - так в книге с {month_from(months[0])}"
+                    f"сумма {_amount_text(target)} с {since:%d.%m.%Y} - так в таблице с {month_from(months[0])}"
                     + (f" (сейчас {_amount_text(base)})" if base is not None else ""),
                     months,
                     () if len(months) > 1 else ("from", "month"),
@@ -541,7 +541,7 @@ class Reconciler:
                 add(
                     "amount_before",
                     {"amount": _money(target), "until": change.isoformat(), "after": _money(after)},
-                    f"до {change - timedelta(days=1):%d.%m.%Y} сумма была {_amount_text(target)} - так в книге за {_months_word(months)}",
+                    f"до {change - timedelta(days=1):%d.%m.%Y} сумма была {_amount_text(target)} - так в таблице за {_months_word(months)}",
                     months,
                 )
             else:
@@ -562,7 +562,7 @@ class Reconciler:
             add(
                 "pause",
                 {"from": since.isoformat(), "to": resume.isoformat()},
-                f"в книге нет: {_months_word(run)} - приостановлен с {since:%d.%m.%Y} по {resume - timedelta(days=1):%d.%m.%Y}?",
+                f"в таблице нет: {_months_word(run)} - приостановлен с {since:%d.%m.%Y} по {resume - timedelta(days=1):%d.%m.%Y}?",
                 run,
             )
         tail = [month for month in self.window if month > months[-1] and month in kort]
@@ -572,7 +572,7 @@ class Reconciler:
             add(
                 "stop",
                 {"from": since.isoformat(), "end_date": last_to.isoformat()},
-                f"в книге нет: {_months_word(tail)} - договор закончился {last_to:%d.%m.%Y} или стоит с {since:%d.%m.%Y}?",
+                f"в таблице нет: {_months_word(tail)} - договор закончился {last_to:%d.%m.%Y} или стоит с {since:%d.%m.%Y}?",
                 tail,
                 ("end", "pause"),
             )
@@ -588,12 +588,12 @@ class Reconciler:
             row = book[month]
             if accrual is None or accrual.month != month:
                 start = row.period_from or month_start(month)
-                add("billing_from", {"billing_from": start.isoformat()}, f"начислить в {month_in(month)} ({start:%d.%m.%Y}) - так в книге", [month])
+                add("billing_from", {"billing_from": start.isoformat()}, f"начислить в {month_in(month)} ({start:%d.%m.%Y}) - так в таблице", [month])
             elif row.amount is not None and accrual.adjustment is None and accrual.amount != row.amount:
                 add(
                     "amount_fix",
                     {"amount": _money(row.amount)},
-                    f"сумма договора {_amount_text(row.amount)} - так в книге (сейчас {_amount_text(accrual.amount)})",
+                    f"сумма договора {_amount_text(row.amount)} - так в таблице (сейчас {_amount_text(accrual.amount)})",
                     [month],
                 )
 

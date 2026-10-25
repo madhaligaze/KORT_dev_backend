@@ -43,14 +43,14 @@ from app.finance.onec.service import short_number
 
 #: Порядок источников АВР: первый найденный - правда месяца.
 SOURCES = ("kort", "1c", "book")
-SOURCE_TITLES = {"kort": "KORT", "1c": "1С", "book": "книга"}
+SOURCE_TITLES = {"kort": "KORT", "1c": "1С", "book": "таблица"}
 #: Срок выписки ЭСФ после даты оборота, календарных дней (НК РК).
 ESF_DAYS = 15
 #: Чем АВР 1С и книги расходятся.
 CODES = ("act_no_book", "act_no_1c", "act_amount", "act_signed", "esf")
 CODE_TITLES = {
-    "act_no_book": "в 1С АВР есть, в книге нет",
-    "act_no_1c": "в книге АВР есть, в 1С нет",
+    "act_no_book": "в 1С АВР есть, в таблице нет",
+    "act_no_1c": "в таблице АВР есть, в 1С нет",
     "act_amount": "сумма АВР другая",
     "act_signed": "подписание разное",
     "esf": "ЭСФ в одном источнике",

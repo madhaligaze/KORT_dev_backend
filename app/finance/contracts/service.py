@@ -1856,7 +1856,7 @@ def _set_field(
     if key in LIVE_FIELDS:
         raise FinanceError(f"«{title}» считается по выписке - только чтение")
     if key in SUMMARY_FIELDS:
-        raise FinanceError(f"«{title}» берётся из книги-сводки - только чтение")
+        raise FinanceError(f"«{title}» берётся из сводной таблицы - только чтение")
     if key in DERIVED_FIELDS:
         raise FinanceError(f"«{title}» считается от даты договора - только чтение")
     if key in ("executor", "customer") and fill == "own" and not registry.is_own(

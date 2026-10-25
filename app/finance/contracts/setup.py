@@ -881,7 +881,7 @@ def upsert_view(
             key = slug_for(key, taken)
         book = str(data.get("book") or "")
         if book not in BOOKS:
-            raise FinanceError("Такой книги листов нет")
+            raise FinanceError("Такого раздела листов нет")
         view = EntityView(
             workspace_id=workspace.id,
             entity=ENTITY,

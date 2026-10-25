@@ -335,10 +335,10 @@ def _discover_book(api: Api, spreadsheet_id: str, summary_of_book: str) -> Book:
     titles = [name.replace("''", "'") for name in dict.fromkeys(MONTH_TABS.findall(formula))]
     meta = api.meta(spreadsheet_id)
     if not titles:
-        raise BookError(f"Книга «{meta['title']}»: вкладка «{summary_of_book}» собрана не так, как KORT умеет читать")
+        raise BookError(f"Таблица «{meta['title']}»: вкладка «{summary_of_book}» собрана не так, как KORT умеет читать")
     missing = [title for title in titles if title not in meta["tabs"]]
     if missing:
-        raise BookError(f"Книга «{meta['title']}»: нет вкладок {', '.join(missing)}, хотя формула их собирает")
+        raise BookError(f"Таблица «{meta['title']}»: нет вкладок {', '.join(missing)}, хотя формула их собирает")
     headers = api.values(spreadsheet_id, [f"{quote(title)}!A{HEADER_ROW}:{LAST_COL}{HEADER_ROW}" for title in titles])
     tabs = []
     for title, rows in zip(titles, headers):
@@ -439,7 +439,7 @@ def _book_of(api: Api, summary: tuple[str, str], key: str, *, fresh: bool = Fals
     asked = time.monotonic()
     sources = _sources_of(api, summary, fresh=fresh)
     if key in sources.missing and not fresh:
-        raise BookError("Строку счёта не нашёл ни в одной книге юрлица - её могли переименовать или удалить", status=404)
+        raise BookError("Строку счёта не нашёл ни в одной таблице юрлица - её могли переименовать или удалить", status=404)
     if fresh or key not in sources.index or time.monotonic() - sources.index_at >= SOURCES_TTL:
         _build_index(api, sources, asked=asked)
     books = {number for number, _, _ in sources.index.get(key, [])}
@@ -447,13 +447,13 @@ def _book_of(api: Api, summary: tuple[str, str], key: str, *, fresh: bool = Fals
         return sources.books[books.pop()]
     if len(books) > 1:
         names = ", ".join(f"«{sources.books[number].title}»" for number in sorted(books))
-        raise BookError(f"Этот счёт есть сразу в нескольких книгах ({names}) - какую править, KORT не угадывает")
+        raise BookError(f"Этот счёт есть сразу в нескольких таблицах ({names}) - какую править, KORT не угадывает")
     if not fresh:
         return _book_of(api, summary, key, fresh=True)
     # Не нашлась и после полного чтения: до следующего чтения книг - сразу
     # отказ, а не девять книг заново на каждое открытие карточки.
     sources.missing.add(key)
-    raise BookError("Строку счёта не нашёл ни в одной книге юрлица - её могли переименовать или удалить", status=404)
+    raise BookError("Строку счёта не нашёл ни в одной таблице юрлица - её могли переименовать или удалить", status=404)
 
 
 # ── Строка ───────────────────────────────────────────────────────────────────
@@ -480,10 +480,10 @@ def locate(api: Api, summary: tuple[str, str], key: str, *, fresh: bool = False)
     if not found:
         if not fresh:
             return locate(api, summary, key, fresh=True)
-        raise BookError(f"В книге «{book.title}» строки этого счёта уже нет - её переименовали или удалили", status=409)
+        raise BookError(f"В таблице «{book.title}» строки этого счёта уже нет - её переименовали или удалили", status=409)
     if len(found) > 1:
         where = ", ".join(f"«{tab}» строка {row}" for tab, row in found)
-        raise BookError(f"В книге «{book.title}» этот счёт стоит несколько раз ({where}) - какую править, KORT не угадывает")
+        raise BookError(f"В таблице «{book.title}» этот счёт стоит несколько раз ({where}) - какую править, KORT не угадывает")
     title, row = found[0]
     tab = next(item for item in book.tabs if item.title == title)
     return Place(book=book, tab=tab, row=row)
@@ -528,13 +528,13 @@ def _check_place(place: Place, snap: Snapshot, key: str) -> None:
         raise BookError(problem)
     if columns != place.tab.columns:
         raise BookError(
-            f"В книге «{place.book.title}» на вкладке «{place.tab.title}» переставили колонки - откройте карточку заново",
+            f"В таблице «{place.book.title}» на вкладке «{place.tab.title}» переставили колонки - откройте карточку заново",
             status=409,
         )
     own, customer, number, month = (snap.shown(place.tab.columns[name]) for name in KEY_FIELDS)
     if bill_key(own, customer, number, month) != key:
         raise BookError(
-            f"Строка {place.row} на вкладке «{place.tab.title}» сейчас другая - книгу правят, откройте карточку заново",
+            f"Строка {place.row} на вкладке «{place.tab.title}» сейчас другая - таблицу правят, откройте карточку заново",
             status=409,
         )
 
@@ -548,7 +548,7 @@ def _blocked(place: Place, snap: Snapshot, name: str) -> str:
         cell = line[index] if index < len(line) else {}
         entered = cell.get("userEnteredValue") or {}
         if "formulaValue" in entered or (not entered and cell.get("effectiveValue")):
-            return f"Над колонкой «{TITLES[name]}» стоит формула - её значения считает книга"
+            return f"Над колонкой «{TITLES[name]}» стоит формула - её значения считает таблица"
     cell = snap.cell(index)
     entered = cell.get("userEnteredValue") or {}
     if "formulaValue" in entered:
@@ -764,7 +764,7 @@ def save(
                 if _holds(before.cell(place.tab.columns[name]), wanted[name]):
                     continue
                 raise BookError(
-                    f"«{TITLES[name]}» в книге за это время поменяли: было «{expect[name] or ''}», "
+                    f"«{TITLES[name]}» в таблице за это время поменяли: было «{expect[name] or ''}», "
                     f"стало «{shown[name]}». Откройте карточку заново",
                     status=409,
                 )
@@ -815,7 +815,7 @@ def save(
             # Запрос мог дойти, а ответ - потеряться: записано или нет, видно
             # только по книге. Карточка, открытая заново, покажет.
             raise BookError(
-                f"Google не подтвердил запись ({exc}). Откройте карточку заново: если значения уже в книге, запись прошла",
+                f"Google не подтвердил запись ({exc}). Откройте карточку заново: если значения уже в таблице, запись прошла",
                 status=424,
                 place=place,
                 changed=changed,
@@ -824,7 +824,7 @@ def save(
             after = _snapshot(api, place)
         except BookError as exc:
             raise BookError(
-                f"В книгу записано, но перечитать строку не удалось ({exc}). Откройте карточку заново и проверьте",
+                f"В таблицу записано, но перечитать строку не удалось ({exc}). Откройте карточку заново и проверьте",
                 status=424,
                 place=place,
                 changed=changed,
@@ -838,7 +838,7 @@ def save(
             log.error("счета: запись в %s «%s» строка %s - строка сдвинулась: %s",
                       place.book.title, place.tab.title, place.row, exc)
             raise BookError(
-                f"Пока KORT писал, строки на вкладке «{place.tab.title}» книги «{place.book.title}» сдвинули. "
+                f"Пока KORT писал, строки на вкладке «{place.tab.title}» таблицы «{place.book.title}» сдвинули. "
                 f"Проверьте строку {place.row}: в «{', '.join(TITLES[name] for name in changed)}» могло лечь значение "
                 f"этого счёта. Строка счёта: {place.url}",
                 status=409,
@@ -861,7 +861,7 @@ def save(
                 log.error("счета: запись в %s «%s» строка %s - %s, и вернуть не удалось: %s",
                           place.book.title, place.tab.title, place.row, what, exc)
                 raise BookError(
-                    f"Запись пошла не так ({what}), и вернуть книгу KORT не смог: {exc}. "
+                    f"Запись пошла не так ({what}), и вернуть таблицу KORT не смог: {exc}. "
                     f"Проверьте строку {place.row} на вкладке «{place.tab.title}»: {place.url}",
                     status=424,
                     place=place,
@@ -869,7 +869,7 @@ def save(
                 ) from exc
             log.error("счета: запись в %s «%s» строка %s отменена - %s", place.book.title, place.tab.title, place.row, what)
             raise BookError(
-                f"Запись отменена: {what}. Книга возвращена как была", status=424, place=place, changed=changed
+                f"Запись отменена: {what}. Таблица возвращена как была", status=424, place=place, changed=changed
             )
 
         result = fields_of(place, after)
@@ -877,9 +877,9 @@ def save(
         warning = ""
         issued = norm(state) in ("true", "истина")
         if result["bill_no"] and not issued:
-            warning = f"«№ Счета» записан, но «Счет» в книге не стал TRUE (сейчас «{state}») - проверьте формулу книги"
+            warning = f"«№ Счета» записан, но «Счет» в таблице не стал TRUE (сейчас «{state}») - проверьте формулу таблицы"
         elif not result["bill_no"] and issued:
-            warning = "«№ Счета» стёрт, но «Счет» в книге всё ещё TRUE - проверьте формулу книги"
+            warning = "«№ Счета» стёрт, но «Счет» в таблице всё ещё TRUE - проверьте формулу таблицы"
         return Saved(place, shown, result, state, changed, warning)
 
 
@@ -912,9 +912,9 @@ def warm(api: Api, summary: tuple[str, str]) -> None:
         try:
             _build_index(api, _sources_of(api, summary))
         except BookError as exc:
-            log.warning("счета: книги юрлиц не прочитались заранее (%s)", exc)
+            log.warning("счета: таблицы юрлиц не прочитались заранее (%s)", exc)
         except Exception:  # noqa: BLE001 - прогрев не роняет раздел
-            log.exception("счета: книги юрлиц не прочитались заранее")
+            log.exception("счета: таблицы юрлиц не прочитались заранее")
         finally:
             with _sources_guard:
                 _warming.discard(summary)

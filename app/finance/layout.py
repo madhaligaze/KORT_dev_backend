@@ -248,7 +248,7 @@ def _pick(column: Column, found: list[int], how: str) -> int:
     if how == "loose":
         raise LayoutError(
             f"«{column.title}»: точного заголовка нет, а похожих сразу несколько "
-            f"(позиции {', '.join(map(str, found))}). Уточните название в книге "
+            f"(позиции {', '.join(map(str, found))}). Уточните название в таблице "
             "или добавьте его в `names` этой колонки."
         )
     if column.hint is not None:
