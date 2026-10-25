@@ -305,6 +305,48 @@ def test_nam_dolzhny_my_dolzhny_i_mezhdu_svoimi(space, audit):
         assert inside.rows("client")[0]["contracts"][0]["party"] == "BBC"
 
 
+# ── Выручка по договорам ─────────────────────────────────────────────────────
+
+
+def test_vyruchka_po_mesyacam_dolyam_i_mezhdu_svoimi(space, audit):
+    from app.finance.core import revenue as core_revenue
+
+    with finance_session() as session:
+        workspace = finance_service.get_workspace(session, space)
+        yuo = setup.upsert_department(session, workspace, {"code": "ЮО"})
+        hr = setup.upsert_department(session, workspace, {"code": "HR"})
+        setup.add_entity(session, workspace, name="BBCA", code="BBCA")
+        alfa = _contract(session, workspace, "ТОО Альфаком", "№ОКР/59", department="ЮО, HR")
+        shares.set_departments(
+            session, workspace, FULL, OWNER, alfa.id, "percent",
+            [{"department_id": str(hr.id), "value": "70"}, {"department_id": str(yuo.id), "value": "30"}],
+        )
+        service.create(
+            session, workspace, FULL, OWNER,
+            {"executor": "BBCA", "customer": "BBC", "number": "FIN/72", "amount": "30000", "billing": "month",
+             "signed_at": "2026-10-01"},
+        )
+        account = _account(session, workspace)
+        core_settings.set_payments(session, workspace, FULL, OWNER, since=SINCE)
+        _income(session, workspace, account, "ТОО Альфаком", "100000", date(2026, 6, 5), month="2026-06")
+        _income(session, workspace, account, "ТОО Альфаком", "50000", date(2026, 8, 3))
+
+        revenue = core_revenue.Revenue(session, workspace, FULL, year=2026, today=TODAY)
+        out = revenue.out("entity")
+        assert [row["title"] for row in out["rows"]] == ["BBC"], "договор между своими - не продажа клиенту"
+        bbc = out["rows"][0]
+        assert bbc["months"]["2026-06"] == {"accrued": "100000.00", "acts": "0.00", "paid": "100000.00", "received": "100000.00"}
+        assert bbc["months"]["2026-07"]["paid"] == "50000.00" and bbc["months"]["2026-08"]["received"] == "50000.00", (
+            "оплата без месяца - июлю (старейший долг), а поступила в августе"
+        )
+        assert bbc["months"]["2026-03"]["paid"] is None, "до начала учёта оплат KORT их не знает - пусто, а не ноль"
+        assert bbc["total"]["accrued"] == "700000.00" and out["forecast_from"] == "2026-11", "ноябрь и декабрь - прогноз"
+        departments = {row["title"]: row["months"]["2026-06"]["accrued"] for row in revenue.rows("department")}
+        assert departments == {"HR": "70000.00", "ЮО": "30000.00"}
+        inside = core_revenue.Revenue(session, workspace, FULL, year=2026, today=TODAY, side="intra").out("entity")
+        assert [(row["title"], row["months"]["2026-10"]["accrued"]) for row in inside["rows"]] == [("BBCA", "30000.00")]
+
+
 # ── Сверка с «Сальдо Конец» книги ────────────────────────────────────────────
 
 

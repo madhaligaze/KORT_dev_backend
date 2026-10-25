@@ -174,6 +174,93 @@ def acts_debt(
     return debt, dict(aging), max(credit, _ZERO), paid
 
 
+def fractions(
+    session: Session, workspace: Workspace, access: Access, contracts: dict[uuid.UUID, Contract], kind: str
+) -> dict[uuid.UUID, list[tuple[str, Decimal]]]:
+    """Договор → [(отдел или человек, часть)] с тем, что этому человеку открыто.
+
+    Части в сумме - целое: остаток после долей - `REST` («не распределено»),
+    закрытое человеку - `CLOSED`, без отдела (человека) - `NOBODY`. Ими же
+    делятся долг (`Debts`) и выручка (`core/revenue.py`).
+    """
+    model = ContractDepartment if kind == "department" else ContractPerson
+    owner_of = (lambda row: row.department_id) if kind == "department" else (lambda row: row.employee_id)
+    rows: dict[uuid.UUID, list[Any]] = defaultdict(list)
+    ids = list(contracts)
+    for start in range(0, len(ids), 500):
+        for row in session.scalars(sa.select(model).where(model.contract_id.in_(ids[start : start + 500])).order_by(model.position)):
+            rows[row.contract_id].append(row)
+    registry: Registry | None = None
+    people: dict[uuid.UUID, list[uuid.UUID]] = {}
+    co: dict[uuid.UUID, list[uuid.UUID]] = {}
+    if kind == "person" and not access.admin:
+        registry = Registry(session, workspace)
+        people = people_of(session, ids)
+        co = shares_module.co_departments(session, ids)
+    out: dict[uuid.UUID, list[tuple[str, Decimal]]] = {}
+    for contract_id, contract in contracts.items():
+        found = rows.get(contract_id, [])
+        if not found:
+            out[contract_id] = [(NOBODY, _ONE)]
+            continue
+        alone = found[0] if len(found) == 1 else None
+        if alone is not None and ((alone.share_percent is None and alone.share_amount is None) or alone.share_percent == _HUNDRED):
+            # Один без доли (или со всей) - договор его целиком, доли тут не видно.
+            out[contract_id] = [(str(owner_of(alone)), _ONE)]
+            continue
+        if kind == "department":
+            scope = "all" if shares_module.departments_open(access, contract) else "none"
+        elif access.admin:
+            scope = "all"
+        else:
+            scope = shares_module.people_scope(access, contract, registry, people.get(contract_id, []), co.get(contract_id, []))
+        parts: list[tuple[str, Decimal]] = []
+        given = _ZERO
+        for row in found:
+            if scope == "own" and owner_of(row) != access.employee_id:
+                continue
+            if row.share_percent is not None:
+                fraction = row.share_percent / _HUNDRED
+            elif row.share_amount is not None and contract.amount:
+                fraction = row.share_amount / contract.amount
+            else:
+                continue
+            parts.append((str(owner_of(row)), fraction))
+            given += fraction
+        if scope == "none" or (scope == "own" and not parts):
+            out[contract_id] = [(CLOSED, _ONE)]
+            continue
+        if given < _ONE:
+            parts.append((REST if scope == "all" else CLOSED, _ONE - given))
+        out[contract_id] = parts
+    return out
+
+
+def group_titles(
+    session: Session, workspace: Workspace, group: str, names: dict[uuid.UUID, str], codes: dict[uuid.UUID, str]
+) -> dict[str, str]:
+    """Ключ группы → подпись: отдел - кодом, человек - именем, сторона - кодом нашего юрлица или именем."""
+    if group == "department":
+        return {
+            str(row.id): row.code or row.title
+            for row in session.scalars(sa.select(Department).where(Department.workspace_id == workspace.id))
+        }
+    if group == "person":
+        return {str(row.id): row.full_name for row in session.scalars(sa.select(Employee).where(Employee.workspace_id == workspace.id))}
+    # Наше юрлицо - кодом и там, где оно вторая сторона (между своими).
+    return {str(key): codes.get(key) or name for key, name in names.items()}
+
+
+def entity_codes(session: Session, workspace: Workspace) -> dict[uuid.UUID, str]:
+    return {
+        entity_id: code
+        for entity_id, code in session.execute(
+            sa.select(GroupEntity.counterparty_id, GroupEntity.code).where(GroupEntity.workspace_id == workspace.id)
+        )
+        if code
+    }
+
+
 def _chosen(acts: Acts, contract_id: uuid.UUID) -> list[Act]:
     return [slot.chosen for slot in acts.months.get(contract_id, {}).values() if slot.chosen is not None]
 
@@ -232,13 +319,7 @@ class Debts:
         self.names = dict(
             session.execute(sa.select(Counterparty.id, Counterparty.name).where(Counterparty.workspace_id == workspace.id)).all()
         )
-        self.codes = {
-            entity_id: code
-            for entity_id, code in session.execute(
-                sa.select(GroupEntity.counterparty_id, GroupEntity.code).where(GroupEntity.workspace_id == workspace.id)
-            )
-            if code
-        }
+        self.codes = entity_codes(session, workspace)
         ledger = Ledger(session, workspace.id, visible)
         #: Все стороны: договор → долг; `items` - только выбранной стороны.
         self.every: dict[str, dict[uuid.UUID, ContractDebt]] = {key: {} for key in SIDES}
@@ -273,79 +354,12 @@ class Debts:
     # ── Доли ─────────────────────────────────────────────────────────────────
 
     def _fractions(self, kind: str) -> dict[uuid.UUID, list[tuple[str, Decimal]]]:
-        """Договор → [(отдел или человек, часть)] с тем, что этому человеку открыто."""
-        model = ContractDepartment if kind == "department" else ContractPerson
-        owner_of = (lambda row: row.department_id) if kind == "department" else (lambda row: row.employee_id)
-        rows: dict[uuid.UUID, list[Any]] = defaultdict(list)
-        ids = list(self.items)
-        for start in range(0, len(ids), 500):
-            for row in self.session.scalars(
-                sa.select(model).where(model.contract_id.in_(ids[start : start + 500])).order_by(model.position)
-            ):
-                rows[row.contract_id].append(row)
-        registry: Registry | None = None
-        people: dict[uuid.UUID, list[uuid.UUID]] = {}
-        co: dict[uuid.UUID, list[uuid.UUID]] = {}
-        if kind == "person" and not self.access.admin:
-            registry = Registry(self.session, self.workspace)
-            people = people_of(self.session, ids)
-            co = shares_module.co_departments(self.session, ids)
-        out: dict[uuid.UUID, list[tuple[str, Decimal]]] = {}
-        for contract_id, item in self.items.items():
-            contract = item.contract
-            found = rows.get(contract_id, [])
-            if not found:
-                out[contract_id] = [(NOBODY, _ONE)]
-                continue
-            alone = found[0] if len(found) == 1 else None
-            if alone is not None and (
-                (alone.share_percent is None and alone.share_amount is None) or alone.share_percent == _HUNDRED
-            ):
-                # Один без доли (или со всей) - договор его целиком, доли тут не видно.
-                out[contract_id] = [(str(owner_of(alone)), _ONE)]
-                continue
-            if kind == "department":
-                scope = "all" if shares_module.departments_open(self.access, contract) else "none"
-            elif self.access.admin:
-                scope = "all"
-            else:
-                scope = shares_module.people_scope(self.access, contract, registry, people.get(contract_id, []), co.get(contract_id, []))
-            parts: list[tuple[str, Decimal]] = []
-            given = _ZERO
-            for row in found:
-                if scope == "own" and owner_of(row) != self.access.employee_id:
-                    continue
-                if row.share_percent is not None:
-                    fraction = row.share_percent / _HUNDRED
-                elif row.share_amount is not None and contract.amount:
-                    fraction = row.share_amount / contract.amount
-                else:
-                    continue
-                parts.append((str(owner_of(row)), fraction))
-                given += fraction
-            if scope == "none" or (scope == "own" and not parts):
-                out[contract_id] = [(CLOSED, _ONE)]
-                continue
-            if given < _ONE:
-                parts.append((REST if scope == "all" else CLOSED, _ONE - given))
-            out[contract_id] = parts
-        return out
+        return fractions(self.session, self.workspace, self.access, {cid: item.contract for cid, item in self.items.items()}, kind)
 
     # ── Выдача ───────────────────────────────────────────────────────────────
 
     def _titles(self, group: str) -> dict[str, str]:
-        if group == "department":
-            return {
-                str(row.id): row.code or row.title
-                for row in self.session.scalars(sa.select(Department).where(Department.workspace_id == self.workspace.id))
-            }
-        if group == "person":
-            return {
-                str(row.id): row.full_name
-                for row in self.session.scalars(sa.select(Employee).where(Employee.workspace_id == self.workspace.id))
-            }
-        # Наше юрлицо - кодом и там, где оно вторая сторона (между своими).
-        return {str(key): self.codes.get(key) or name for key, name in self.names.items()}
+        return group_titles(self.session, self.workspace, group, self.names, self.codes)
 
     def _parties(self, contract: Contract) -> tuple[uuid.UUID | None, uuid.UUID | None]:
         """(вторая сторона, наше юрлицо): у покупки вторая сторона - исполнитель."""
@@ -440,7 +454,9 @@ class Debts:
             "owed": _money(sum(aging.values(), _ZERO)),
             "advance": _money(sum((item.advance for item in self.items.values()), _ZERO)),
             "aging": {key: _money(value) for key, value in aging.items() if value},
-            "contracts": len(self.items),
+            # Договоры, по которым должны, - одно число с «Сегодня»; только с авансом - отдельно.
+            "contracts": sum(1 for item in self.items.values() if item.owed > 0),
+            "advance_contracts": sum(1 for item in self.items.values() if item.advance > 0 and not item.owed),
             "unknown": self.unknown,
         }
 
@@ -450,7 +466,7 @@ class Debts:
             key: {
                 "owed": _money(sum((item.owed for item in items.values()), _ZERO)),
                 "advance": _money(sum((item.advance for item in items.values()), _ZERO)),
-                "contracts": len(items),
+                "contracts": sum(1 for item in items.values() if item.owed > 0),
                 "unknown": self.unknowns[key],
             }
             for key, items in self.every.items()

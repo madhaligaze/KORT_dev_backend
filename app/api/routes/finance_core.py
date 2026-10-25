@@ -425,7 +425,7 @@ def vat_year(year: int = Query(ge=2000, le=2100), member: Member = Depends(viewe
 
     def action(session, workspace, access):
         turnover = _turnover(session, workspace, access, year)
-        return vat.year_out(turnover, turnover.run(acts=_acts(session, workspace, access)))
+        return vat.year_out(turnover, turnover.run(acts=_acts(session, workspace, access)), vat.vat_hints(session, workspace, year))
 
     return _run(member, action)
 
@@ -478,6 +478,10 @@ def vat_preview(body: MovesIn, member: Member = Depends(viewer)) -> dict[str, An
                     "name": after[entity_id].name,
                     "before": format(before[entity_id].forecast, "f"),
                     "after": format(after[entity_id].forecast, "f"),
+                    # Плательщику порог не нужен - ему важен НДС до и после перевода.
+                    "status": after[entity_id].status,
+                    "vat_before": format(before[entity_id].vat, "f"),
+                    "vat_after": format(after[entity_id].vat, "f"),
                     "crossing_before": before[entity_id].crossing(threshold),
                     "crossing_after": after[entity_id].crossing(threshold),
                 }
@@ -791,6 +795,109 @@ def debts_view(
         return out
 
     return _run(member, action)
+
+
+@router.get("/revenue")
+def revenue_view(
+    year: int = Query(ge=2000, le=2100),
+    group: str = Query(default="entity", pattern="^(entity|client|department|person)$"),
+    side: str = Query(default="receivable", pattern="^(receivable|intra)$"),
+    member: Member = Depends(require_access(("reports.profit", "reports.cash"))),
+) -> dict[str, Any]:
+    """Выручка по договорам по месяцам года: начислено, АВР, оплачено за месяц, поступило - по группам."""
+    from app.finance.core import revenue as revenue_module
+
+    def action(session, workspace, access):
+        _debts_access(access)
+        # АВР таблицы - часть «АВР» у юрлиц без 1С: без неё колонка была бы меньше молча.
+        book, error = book_module.current(session, workspace.id, wait=book_module.FIRST_READ_WAIT)
+        out = revenue_module.Revenue(
+            session, workspace, access, year=year, today=contracts_service.today(), book=book, side=side
+        ).out(group)
+        out["book"] = _book_out(book) if book is not None else None
+        out["error"] = "" if book is not None else f"{error or 'Сводная таблица компании не подключена'} - АВР только KORT и 1С"
+        return out
+
+    return _run(member, action)
+
+
+# ── Виды: пустые разделы ─────────────────────────────────────────────────────
+
+
+@router.get("/usage")
+def sections_usage(
+    member: Member = Depends(require_access(("contracts", "journal", "table", "reports.cash", "reports.profit", "reports.debts"))),
+) -> dict[str, Any]:
+    """Разделы колонки, где у компании нет ни одной строки: они уходят в «Ещё» и остаются в поиске."""
+    from app.finance.core import usage
+
+    def action(session, workspace, _access):
+        return {"empty": usage.empty_sections(session, workspace)}
+
+    _guard()
+    with finance_session() as session:
+        return action(session, _workspace(session, member), None)
+
+
+# ── «Найти или сделать» ──────────────────────────────────────────────────────
+
+
+@router.get("/search/contracts")
+def search_contracts(q: str = Query(default="", max_length=200), member: Member = Depends(viewer)) -> dict[str, Any]:
+    """Договоры, открытые человеку, по номеру (как его ни пиши) и клиенту - для окна Ctrl+K."""
+    from app.finance.core import search
+
+    return _run(member, lambda s, w, a: {"items": search.contracts(s, w, a, q)})
+
+
+# ── «Сегодня» ────────────────────────────────────────────────────────────────
+
+
+def _today_card(member: Member, card: str, check=None) -> dict[str, Any]:
+    from app.finance.core import today as today_module
+
+    def action(session, workspace, access):
+        if check is not None:
+            check(access)
+        return today_module.BUILDERS[card](session, workspace, access, today=contracts_service.today())
+
+    return _run(member, action)
+
+
+@router.get("/today/debts")
+def today_debts(member: Member = Depends(require_access("reports.debts"))) -> dict[str, Any]:
+    """«Сегодня»: нам должны - неоплаченное, старше 90 дней, крупные должники."""
+    return _today_card(member, "debts", _debts_access)
+
+
+@router.get("/today/payments")
+def today_payments(member: Member = Depends(viewer)) -> dict[str, Any]:
+    """«Сегодня»: поступления без договора."""
+    return _today_card(member, "payments", _setup_only)
+
+
+@router.get("/today/acts")
+def today_acts(member: Member = Depends(viewer)) -> dict[str, Any]:
+    """«Сегодня»: АВР не подписаны, ЭСФ не выписаны, месяц без АВР."""
+    return _today_card(member, "acts", _setup_only)
+
+
+@router.get("/today/vat")
+def today_vat(member: Member = Depends(require_access("reports.summary"))) -> dict[str, Any]:
+    """«Сегодня»: режим НДС не записан, порог пройден или скоро."""
+    return _today_card(member, "vat")
+
+
+@router.get("/today/shadow")
+def today_shadow(member: Member = Depends(viewer)) -> dict[str, Any]:
+    """«Сегодня»: сверка начислений с таблицей - предложения и договоры, которых нет в реестре."""
+    return _today_card(member, "shadow", _setup_only)
+
+
+@router.get("/today/participants")
+def today_participants(member: Member = Depends(viewer)) -> dict[str, Any]:
+    """«Сегодня»: двойники и БИН к подтверждению."""
+    return _today_card(member, "participants")
 
 
 @router.get("/debts/shadow")

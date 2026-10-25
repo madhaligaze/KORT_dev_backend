@@ -97,6 +97,46 @@ def test_oborot_k_porogu_i_nds_s_daty_postanovki(space):
         assert out["year"]["threshold"] == "43250000" and out["entities"][0]["code"] == "BBC"
 
 
+def test_platelshchik_ne_idet_k_porogu_i_dovod_iz_naznacheniy(space):
+    """25.10.2026, владелец: часть ТОО группы уже на НДС - для них гонки к порогу нет."""
+    with finance_session() as session:
+        workspace = finance_service.get_workspace(session, space)
+        setup.add_entity(session, workspace, name="BBC HR", code="BBC HR")
+        setup.add_entity(session, workspace, name="BBC Omar", code="BBC Omar")
+        bbc, legal, hr, omar = (_entity(session, code) for code in ("BBC", "BBCL", "BBC HR", "BBC Omar"))
+        _contract(session, workspace, "ТОО Альфаком", "5800000")
+        _contract(session, workspace, "ТОО Бетаком", "1000000", executor={"id": str(legal)})
+        tax.add_period(session, workspace, FULL, OWNER, bbc, {"valid_from": "2025-01-01", "regime": "general", "vat_payer": True})
+        tax.add_period(session, workspace, FULL, OWNER, legal, {"valid_from": "2026-07-01", "regime": "general", "vat_payer": True})
+        tax.add_period(session, workspace, FULL, OWNER, hr, {"valid_from": "2026-01-01", "regime": "simplified", "vat_payer": False})
+        turnover = vat.Turnover(session, workspace, FULL, 2026, today=TODAY)
+        years = turnover.run()
+        threshold = turnover.tax_year.threshold
+        assert (years[bbc].status, years[bbc].payer_from) == ("payer", date(2025, 1, 1))
+        assert years[bbc].crossing(threshold) is None, "плательщику порог не нужен, хоть оборот и выше"
+        assert years[bbc].vat_fact == Decimal("800000") * 10, "НДС с начала года: 16/116 от 5 800 000 за десять месяцев"
+        assert (years[legal].status, years[legal].payer_from) == ("becomes", date(2026, 7, 1))
+        assert years[hr].status == "racing" and years[omar].status == "unknown"
+
+        account = finance_service.create_account(session, workspace, name='Kaspi Юр. ТОО "BBC"', group_entity_id=bbc)
+        for day, text in (
+            (date(2026, 6, 3), "Счет на оплату № 273 от 3 июня 2026 г (в том числе НДС = 20 689,66 KZT)"),
+            (date(2026, 5, 20), "за услуги по счету 150 в т.ч. НДС(16%) 13793-10 тенге"),
+            (date(2026, 7, 1), "Оплата за услуги, без НДС"),
+            (date(2026, 7, 2), "Оплата по договору"),
+        ):
+            finance_service.create_operation(
+                session, workspace,
+                finance_service.OperationInput(kind="income", paid_at=day, amount=Decimal("100"), account_to_id=account.id, comment=text),
+            )
+        hints = vat.vat_hints(session, workspace, 2026)
+        assert hints[bbc] | {"sample": ""} == {"total": 4, "with": 2, "without": 1, "first": "2026-05-20", "sample": ""}
+        out = vat.year_out(turnover, years, hints)
+        rows = {row["code"]: row for row in out["entities"]}
+        assert rows["BBC"]["status"] == "payer" and rows["BBC"]["remaining"] is None and rows["BBC"]["hint"]["with"] == 2
+        assert Decimal(rows["BBCL"]["remaining"]) == threshold - Decimal("6000000"), "до порога - оборот до даты постановки"
+
+
 def test_perevod_klientov_predprosmotr_zapis_i_vozvrat(space):
     token = history.CONTEXT.set(history.AuditContext(user_id=OWNER.user_id))
     try:
