@@ -85,6 +85,20 @@ class SummaryError(Exception):
     """Сводку нельзя прочитать - с текстом для человека."""
 
 
+class SummaryLayoutError(SummaryError):
+    """Таблица читается, но нужные колонки названы по-своему: их называют в
+    «Колонках для ядра» (словарь колонок компании), и таблица читается дальше."""
+
+
+def columns_for(extra: dict[str, list[str]] | None) -> tuple[Column, ...]:
+    """Колонки сводки со своими названиями компании - тот же словарь, что у ядра и «Счетов»."""
+    if not extra:
+        return COLUMNS
+    from app.finance.core.book import with_company_names
+
+    return with_company_names(COLUMNS, extra)
+
+
 @dataclass(frozen=True)
 class Row:
     customer: str
@@ -186,14 +200,16 @@ def read_money(text: Any) -> Decimal:
     return -value if negative else value
 
 
-def build_index(values: Sequence[Sequence[Any]], *, title: str, worksheet: str) -> Index:
+def build_index(
+    values: Sequence[Sequence[Any]], *, title: str, worksheet: str, columns: Sequence[Column] = COLUMNS
+) -> Index:
     """Разобрать значения листа сводки. Шапка - первая строка."""
     if not values:
         raise SummaryError(f"Лист «{worksheet}» пуст")
     try:
-        layout = resolve_layout(worksheet, COLUMNS, [str(cell) for cell in values[0]])
+        layout = resolve_layout(worksheet, columns, [str(cell) for cell in values[0]])
     except LayoutError as exc:
-        raise SummaryError(str(exc)) from exc
+        raise SummaryLayoutError(str(exc)) from exc
     by_number: dict[str, list[Row]] = {}
     digest = hashlib.sha1()
     count = 0
@@ -232,11 +248,13 @@ def build_index(values: Sequence[Sequence[Any]], *, title: str, worksheet: str) 
 
 @dataclass
 class _Slot:
-    source: tuple[str, str]
+    #: Таблица, лист и подпись словаря колонок компании: новое название колонки - перечитать.
+    source: tuple[str, ...]
     index: Index | None = None
     error: str = ""
     at: float = 0.0
     reading: threading.Event | None = None
+    extra: dict[str, list[str]] = field(default_factory=dict)
 
 
 _slots: dict[uuid.UUID, _Slot] = {}
@@ -247,7 +265,7 @@ def source_of(session: Session, workspace_id: uuid.UUID) -> SummarySource | None
     return session.get(SummarySource, workspace_id)
 
 
-def _read(spreadsheet_id: str, worksheet: str) -> Index:
+def _read(spreadsheet_id: str, worksheet: str, extra: dict[str, list[str]] | None = None) -> Index:
     if not google.is_configured():
         raise SummaryError("Не заданы креды Google - сводку прочитать нечем")
     try:
@@ -255,12 +273,26 @@ def _read(spreadsheet_id: str, worksheet: str) -> Index:
         values = google.fetch_tab_values(spreadsheet_id, worksheet, fresh=True)
     except google.GoogleError as exc:
         raise SummaryError(str(exc)) from exc
-    return build_index(values, title=meta.get("title", ""), worksheet=worksheet)
+    return build_index(values, title=meta.get("title", ""), worksheet=worksheet, columns=columns_for(extra))
+
+
+def _read_with(spreadsheet_id: str, worksheet: str, extra: dict[str, list[str]]) -> Index:
+    # Без своих названий колонок - прежний вызов в два аргумента (его подменяют тесты).
+    return _read(spreadsheet_id, worksheet, extra) if extra else _read(spreadsheet_id, worksheet)
+
+
+def _key(session: Session, workspace_id: uuid.UUID, source: SummarySource) -> tuple[tuple[str, ...], dict[str, list[str]]]:
+    """Ключ чтения: таблица, лист и подпись словаря колонок компании - и сам словарь."""
+    from app.finance.core import book as core_book
+    from app.finance.core import settings as core_settings
+
+    extra = core_settings.book_columns(session, workspace_id)
+    return (source.spreadsheet_id, source.worksheet, core_book.signature(extra)), extra
 
 
 def _refresh(workspace_id: uuid.UUID, slot: _Slot, done: threading.Event) -> None:
     try:
-        index = _read(*slot.source)
+        index = _read_with(slot.source[0], slot.source[1], slot.extra)
         with _guard:
             slot.index, slot.error = index, ""
     except SummaryError as exc:
@@ -277,12 +309,14 @@ def _refresh(workspace_id: uuid.UUID, slot: _Slot, done: threading.Event) -> Non
         done.set()
 
 
-def _start(workspace_id: uuid.UUID, source: tuple[str, str]) -> tuple[_Slot, threading.Event]:
+def _start(
+    workspace_id: uuid.UUID, source: tuple[str, ...], extra: dict[str, list[str]] | None = None
+) -> tuple[_Slot, threading.Event]:
     """Слот компании и событие текущего чтения (начатого сейчас или раньше)."""
     with _guard:
         slot = _slots.get(workspace_id)
         if slot is None or slot.source != source:
-            slot = _slots[workspace_id] = _Slot(source=source)
+            slot = _slots[workspace_id] = _Slot(source=source, extra=dict(extra or {}))
         age = time.monotonic() - slot.at
         # Отказ Google (нет доступа, квота) не повторяется на каждый запрос:
         # раз в минуту, иначе ошибка съела бы квоту всего аккаунта.
@@ -309,13 +343,13 @@ def get(session: Session, workspace_id: uuid.UUID, *, wait: float = FIRST_READ_W
     source = source_of(session, workspace_id)
     if source is None:
         return None
-    key = (source.spreadsheet_id, source.worksheet)
+    key, extra = _key(session, workspace_id, source)
     if force:
         with _guard:
             slot = _slots.get(workspace_id)
             if slot is not None and slot.reading is None:
                 slot.at = 0.0
-    slot, done = _start(workspace_id, key)
+    slot, done = _start(workspace_id, key, extra)
     if slot.index is None and wait > 0:
         done.wait(wait)
     return slot
@@ -401,23 +435,43 @@ def spreadsheet_id_of(link: str) -> str:
 
 def connect(
     session: Session, workspace_id: uuid.UUID, *, link: str, worksheet: str, user_id: uuid.UUID | None
-) -> tuple[SummarySource, Index]:
-    """Подключить книгу-сводку: прочитать её сразу и сохранить, если читается."""
+) -> tuple[SummarySource, Index | None, str]:
+    """Подключить книгу-сводку: прочитать её сразу и сохранить, если читается.
+
+    Таблица, где нужные колонки названы по-своему, подключается тоже - с
+    отказом словами (третье значение): колонки называют в «Колонках для
+    ядра», и она читается. Нет доступа, нет листа - не подключается: там
+    сопоставлять нечего.
+    """
+    from app.finance.core import book as core_book
+    from app.finance.core import settings as core_settings
+
     spreadsheet_id = spreadsheet_id_of(link)
     tab = (worksheet or "").strip()
     if not spreadsheet_id or not tab:
         raise SummaryError("Нужны ссылка на таблицу и название листа")
-    index = _read(spreadsheet_id, tab)
+    extra = core_settings.book_columns(session, workspace_id)
+    index: Index | None = None
+    problem = ""
+    try:
+        index = _read_with(spreadsheet_id, tab, extra)
+    except SummaryLayoutError as exc:
+        problem = str(exc)
     source = session.get(SummarySource, workspace_id)
     if source is None:
         source = SummarySource(workspace_id=workspace_id, spreadsheet_id=spreadsheet_id, worksheet=tab)
         session.add(source)
-    source.spreadsheet_id, source.worksheet, source.title = spreadsheet_id, tab, index.title
+    source.spreadsheet_id, source.worksheet = spreadsheet_id, tab
+    if index is not None:
+        source.title = index.title
     source.updated_by, source.updated_at = user_id, datetime.now(timezone.utc)
     session.flush()
     with _guard:
-        _slots[workspace_id] = _Slot(source=(spreadsheet_id, tab), index=index, at=time.monotonic())
-    return source, index
+        _slots[workspace_id] = _Slot(
+            source=(spreadsheet_id, tab, core_book.signature(extra)), index=index, error=problem, at=time.monotonic(),
+            extra=dict(extra),
+        )
+    return source, index, problem
 
 
 def disconnect(session: Session, workspace_id: uuid.UUID) -> None:
@@ -432,7 +486,7 @@ def status(session: Session, workspace_id: uuid.UUID) -> dict[str, Any] | None:
         return None
     with _guard:
         slot = _slots.get(workspace_id)
-    if slot is not None and slot.source != (source.spreadsheet_id, source.worksheet):
+    if slot is not None and slot.source[:2] != (source.spreadsheet_id, source.worksheet):
         slot = None
     return source_out(source, slot)
 
@@ -460,7 +514,9 @@ __all__ = [
     "Index",
     "Match",
     "SummaryError",
+    "SummaryLayoutError",
     "build_index",
+    "columns_for",
     "connect",
     "contracts_out",
     "disconnect",

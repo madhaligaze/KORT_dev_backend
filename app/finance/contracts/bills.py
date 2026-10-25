@@ -289,14 +289,28 @@ class Board:
         return next((bill for bill in [*self.bills, *self.done] if bill.id == wanted), None)
 
 
+#: Ключ колонки здесь → ключ ядра в словаре колонок компании, где они разные.
+_CORE_KEYS = {"bill": "bill_state", "paid": "paid_state"}
+
+
+def columns_for(extra: dict[str, list[str]] | None) -> tuple[Column, ...]:
+    """Колонки «Счетов» со своими названиями компании - тот же словарь, что у ядра («Колонки для ядра»)."""
+    if not extra:
+        return COLUMNS
+    from app.finance.core.book import with_company_names
+
+    return with_company_names(COLUMNS, extra, _CORE_KEYS)
+
+
 def build_board(
-    values: Sequence[Sequence[Any]], *, title: str, worksheet: str, spreadsheet_id: str = ""
+    values: Sequence[Sequence[Any]], *, title: str, worksheet: str, spreadsheet_id: str = "",
+    columns: Sequence[Column] = COLUMNS,
 ) -> Board:
     """Разобрать значения листа. Шапка - первая строка, строка листа 2 - первая данных."""
     if not values:
         raise BillsError(f"Лист «{worksheet}» пуст")
     try:
-        layout = resolve_layout(worksheet, COLUMNS, [str(cell) for cell in values[0]])
+        layout = resolve_layout(worksheet, columns, [str(cell) for cell in values[0]])
     except LayoutError as exc:
         raise BillsError(str(exc)) from exc
     bills: list[Bill] = []
@@ -451,18 +465,20 @@ def view(workspace_id: uuid.UUID, board: Board) -> Board:
 
 @dataclass
 class _Slot:
-    source: tuple[str, str]
+    #: Таблица, лист и подпись словаря колонок компании: новое название колонки - перечитать.
+    source: tuple[str, ...]
     board: Board | None = None
     error: str = ""
     at: float = 0.0
     reading: threading.Event | None = None
+    extra: dict[str, list[str]] = field(default_factory=dict)
 
 
 _slots: dict[uuid.UUID, _Slot] = {}
 _guard = threading.Lock()
 
 
-def _read(spreadsheet_id: str, worksheet: str) -> Board:
+def _read(spreadsheet_id: str, worksheet: str, extra: dict[str, list[str]] | None = None) -> Board:
     if not google.is_configured():
         raise BillsError("Не заданы креды Google - таблицу прочитать нечем")
     try:
@@ -470,12 +486,24 @@ def _read(spreadsheet_id: str, worksheet: str) -> Board:
         values = google.fetch_tab_values(spreadsheet_id, worksheet, fresh=True)
     except google.GoogleError as exc:
         raise BillsError(str(exc)) from exc
-    return build_board(values, title=meta.get("title", ""), worksheet=worksheet, spreadsheet_id=spreadsheet_id)
+    return build_board(
+        values, title=meta.get("title", ""), worksheet=worksheet, spreadsheet_id=spreadsheet_id, columns=columns_for(extra)
+    )
+
+
+def _source_key(session: Session, workspace_id: uuid.UUID, source: Any) -> tuple[tuple[str, ...], dict[str, list[str]]]:
+    """Ключ чтения: таблица, лист и подпись словаря колонок компании - и сам словарь."""
+    from app.finance.core import book as core_book
+    from app.finance.core import settings as core_settings
+
+    extra = core_settings.book_columns(session, workspace_id)
+    return (source.spreadsheet_id, source.worksheet, core_book.signature(extra)), extra
 
 
 def _refresh(slot: _Slot, done: threading.Event) -> None:
     try:
-        board = _read(*slot.source)
+        # Без своих названий колонок - прежний вызов в два аргумента (его подменяют тесты).
+        board = _read(*slot.source[:2], extra=slot.extra) if slot.extra else _read(*slot.source[:2])
         with _guard:
             slot.board, slot.error = board, ""
     except BillsError as exc:
@@ -492,12 +520,14 @@ def _refresh(slot: _Slot, done: threading.Event) -> None:
         done.set()
 
 
-def _start(workspace_id: uuid.UUID, source: tuple[str, str], *, force: bool = False) -> tuple[_Slot, threading.Event]:
+def _start(
+    workspace_id: uuid.UUID, source: tuple[str, ...], *, force: bool = False, extra: dict[str, list[str]] | None = None
+) -> tuple[_Slot, threading.Event]:
     """Слот компании и событие текущего чтения (начатого сейчас или раньше)."""
     with _guard:
         slot = _slots.get(workspace_id)
         if slot is None or slot.source != source:
-            slot = _slots[workspace_id] = _Slot(source=source)
+            slot = _slots[workspace_id] = _Slot(source=source, extra=dict(extra or {}))
         age = time.monotonic() - slot.at
         # Отказ Google не повторяется на каждый запрос: раз в минуту, иначе
         # ошибка съела бы квоту всего аккаунта.
@@ -527,7 +557,8 @@ def get(session: Session, workspace_id: uuid.UUID, *, wait: float = FIRST_READ_W
     source = source_of(session, workspace_id)
     if source is None:
         return None
-    slot, done = _start(workspace_id, (source.spreadsheet_id, source.worksheet), force=force)
+    key, extra = _source_key(session, workspace_id, source)
+    slot, done = _start(workspace_id, key, force=force, extra=extra)
     if (slot.board is None or force) and wait > 0:
         done.wait(wait)
     return slot
@@ -621,7 +652,8 @@ def badge(session: Session, workspace_id: uuid.UUID) -> dict[str, int] | None:
     source = source_of(session, workspace_id)
     if source is None:
         return None
-    slot, _ = _start(workspace_id, (source.spreadsheet_id, source.worksheet))
+    key, extra = _source_key(session, workspace_id, source)
+    slot, _ = _start(workspace_id, key, extra=extra)
     with _guard:
         board = slot.board
     if board is None:
@@ -646,6 +678,7 @@ __all__ = [
     "bill_key",
     "board_out",
     "build_board",
+    "columns_for",
     "counts_out",
     "current",
     "forget",

@@ -139,17 +139,34 @@ class LayoutBroken(BookError):
         self.header = header
 
 
-def columns_for(extra: dict[str, list[str]] | None) -> tuple[Column, ...]:
-    """Колонки ядра с написаниями компании (словарь `core/settings.book_columns`)."""
+def with_company_names(
+    columns: Sequence[Column], extra: dict[str, list[str]] | None, keys: dict[str, str] | None = None
+) -> tuple[Column, ...]:
+    """Колонки любого читателя сводной таблицы с написаниями компании (словарь `core/settings.book_columns`).
+
+    Словарь один на компанию и ведётся ключами ядра; `keys` - ключ читателя →
+    ключ ядра, где они разные (у «Счетов» «bill» - это «Счет», в ядре `bill_state`).
+    Так своё название колонки, записанное раз, понимают ядро, «Счета» и сводка оплат.
+    """
     if not extra:
-        return COLUMNS
+        return tuple(columns)
+    keys = keys or {}
     return tuple(
-        replace(column, names=column.names + tuple(name for name in extra.get(column.key, ()) if name not in column.names))
-        for column in COLUMNS
+        replace(
+            column,
+            names=column.names + tuple(name for name in extra.get(keys.get(column.key, column.key), ()) if name not in column.names),
+        )
+        for column in columns
     )
 
 
-def _signature(extra: dict[str, list[str]] | None) -> str:
+def columns_for(extra: dict[str, list[str]] | None) -> tuple[Column, ...]:
+    """Колонки ядра с написаниями компании (словарь `core/settings.book_columns`)."""
+    return with_company_names(COLUMNS, extra) if extra else COLUMNS
+
+
+def signature(extra: dict[str, list[str]] | None) -> str:
+    """Подпись словаря колонок: другая - читать таблицу заново."""
     return "|".join(f"{key}={','.join(sorted(names))}" for key, names in sorted((extra or {}).items()))
 
 
@@ -547,7 +564,7 @@ def current(
     if source is None:
         return None, ""
     extra = core_settings.book_columns(session, workspace_id)
-    key = (source.spreadsheet_id, source.worksheet, _signature(extra))
+    key = (source.spreadsheet_id, source.worksheet, signature(extra))
     with _guard:
         slot = _slots.get(workspace_id)
         if slot is not None and slot.source == ANY:
@@ -639,5 +656,7 @@ __all__ = [
     "month_of",
     "put",
     "rows_of",
+    "signature",
     "text_of",
+    "with_company_names",
 ]

@@ -75,3 +75,41 @@ def test_slovar_v_nastroykah_s_istoriey_i_pravami(finance_db):
                 core_settings.set_book_column(session, workspace, FULL, OWNER, key="nope", name="Х", on=True, known=KNOWN)
     finally:
         history.CONTEXT.reset(token)
+
+
+def test_odin_slovar_dlya_vseh_chitateley_tablicy(finance_db, monkeypatch):
+    """Своё название колонки, записанное раз, понимают ядро, «Счета» и сводка оплат; таблица со
+    своими названиями подключается с объяснением, а не отказом."""
+    from app.finance.contracts import bills as bills_module
+    from app.finance.contracts import summary as summary_module
+    from app.finance.contracts.fields import number_key
+
+    header = ["Наша Фирма", "Клиент", "Контракт", "Оплачено", "Состояние счёта", "Период с"]
+    values = [header, ["BBC", "ТОО Альфаком", "№ОКР/1", "50 000", "Просрочка более 5 дней", "01.10.2026"]]
+    monkeypatch.setattr(
+        summary_module, "_read",
+        lambda spreadsheet_id, tab, extra=None: summary_module.build_index(
+            values, title="Сводка компании", worksheet=tab, columns=summary_module.columns_for(extra)
+        ),
+    )
+    token = history.CONTEXT.set(history.AuditContext(user_id=OWNER.user_id))
+    try:
+        with finance_session() as session:
+            workspace = finance_service.ensure_workspace(session)
+            source, index, problem = summary_module.connect(
+                session, workspace.id, link="https://docs.google.com/spreadsheets/d/abc123/edit", worksheet="Сводка", user_id=None
+            )
+            assert index is None and "№ Договора" in problem and source.worksheet == "Сводка", "подключена, с объяснением"
+            for key, name in (("number", "Контракт"), ("paid", "Оплачено"), ("bill_state", "Состояние счёта")):
+                core_settings.set_book_column(session, workspace, FULL, OWNER, key=key, name=name, on=True, known=KNOWN)
+            extra = core_settings.book_columns(session, workspace.id)
+            summary_module.forget(workspace.id)
+            slot = summary_module.get(session, workspace.id, wait=5)
+            assert slot is not None and slot.index is not None and slot.index.rows == 1, slot.error if slot else ""
+            [row] = slot.index.by_number[number_key("№ОКР/1")]
+            assert row.paid == Decimal("50000")
+    finally:
+        history.CONTEXT.reset(token)
+    board = bills_module.build_board(values, title="Сводка", worksheet="Сводка", columns=bills_module.columns_for(extra))
+    [bill] = board.bills
+    assert (bill.number, bill.group, bill.text) == ("№ОКР/1", bills_module.OVERDUE, "Просрочка более 5 дней"), "«Счет» ядра - «bill» у «Счетов»"

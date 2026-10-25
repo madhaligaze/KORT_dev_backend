@@ -743,17 +743,27 @@ class SummaryIn(BaseModel):
 
 @router.post("/setup/summary")
 def connect_summary(body: SummaryIn, member: Member = Depends(contract_editor)) -> dict[str, Any]:
-    """Подключить книгу-сводку: читается сразу, сохраняется, только если читается."""
+    """Подключить книгу-сводку: читается сразу, сохраняется, только если читается.
+
+    Колонки, названные по-своему, - не отказ: таблица подключается, `problem`
+    говорит, каких колонок не нашлось, и их называют в «Колонках для ядра».
+    """
 
     def action(session, workspace, access):
         try:
-            source, index = summary_module.connect(
+            source, index, problem = summary_module.connect(
                 session, workspace.id, link=body.link, worksheet=body.worksheet, user_id=member.user_id
             )
         except summary_module.SummaryError as exc:
             raise FinanceError(str(exc)) from exc
         setup._schema_changed(session, workspace)
-        return {"title": source.title, "worksheet": source.worksheet, "rows": index.rows, "drift": index.drift}
+        return {
+            "title": source.title,
+            "worksheet": source.worksheet,
+            "rows": index.rows if index is not None else 0,
+            "drift": index.drift if index is not None else "",
+            "problem": problem,
+        }
 
     return _setup_call(member, action, "подключена сводка оплат", "summary_connect")
 

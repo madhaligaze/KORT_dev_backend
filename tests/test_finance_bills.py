@@ -440,12 +440,15 @@ def book(monkeypatch):
     state = {"values": [list(line) for line in SHEET]}
     monkeypatch.setattr(
         summary, "_read",
-        lambda spreadsheet_id, tab: summary.build_index(state["values"], title="Осн.Общая сводка BBC 2026", worksheet=tab),
+        lambda spreadsheet_id, tab, extra=None: summary.build_index(
+            state["values"], title="Осн.Общая сводка BBC 2026", worksheet=tab, columns=summary.columns_for(extra)
+        ),
     )
     monkeypatch.setattr(
         bills, "_read",
-        lambda spreadsheet_id, tab: bills.build_board(
-            state["values"], title="Осн.Общая сводка BBC 2026", worksheet=tab, spreadsheet_id=spreadsheet_id
+        lambda spreadsheet_id, tab, extra=None: bills.build_board(
+            state["values"], title="Осн.Общая сводка BBC 2026", worksheet=tab, spreadsheet_id=spreadsheet_id,
+            columns=bills.columns_for(extra),
         ),
     )
     return state
@@ -464,7 +467,7 @@ def fresh() -> None:
     with bills._guard:
         slots = list(bills._slots.values())
     for slot in slots:
-        board = bills._read(*slot.source)
+        board = bills._read(*slot.source[:2])
         with bills._guard:
             slot.board, slot.at = board, time.monotonic()
 

@@ -444,10 +444,11 @@ def test_kazhdyy_izmenyayushchiy_marshrut_pishet_sobytie(app: FastAPI, monkeypat
     monkeypatch.setattr(
         summary_module,
         "_read",
-        lambda spreadsheet_id, tab: summary_module.build_index(
+        lambda spreadsheet_id, tab, extra=None: summary_module.build_index(
             [["Заказчик (Название Фирмы)", "№ Договора", "Сумма Факт Поступ."], ["ТОО Альфа", "№ 1", "1000"]],
             title="Сводка",
             worksheet=tab,
+            columns=summary_module.columns_for(extra),
         ),
     )
     walk.call(owner, "POST", "/contracts/setup/summary",
@@ -461,13 +462,14 @@ def test_kazhdyy_izmenyayushchiy_marshrut_pishet_sobytie(app: FastAPI, monkeypat
     monkeypatch.setattr(
         bills_module,
         "_read",
-        lambda spreadsheet_id, tab: bills_module.build_board(
+        lambda spreadsheet_id, tab, extra=None: bills_module.build_board(
             [
                 ["Наша Фирма", "Заказчик (Название Фирмы)", "№ Договора", "Техн. 1", "Счет", "Период с (нач.)"],
                 ["BBCL", "ТОО KENESARY AGRO", "№ЮО/44", "ОКТЯБРЬ 2026", "Сегодня день выставления", "22.10.2026"],
             ],
             title="Сводка",
             worksheet=tab,
+            columns=bills_module.columns_for(extra),
         ),
     )
     books = fake_api()
