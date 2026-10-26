@@ -109,13 +109,20 @@ class Side:
         return True
 
 
+#: Поля операции, которые читают разнесение и его потребители (строка, а не объект ORM).
+OPERATION_COLUMNS = (
+    Operation.id, Operation.kind, Operation.paid_at, Operation.amount_base, Operation.counterparty_id,
+    Operation.account_to_id, Operation.account_from_id, Operation.contract_ref, Operation.comment,
+)
+
+
 @dataclass
 class Allocation:
-    #: Договор → операции, отнесённые к нему, и как: «auto» - по стороне,
-    #: «number» - по номеру договора из источника, «manual» - решил человек.
-    paid: dict[uuid.UUID, list[tuple[Operation, str]]] = field(default_factory=dict)
+    #: Договор → операции (строки `OPERATION_COLUMNS`), отнесённые к нему, и как:
+    #: «auto» - по стороне, «number» - по номеру договора из источника, «manual» - решил человек.
+    paid: dict[uuid.UUID, list[tuple[Any, str]]] = field(default_factory=dict)
     #: Договор → спорные операции, для которых он один из кандидатов.
-    open: dict[uuid.UUID, list[Operation]] = field(default_factory=dict)
+    open: dict[uuid.UUID, list[Any]] = field(default_factory=dict)
 
 
 def _sides(contracts: Iterable[Contract], registry: Registry) -> list[Side]:
@@ -138,7 +145,7 @@ def _sides(contracts: Iterable[Contract], registry: Registry) -> list[Side]:
     return out
 
 
-def _narrow(candidates: dict[uuid.UUID, Side], operation: Operation) -> dict[uuid.UUID, Side]:
+def _narrow(candidates: dict[uuid.UUID, Side], operation: Any) -> dict[uuid.UUID, Side]:
     """Из нескольких договоров - по сроку, сумме и известной дате (см. описание модуля)."""
     if len(candidates) < 2:
         return candidates
@@ -157,9 +164,23 @@ def _narrow(candidates: dict[uuid.UUID, Side], operation: Operation) -> dict[uui
     return fitting
 
 
-def allocate(session: Session, workspace: Workspace, registry: Registry, contracts: Iterable[Contract]) -> Allocation:
-    """Разнести операции журнала по договорам (см. описание модуля)."""
+def allocate(
+    session: Session,
+    workspace: Workspace,
+    registry: Registry,
+    contracts: Iterable[Contract],
+    *,
+    operations: Iterable[uuid.UUID] | None = None,
+) -> Allocation:
+    """Разнести операции журнала по договорам (см. описание модуля).
+
+    `operations` - только эти операции (журнал фактов проводит изменённые):
+    куда ляжет одна операция, от других операций не зависит.
+    """
     result = Allocation()
+    picked = list(operations) if operations is not None else None
+    if picked is not None and not picked:
+        return result
     sides = _sides(contracts, registry)
     if not sides:
         return result
@@ -201,17 +222,18 @@ def allocate(session: Session, workspace: Workspace, registry: Registry, contrac
             sa.select(Account.id, Account.group_entity_id).where(Account.workspace_id == workspace.id)
         ).all()
     )
-    operations = list(
-        session.scalars(
-            sa.select(Operation).where(
-                Operation.workspace_id == workspace.id,
-                Operation.deleted_at.is_(None),
-                Operation.status == "fact",
-                Operation.kind.in_(("income", "expense")),
-                sa.or_(Operation.counterparty_id.is_not(None), Operation.contract_ref != ""),
-            )
-        )
+    # Строками нужных колонок, а не объектами: на 6 000 операций объекты ORM
+    # с `raw` выписки были половиной проведения журнала (27.10.2026).
+    query = sa.select(*OPERATION_COLUMNS).where(
+        Operation.workspace_id == workspace.id,
+        Operation.deleted_at.is_(None),
+        Operation.status == "fact",
+        Operation.kind.in_(("income", "expense")),
+        sa.or_(Operation.counterparty_id.is_not(None), Operation.contract_ref != ""),
     )
+    if picked is not None:
+        query = query.where(Operation.id.in_(picked))
+    operations = list(session.execute(query))
     if not operations:
         return result
     payer_ids = {operation.counterparty_id for operation in operations if operation.counterparty_id}

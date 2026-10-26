@@ -354,8 +354,7 @@ def accrued_months(ledger: Any, contracts: list[Contract], *, since: date, until
     """Договор → месяцы с начислением больше нуля (`core/accruals.py`)."""
     out: dict[uuid.UUID, set[str]] = {}
     for contract in contracts:
-        schedule = ledger.schedule(contract, since=since, until=until)
-        months = {item.month for item in schedule.accruals if not item.skipped and (item.amount or _ZERO) > 0}
+        months = {item.month for item in ledger.accruals(contract, since=since, until=until) if not item.skipped and (item.amount or _ZERO) > 0}
         if months:
             out[contract.id] = months
     return out

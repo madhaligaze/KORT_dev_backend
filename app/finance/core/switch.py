@@ -587,8 +587,14 @@ def kort_paid(session: Session, workspace_id: uuid.UUID, *, today: date | None =
     if cached is not None and cached[0] == key:
         return cached[1]
     workspace = session.get(Workspace, workspace_id)
-    money = Money(session, workspace, today=day)
-    values = {contract_id: money.paid_of(contract_id) for contract_id in money.contracts}
+    if day == contracts_today():
+        # Оплачено в учёте - из регистра итогов (`core/registers.py`): то же `Money.paid_of`.
+        from app.finance.core import registers
+
+        values = {contract_id: item.paid for contract_id, item in registers.of(session, workspace, today=day).settlements().items()}
+    else:
+        money = Money(session, workspace, today=day)
+        values = {contract_id: money.paid_of(contract_id) for contract_id in money.contracts}
     with _paid_guard:
         _paid[workspace_id] = (key, values)
     return values

@@ -50,6 +50,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from decimal import Decimal
+from functools import lru_cache
 from typing import Iterable
 
 import sqlalchemy as sa
@@ -79,7 +80,9 @@ def fold(key: str) -> str:
     return key.translate(_LETTERS)
 
 
+@lru_cache(maxsize=65536)
 def side_key(name: str) -> str:
+    # Одно имя - в сотнях документов и операций: ключ - один раз.
     return fold(party_key(unicodedata.normalize("NFC", name or "")))
 
 
@@ -98,6 +101,7 @@ def visual_key(name: str) -> str:
     return side_key(name).translate(_LOOKALIKE)
 
 
+@lru_cache(maxsize=65536)
 def number_loose(number: str) -> str:
     """Номер без разделителей: «ОБОиНО-62» = «ОБОиНО/62»."""
     return _NUMBER_JUNK.sub("", number_key(number))

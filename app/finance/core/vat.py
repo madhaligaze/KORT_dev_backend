@@ -44,8 +44,9 @@ from sqlalchemy.orm import Session
 from app.finance.contracts.models import Contract, GroupEntity
 from app.finance.contracts.service import Access, Registry, _economic, people_of, visible_to
 from app.finance.core import tax
-from app.finance.core.accruals import Ledger, month_key, month_start
+from app.finance.core.accruals import month_key, month_start
 from app.finance.core.models import EntityTaxPeriod
+from app.finance.core.registers import ledger_on
 from app.finance.models import Account, Counterparty, Operation, Workspace
 
 _ZERO = Decimal("0")
@@ -201,7 +202,8 @@ class Turnover:
             for item in contracts
             if visible_to(item, self.registry, access, people.get(item.id, [])) and _revenue(item, self.registry)
         ]
-        self.ledger = Ledger(session, workspace.id, self.contracts)
+        # Начисления - из регистра итогов на сегодня (`core/registers.py`), иначе живым расчётом.
+        self.ledger = ledger_on(session, workspace, self.contracts, day=today)
         self.entities = {
             row.counterparty_id: row
             for row in session.scalars(
@@ -267,9 +269,8 @@ class Turnover:
         rate_of = {self.year: self.tax_year.vat_rate}
         counted: dict[tuple[uuid.UUID, str], set[uuid.UUID]] = {}
         for contract in self.contracts:
-            schedule = self.ledger.schedule(contract, since=since, until=until)
             move = moved.get(contract.id)
-            for accrual in schedule.accruals:
+            for accrual in self.ledger.accruals(contract, since=since, until=until):
                 amount = _ZERO if accrual.skipped else (accrual.amount or _ZERO)
                 if not amount:
                     continue
@@ -306,8 +307,7 @@ class Turnover:
         )
         out = []
         for contract in self.contracts:
-            schedule = self.ledger.schedule(contract, since=since, until=until)
-            rest = [item for item in schedule.accruals if item.executor_id == entity_id and not item.skipped and item.amount]
+            rest = [item for item in self.ledger.accruals(contract, since=since, until=until) if item.executor_id == entity_id and not item.skipped and item.amount]
             if not rest:
                 continue
             out.append(

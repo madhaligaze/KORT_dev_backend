@@ -17,6 +17,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
+from functools import lru_cache
 from typing import Any, Callable, Iterable
 
 from app.finance.contracts.models import Contract
@@ -40,6 +41,26 @@ class Terms:
     end_date: date | None
 
 
+def _remembered(parse: Callable[[Any], Any]) -> Callable[[Any], Any]:
+    """Разбор значения - один раз на значение: `Timeline.on` зовут на каждый период каждого договора.
+
+    Ключ - с типом: `1` и `1.0` для словаря одно, а сумма из них пишется по-разному.
+    """
+
+    @lru_cache(maxsize=8192)
+    def cached(kind: type, value: Any) -> Any:
+        return parse(value)
+
+    def read(value: Any) -> Any:
+        try:
+            return cached(type(value), value)
+        except TypeError:  # список или словарь - не ключ кэша
+            return parse(value)
+
+    return read
+
+
+@_remembered
 def _uuid(value: Any) -> uuid.UUID | None:
     if value in (None, ""):
         return None
@@ -49,6 +70,7 @@ def _uuid(value: Any) -> uuid.UUID | None:
         return None
 
 
+@_remembered
 def _money(value: Any) -> Decimal | None:
     if value in (None, ""):
         return None
@@ -58,6 +80,7 @@ def _money(value: Any) -> Decimal | None:
         return None
 
 
+@_remembered
 def _day(value: Any) -> date | None:
     if value in (None, ""):
         return None
@@ -82,6 +105,8 @@ class Timeline:
     ) -> None:
         self.contract = contract
         self.phase_of = phase_of
+        #: Значения договора «сейчас» - один раз: `on` зовут на каждый период.
+        self.current: dict[str, Any] = {key: value_of(contract, key) for key in TRACKED}
         self.initial: dict[str, Any] = {}
         #: Ключ → [(с какого дня, значение, применено ли к договору)].
         self.steps: dict[str, list[tuple[date, Any, bool]]] = {}
@@ -100,7 +125,7 @@ class Timeline:
 
     def value(self, key: str, day: date) -> Any:
         """Значение ключа в день `day` в виде API (`value_of`)."""
-        current = value_of(self.contract, key)
+        current = self.current[key] if key in self.current else value_of(self.contract, key)
         steps = self.steps.get(key)
         if not steps:
             return current

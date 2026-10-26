@@ -42,6 +42,8 @@ from app.finance.core.terms import Terms, Timeline
 
 #: Фазы, при которых договор не начисляется вовсе.
 NEVER = ("failed", "draft")
+#: Начало окна «с начала договора».
+_FAR = date(1900, 1, 1)
 #: Фазы конца: начисляется до даты окончания, без неё - нет.
 ENDED = ("terminated", "fulfilled")
 
@@ -155,6 +157,8 @@ class Ledger:
         self.session = session
         self.workspace_id = workspace_id
         self.contracts = {item.id: item for item in contracts}
+        #: Договор → (до какого месяца посчитан, начисления с начала договора) - `accruals`.
+        self._memo: dict[uuid.UUID, tuple[date, list[Accrual]]] = {}
         ids = list(self.contracts)
         self.amendments: dict[uuid.UUID, list[Agreement]] = defaultdict(list)
         self.adjustments: dict[tuple[uuid.UUID, str], Adjustment] = {}
@@ -182,6 +186,21 @@ class Ledger:
 
     def terms(self, contract: Contract, day: date) -> Terms:
         return self.timeline(contract).on(day)
+
+    def accruals(self, contract: Contract, *, since: date, until: date) -> list[Accrual]:
+        """Только начисления окна - то, что итогам нужно и что хранит регистр (`core/registers.StoredLedger`).
+
+        Ряд договора считается один раз с его начала и дальше режется по
+        месяцам: окно правил начисления не меняет, только отбирает. Регистр и
+        разнесение оплат просят один договор с разными окнами - условия на
+        каждый период считаются однажды. `Ledger` - на один запрос.
+        """
+        memo = self._memo.get(contract.id)
+        if memo is None or memo[0] < until:
+            memo = (until, self.schedule(contract, since=_FAR, until=until).accruals)
+            self._memo[contract.id] = memo
+        first, last = month_key(since), month_key(until)
+        return [item for item in memo[1] if first <= item.month <= last]
 
     def schedule(self, contract: Contract, *, since: date, until: date) -> Schedule:
         """Начисления договора за месяцы с `since` по `until` включительно."""

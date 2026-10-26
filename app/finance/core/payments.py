@@ -265,13 +265,20 @@ def allocate_months(
 
 
 class Money:
-    """Оплаты компании по договорам и месяцам - на запрос."""
+    """Оплаты компании по договорам и месяцам - на запрос.
 
-    def __init__(self, session: Session, workspace: Workspace, *, today: date) -> None:
+    `only` - только оплаты этих договоров (регистр пересчитывает несколько):
+    годится, когда начало учёта задал человек - иначе оно от первой оплаты
+    всей компании, и `only` не действует. У такого `Money` оплаты без договора
+    и спорные - не по всей компании: ему - только `contract`.
+    """
+
+    def __init__(self, session: Session, workspace: Workspace, *, today: date, only: Iterable[uuid.UUID] | None = None) -> None:
         self.session = session
         self.workspace = workspace
         self.today = today
         self.settings = core_settings.payments(session, workspace)
+        scope = list(only) if only is not None and self.settings.since is not None else None
         self.registry = Registry(session, workspace)
         self.contracts = {
             item.id: item
@@ -299,7 +306,7 @@ class Money:
         self._bases: dict[str, str] | None = None
         first_income: date | None = None
         journal.ensure(session, workspace.id)
-        for fact in journal.current(session, workspace.id, ("payment",)):
+        for fact in journal.current(session, workspace.id, ("payment",), contracts=scope):
             data = fact.data or {}
             if fact.source == "journal":
                 if data.get("direction") == "in" and (first_income is None or fact.day < first_income):
@@ -434,10 +441,10 @@ class Money:
                 )
             last = max([self.today, *(payment.paid_at for payment in payments)])
             until = month_start(_shift(month_key(last), AHEAD_MONTHS))
-            schedule = (ledger or Ledger(self.session, self.workspace.id, [contract])).schedule(
+            accruals = (ledger or Ledger(self.session, self.workspace.id, [contract])).accruals(
                 contract, since=self.since, until=until
             )
-            for accrual in schedule.accruals:
+            for accrual in accruals:
                 amount = _ZERO if accrual.skipped else (accrual.amount or _ZERO)
                 bucket = buckets.setdefault(
                     accrual.month, Bucket(accrual.month, _ZERO, due=accrual.period_from, executor=accrual.executor_id)
@@ -515,7 +522,8 @@ class Money:
         categories = dict(
             self.session.execute(sa.select(Category.id, Category.name).where(Category.workspace_id == self.workspace.id)).all()
         )
-        query = sa.select(Operation).where(
+        # Без `raw` - строка выписки списку не нужна.
+        query = sa.select(Operation).options(sa.orm.defer(Operation.raw)).where(
             Operation.workspace_id == self.workspace.id,
             Operation.deleted_at.is_(None),
             Operation.status == "fact",
@@ -545,7 +553,7 @@ class Money:
             name_keys[normalized].add(party_id)
             name_keys[visual_key(name)].add(party_id)
         out: list[dict[str, Any]] = []
-        for operation in self.session.scalars(query.order_by(Operation.paid_at.desc())):
+        for operation in self.session.scalars(query.order_by(Operation.paid_at.desc(), Operation.id)):
             if operation.id in allocated:
                 continue
             if operation.id in decided and operation.id not in disputed:

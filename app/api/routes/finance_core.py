@@ -726,7 +726,8 @@ def acts_view(entity: UUID | None = Query(default=None), member: Member = Depend
 
     from app.finance.contracts.models import GroupEntity
     from app.finance.core import acts as acts_module
-    from app.finance.core.accruals import Ledger, month_key, month_start
+    from app.finance.core.accruals import month_key, month_start
+    from app.finance.core.registers import ledger_on
     from app.finance.models import Counterparty
 
     def action(session, workspace, access):
@@ -743,7 +744,7 @@ def acts_view(entity: UUID | None = Query(default=None), member: Member = Depend
         window = [month for month in (acts.reconciler.window if acts.reconciler else []) if month < current]
         until = acts_module.previous_month(today)
         since = month_start(window[0]) if window else month_start(month_key(until.replace(day=1) - timedelta(days=150)))
-        accrued = acts_module.accrued_months(Ledger(session, workspace.id, visible), visible, since=since, until=until)
+        accrued = acts_module.accrued_months(ledger_on(session, workspace, visible, day=today), visible, since=since, until=until)
         shadow = acts.reconcile(contracts, window=window, entity=entity)
         work = acts.worklists(mine, {key: months for key, months in accrued.items() if key in mine})
         ids = {line["contract_id"] for line in shadow["lines"]} | {

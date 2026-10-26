@@ -1,6 +1,8 @@
 """Итоги ядра: кто сколько должен, с какого дня и чей это долг (фаза 6).
 
-Ничего не хранится - долг считается при чтении из событий на любой день:
+Долг на сегодня читается из регистров итогов (`core/registers.py`, этап 2,
+шаг 2), на любой другой день - считается из событий; вывод один и тот же
+(`accruals_debt` по сводке договора `Settlement`):
 
 * **по начислениям** - входящее сальдо, плюс начисления, чей период начался
   до дня, минус оплаты до дня (`core/payments.py`): что клиент должен по
@@ -50,9 +52,10 @@ from app.finance.contracts import shares as shares_module
 from app.finance.contracts.models import Contract, ContractDepartment, ContractPerson, Department, Employee, GroupEntity
 from app.finance.contracts.service import Access, Registry, people_of
 from app.finance.core import journal
-from app.finance.core.accruals import Ledger, month_key, month_start
+from app.finance.core.accruals import month_key, month_start
 from app.finance.core.acts import Act, Acts
-from app.finance.core.payments import OPENING, ContractMoney, Money, Payment
+from app.finance.core.payments import OPENING, Money
+from app.finance.core.registers import Settlement, totals
 from app.finance.models import Counterparty, Workspace
 
 _ZERO = Decimal("0")
@@ -148,41 +151,40 @@ class ContractDebt:
         }
 
 
-def _paid(payments: Iterable[Payment], day: date) -> Decimal:
-    return sum((payment.amount for payment in payments if payment.paid_at <= day), _ZERO)
-
-
 #: Долг договора: всего, по возрасту, аванс, оплачено, по юрлицам месяцев.
 Found = tuple[Decimal, dict[str, Decimal], Decimal, Decimal, dict[uuid.UUID | None, dict[str, Decimal]]]
 
 
-def accruals_debt(money: ContractMoney, *, day: date) -> Found | None:
-    """Долг по начислениям, старение, аванс, оплачено и долг по юрлицам месяцев; `None` - KORT начислений не считает."""
-    if not money.accrues:
+def accruals_debt(item: Settlement, *, day: date) -> Found | None:
+    """Долг по начислениям, старение, аванс, оплачено и долг по юрлицам месяцев; `None` - KORT начислений не считает.
+
+    `item` - расчёты договора на `day`: из регистра или живым расчётом на этот день.
+    """
+    if not item.accrues:
         return None
     aging: dict[str, Decimal] = defaultdict(lambda: _ZERO)
     by_entity: dict[uuid.UUID | None, dict[str, Decimal]] = defaultdict(lambda: defaultdict(lambda: _ZERO))
-    advance = sum((part.amount for part in money.over if part.payment.source != "opening"), _ZERO)
-    for key, bucket in money.buckets.items():
-        if key != OPENING and bucket.starts > day:
+    advance = item.over
+    for key, line in item.lines.items():
+        if key != OPENING and line.starts > day:
             # Месяц, чей период ещё не начался: оплаченное за него - вперёд.
-            advance += sum((part.amount for part in bucket.parts if part.payment.source != "opening"), _ZERO)
+            advance += line.cash
             continue
-        left = bucket.left
+        left = line.left
         if left < 0:
             advance += -left
         elif left > 0:
-            age = "opening" if key == OPENING else _age_key(max(0, (day - bucket.starts).days))
+            age = "opening" if key == OPENING else _age_key(max(0, (day - line.starts).days))
             aging[age] += left
-            by_entity[bucket.executor][age] += left
+            by_entity[line.executor][age] += left
     split = {entity: dict(values) for entity, values in by_entity.items()}
-    return money.debt_on(day), dict(aging), advance, _paid(money.payments, day), split
+    return item.debt_on(day), dict(aging), advance, item.paid, split
 
 
 def acts_debt(
-    acts: Iterable[Act], opening: Decimal | None, payments: Iterable[Payment], *, day: date, since: date
+    acts: Iterable[Act], opening: Decimal | None, paid: Decimal, *, day: date, since: date
 ) -> Found | None:
-    """Долг по АВР: сальдо по АВР и акты месяцев учёта до дня, минус оплаты; `None` - ни актов, ни сальдо."""
+    """Долг по АВР: сальдо по АВР и акты месяцев учёта до дня, минус оплаченное в учёте; `None` - ни актов, ни сальдо."""
     first = month_key(since)
     dated = sorted(
         (
@@ -194,7 +196,6 @@ def acts_debt(
     )
     if not dated and opening is None:
         return None
-    paid = _paid(payments, day)
     # Аванс на начало учёта гасит акты, как оплата в первый день.
     credit = paid + (-opening if opening is not None and opening < 0 else _ZERO)
     owed: list[tuple[str, Decimal]] = [("opening", opening)] if opening is not None and opening > 0 else []
@@ -348,34 +349,35 @@ class Debts:
         self.basis = basis
         self.side = side
         visible = _visible(session, workspace, access)
-        self.money = Money(session, workspace, today=day)
-        self.since = self.money.since
+        self.registry = Registry(session, workspace)
+        # На сегодня - регистр итогов, на другой день - живой расчёт; вывод один.
+        found_totals = totals(session, workspace, visible, day=day)
+        self.since = found_totals.since
         acts = Acts(session, workspace, access, book, today=day) if basis == "acts" else None
         openings = journal.openings(session, workspace.id, self.since, "acts") if acts is not None and self.since else {}
         self.names = dict(
             session.execute(sa.select(Counterparty.id, Counterparty.name).where(Counterparty.workspace_id == workspace.id)).all()
         )
         self.codes = entity_codes(session, workspace)
-        ledger = Ledger(session, workspace.id, visible)
         #: Все стороны: договор → долг; `items` - только выбранной стороны.
         self.every: dict[str, dict[uuid.UUID, ContractDebt]] = {key: {} for key in SIDES}
         #: Договоры, долг которых KORT не знает, по сторонам: начислений не считает
         #: (по начислениям) или нет ни АВР, ни сальдо по АВР (по АВР).
         self.unknowns: dict[str, int] = {key: 0 for key in SIDES}
         for contract in visible:
-            side_key = side_of(contract, self.money.registry.is_own)
+            side_key = side_of(contract, self.registry.is_own)
             if side_key is None:
                 continue
-            money = self.money.contract(contract, ledger)
-            if money.since is None:
+            settled = found_totals.settlements.get(contract.id)
+            if settled is None or settled.since is None:
                 continue
             if acts is None:
-                found = accruals_debt(money, day=day)
+                found = accruals_debt(settled, day=day)
             else:
                 doc = openings.get(contract.id)
                 found = acts_debt(
-                    _chosen(acts, contract.id), doc.amount if doc is not None else None, money.payments,
-                    day=day, since=money.since,
+                    _chosen(acts, contract.id), doc.amount if doc is not None else None, settled.paid,
+                    day=day, since=settled.since,
                 )
             if found is None:
                 self.unknowns[side_key] += 1
@@ -544,25 +546,6 @@ class Debts:
 # ── Сверка с сальдо книги ────────────────────────────────────────────────────
 
 
-def _attributed(money: ContractMoney) -> dict[str, Decimal]:
-    """Месяц → оплачено за него, как держит книга: по разнесению, не отданное месяцу - по месяцу платежа."""
-    first = month_key(money.since) if money.since else ""
-    out: dict[str, Decimal] = defaultdict(lambda: _ZERO)
-
-    def by_date(payment: Payment) -> str:
-        return max(month_key(payment.paid_at), first)
-
-    for key, bucket in money.buckets.items():
-        for part in bucket.parts:
-            if part.payment.source == "opening":
-                continue
-            out[by_date(part.payment) if key == OPENING else key] += part.amount
-    for part in money.over:
-        if part.payment.source != "opening":
-            out[by_date(part.payment)] += part.amount
-    return out
-
-
 def _running(start: Decimal, plus: dict[str, Decimal], minus: dict[str, Decimal], months: list[str]) -> dict[str, Decimal]:
     running = start
     out: dict[str, Decimal] = {}
@@ -572,20 +555,23 @@ def _running(start: Decimal, plus: dict[str, Decimal], minus: dict[str, Decimal]
     return out
 
 
-def closing_accruals(money: ContractMoney, months: list[str]) -> dict[str, Decimal]:
-    """Сальдо на конец каждого месяца по начислениям: сальдо начала, начислено и оплачено до месяца включительно."""
-    accrued = {key: bucket.accrued for key, bucket in money.buckets.items() if key != OPENING}
-    return _running(money.opening or _ZERO, accrued, _attributed(money), months)
+def closing_accruals(item: Settlement, months: list[str]) -> dict[str, Decimal]:
+    """Сальдо на конец каждого месяца по начислениям: сальдо начала, начислено и оплачено до месяца включительно.
+
+    Оплачено - как держит таблица: оплата в месяце, которому её отдало
+    разнесение; не отданная месяцу - в месяце платежа (`Settlement.attributed`).
+    """
+    return _running(item.opening or _ZERO, item.accrued_by_month(), item.attributed, months)
 
 
-def closing_acts(money: ContractMoney, acts: Iterable[Act], opening: Decimal | None, months: list[str]) -> dict[str, Decimal]:
+def closing_acts(item: Settlement, acts: Iterable[Act], opening: Decimal | None, months: list[str]) -> dict[str, Decimal]:
     """Сальдо на конец каждого месяца по АВР: сальдо начала, АВР и оплачено до месяца включительно."""
-    first = month_key(money.since) if money.since else ""
+    first = month_key(item.since) if item.since else ""
     acted: dict[str, Decimal] = defaultdict(lambda: _ZERO)
     for act in acts:
         if act.amount is not None and act.month >= first:
             acted[act.month] += act.amount
-    return _running(opening or _ZERO, acted, _attributed(money), months)
+    return _running(opening or _ZERO, acted, item.attributed, months)
 
 
 def reconcile_saldo(
@@ -619,13 +605,14 @@ def reconcile_saldo(
         item = money.contract(contract, reconciler.ledger)
         if item.since is None:
             continue
+        settled = Settlement.of(item)
         if acts is None:
             if not item.accrues:
                 continue
-            ours = closing_accruals(item, window)
+            ours = closing_accruals(settled, window)
         else:
             doc = openings.get(contract.id)
-            ours = closing_acts(item, _chosen(acts, contract.id), doc.amount if doc is not None else None, window)
+            ours = closing_acts(settled, _chosen(acts, contract.id), doc.amount if doc is not None else None, window)
         rows: list[dict[str, Any]] = []
         for month in window:
             entry = months.get(month)

@@ -90,7 +90,7 @@ def payments_card(session: Session, workspace: Workspace, access: Access, *, tod
 def acts_card(session: Session, workspace: Workspace, access: Access, *, today: date) -> dict[str, Any]:
     """АВР: не подписаны, без ЭСФ после срока, месяц начислен - акта нет."""
     from app.finance.core import acts as acts_module
-    from app.finance.core.accruals import Ledger
+    from app.finance.core.registers import ledger_on
     from app.finance.core.shadow import _visible
 
     # Ждать таблицу, как раздел: без её АВР «месяц без АВР» был бы втрое больше правды.
@@ -101,7 +101,7 @@ def acts_card(session: Session, workspace: Workspace, access: Access, *, today: 
     until = acts_module.previous_month(today)
     window = [month for month in (acts.reconciler.window if acts.reconciler else []) if month < month_key(today)]
     since = month_start(window[0]) if window else month_start(month_key(until.replace(day=1) - timedelta(days=150)))
-    accrued = acts_module.accrued_months(Ledger(session, workspace.id, visible), visible, since=since, until=until)
+    accrued = acts_module.accrued_months(ledger_on(session, workspace, visible, day=today), visible, since=since, until=until)
     work = acts.worklists(contracts, accrued)
     count = len(work["unsigned"]) + len(work["no_esf"]) + len(work["missing"])
     card = _card(

@@ -17,7 +17,10 @@
 
 **Производное** - начисления (`core/accruals.py` - из условий договора),
 оборот юрлица к порогу, НДС в документе, прогноз по месяцам: считаются из
-событий и условий договоров при чтении.
+событий и условий договоров. На сегодня начисления и расчёты договоров
+хранятся в регистрах итогов (`register_*`, `core/registers.py`, этап 2,
+шаг 2): это вывод, который пересчитывается, когда сменились его входы, и
+руками не правится.
 
 Почему режим - по датам, а не флажок «плательщик НДС» у юрлица: юрлицо встаёт
 на учёт по НДС с числа, и обороты, документы и счета до этого числа
@@ -194,6 +197,128 @@ class Fact(FinanceBase):
     ended_seq: Mapped[int | None] = mapped_column(sa.BigInteger)
 
 
+class FactInput(FinanceBase):
+    """Правка хранилища, ещё не проведённая в журнал: что именно изменилось.
+
+    Писатель кладёт строку тем же коммитом, что и правку: номер правки
+    (`inputs` - значение счётчика `facts.inputs`), часть журнала и ключ -
+    операция (`journal`), договор (`kort`: его документы и соглашения) или
+    `WHOLE` - вся часть (сменилась форма реестра: стороны договора, написания,
+    наши юрлица; документы 1С). Читатель проводит только это, а не весь
+    журнал (`core/journal.ensure`), и снимает строки до номера проведённой
+    правки.
+    """
+
+    __tablename__ = "fact_inputs"
+
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        sa.Uuid, sa.ForeignKey("workspaces.id", ondelete="CASCADE"), primary_key=True
+    )
+    inputs: Mapped[int] = mapped_column(sa.BigInteger, primary_key=True)
+    part: Mapped[str] = mapped_column(sa.Text, primary_key=True)
+    ref: Mapped[uuid.UUID] = mapped_column(sa.Uuid, primary_key=True)
+
+
+class RegisterState(FinanceBase):
+    """Регистры итогов компании (`core/registers.py`): на какой день и при каких настройках посчитаны.
+
+    `signature` - подпись того, что меняет итоги всех договоров разом: начало
+    учёта и источники оплат, наши юрлица, смыслы статусов, месяц. Сменилась -
+    пересчитывается всё; иначе - только договоры с другой подписью входов.
+    `facts_seq` - номер проведения журнала, после которого посчитано начало
+    учёта, когда его не задал человек (оно - от первой оплаты).
+    """
+
+    __tablename__ = "register_state"
+
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        sa.Uuid, sa.ForeignKey("workspaces.id", ondelete="CASCADE"), primary_key=True
+    )
+    signature: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("''"))
+    day: Mapped[date | None] = mapped_column(sa.Date)
+    since: Mapped[date | None] = mapped_column(sa.Date)
+    facts_seq: Mapped[int] = mapped_column(sa.BigInteger, server_default=sa.text("0"))
+    updated_at: Mapped[datetime] = mapped_column(sa.DateTime(timezone=True), server_default=sa.func.now())
+
+
+class RegisterContract(FinanceBase):
+    """Итог договора на день регистра: сальдо, переплата, оплачено и до какого дня это верно.
+
+    Строка - вывод, руками не правится: пересчитывается, когда сменилась
+    подпись входов договора (`signature`: условия договора и версия его фактов
+    журнала) или наступил `valid_until` (в учёте есть оплата будущим числом).
+    Входящее сальдо гасят оплаты так же, как месяц: `opening_paid` - разнесено
+    на него всего, `opening_cash` - из этого платежами, без аванса на начало.
+    """
+
+    __tablename__ = "register_contracts"
+
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        sa.Uuid, sa.ForeignKey("workspaces.id", ondelete="CASCADE"), primary_key=True
+    )
+    contract_id: Mapped[uuid.UUID] = mapped_column(sa.Uuid, primary_key=True)
+    signature: Mapped[str] = mapped_column(sa.Text)
+    valid_until: Mapped[date | None] = mapped_column(sa.Date)
+    #: Считает ли KORT начисления договора; нет - долг неизвестен.
+    accrues: Mapped[bool] = mapped_column(sa.Boolean, server_default=sa.text("true"))
+    opening: Mapped[Decimal | None] = mapped_column(MONEY)
+    opening_paid: Mapped[Decimal] = mapped_column(MONEY, server_default=sa.text("0"))
+    opening_cash: Mapped[Decimal] = mapped_column(MONEY, server_default=sa.text("0"))
+    opening_executor: Mapped[uuid.UUID | None] = mapped_column(sa.Uuid)
+    #: Сверх всех начислений - платежами (переплата).
+    over: Mapped[Decimal] = mapped_column(MONEY, server_default=sa.text("0"))
+    #: Оплачено в учёте KORT на день регистра.
+    paid: Mapped[Decimal] = mapped_column(MONEY, server_default=sa.text("0"))
+
+
+class RegisterMonth(FinanceBase):
+    """Месяц расчётов договора: начислено, разнесено оплат, оплачено за месяц и поступило.
+
+    `bucket` - месяц, который гасят оплаты (начисленный к дню регистра или уже
+    оплаченный вперёд); остальные строки несут только «оплачено за месяц, как
+    держит таблица» (`attributed`) и «поступило в месяце» (`received`).
+    """
+
+    __tablename__ = "register_months"
+
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        sa.Uuid, sa.ForeignKey("workspaces.id", ondelete="CASCADE"), primary_key=True
+    )
+    contract_id: Mapped[uuid.UUID] = mapped_column(sa.Uuid, primary_key=True)
+    month: Mapped[date] = mapped_column(sa.Date, primary_key=True)
+    bucket: Mapped[bool] = mapped_column(sa.Boolean, server_default=sa.text("false"))
+    accrued: Mapped[Decimal] = mapped_column(MONEY, server_default=sa.text("0"))
+    #: С какого дня начисление месяца - долг: «Период с» или первое число.
+    starts: Mapped[date | None] = mapped_column(sa.Date)
+    #: Наше юрлицо месяца: исполнитель на день периода.
+    executor_id: Mapped[uuid.UUID | None] = mapped_column(sa.Uuid)
+    paid: Mapped[Decimal] = mapped_column(MONEY, server_default=sa.text("0"))
+    cash: Mapped[Decimal] = mapped_column(MONEY, server_default=sa.text("0"))
+    attributed: Mapped[Decimal] = mapped_column(MONEY, server_default=sa.text("0"))
+    received: Mapped[Decimal] = mapped_column(MONEY, server_default=sa.text("0"))
+
+
+class RegisterAccrual(FinanceBase):
+    """Начисление периода договора - из условий, соглашений и поправок, от начала договора до горизонта."""
+
+    __tablename__ = "register_accruals"
+
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        sa.Uuid, sa.ForeignKey("workspaces.id", ondelete="CASCADE"), primary_key=True
+    )
+    contract_id: Mapped[uuid.UUID] = mapped_column(sa.Uuid, primary_key=True)
+    period_from: Mapped[date] = mapped_column(sa.Date, primary_key=True)
+    month: Mapped[date] = mapped_column(sa.Date)
+    period_to: Mapped[date | None] = mapped_column(sa.Date)
+    base: Mapped[Decimal | None] = mapped_column(MONEY)
+    amount: Mapped[Decimal | None] = mapped_column(MONEY)
+    executor_id: Mapped[uuid.UUID | None] = mapped_column(sa.Uuid)
+    customer_id: Mapped[uuid.UUID | None] = mapped_column(sa.Uuid)
+    #: Поправка месяца (документ ядра) и «не начислять».
+    adjustment_id: Mapped[uuid.UUID | None] = mapped_column(sa.Uuid)
+    skipped: Mapped[bool] = mapped_column(sa.Boolean, server_default=sa.text("false"))
+
+
 class EntityTaxPeriod(FinanceBase):
     """Режим нашего юрлица с даты: какой и плательщик ли НДС."""
 
@@ -284,6 +409,11 @@ __all__ = [
     "FACT_KINDS",
     "FACT_SOURCES",
     "Fact",
+    "FactInput",
+    "RegisterAccrual",
+    "RegisterContract",
+    "RegisterMonth",
+    "RegisterState",
     "TAX_REGIMES",
     "TaxYear",
 ]

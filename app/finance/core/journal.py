@@ -46,10 +46,24 @@
 компании в новом процессе проводит заново, не веря метке: старый процесс на
 выкладке ещё пишет и счётчика не знает.
 
-Части - `PARTS`: `kort` (документы ядра, соглашения, решения по оплатам -
-дёшево), `journal` (разнесение всех операций), `1c` (сопоставление
+Части - `PARTS`: `kort` (документы ядра и соглашения - дёшево), `journal`
+(разнесение операций и решения человека по ним), `1c` (сопоставление
 документов 1С). Начислениям нужны только соглашения и поправки: правка одного
 договора не стоит им разнесения всего журнала денег.
+
+Что проводится заново (шаг 2, 27.10.2026)
+──────────────────────────────────────────
+Не весь журнал, а то, что изменилось. Писатель вместе со сдвигом счётчика
+кладёт в очередь (`FactInput`), что именно правил (`_dirt`): операцию или
+решение по ней - эту операцию; документ или соглашение - договор; форму
+реестра - всю часть. Разнесение одной операции не зависит от других
+операций: только от неё, решения человека и формы реестра - сторон,
+номера, даты, окончания и суммы договора (`SHAPE`), написаний и БИН
+участников, юрлиц счетов, наших юрлиц. Сопоставление 1С читает те же колонки
+договора. Поэтому правка примечания, статуса, отдела или доли договора
+журнал не трогает вовсе, новая выписка проводит свои операции, а решение
+«эта оплата по этому договору» - одну. Значение счётчика без строки в очереди
+(писал старый процесс на выкладке) - проводится всё.
 """
 from __future__ import annotations
 
@@ -65,13 +79,21 @@ import sqlalchemy as sa
 from sqlalchemy import event
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.finance.core.models import Fact
+from app.finance.core.models import Fact, FactInput
 
 PARTS = ("kort", "journal", "1c")
 #: Ключи каждой части: проведение части сравнивает и снимает только свои.
-PREFIXES = {"kort": ("doc:", "amend:", "cp:"), "journal": ("op:",), "1c": ("1c:", "1cm:")}
+PREFIXES = {"kort": ("doc:", "amend:"), "journal": ("op:", "cp:"), "1c": ("1c:", "1cm:")}
 #: Ключи, которые проводятся по договору: у документа ядра и соглашения договор не меняется.
 SCOPED = ("doc:", "amend:")
+#: Ключ очереди «вся часть»: правка, после которой ключи не назвать (форма реестра, 1С).
+WHOLE = uuid.UUID(int=0)
+#: Колонки договора, по которым выписка и 1С находят договор: форма реестра.
+SHAPE = frozenset({"executor_id", "customer_id", "number", "number_key", "signed_at", "end_date", "amount", "deleted_at"})
+#: Колонки участника, по которым выписка и 1С узнают сторону.
+PARTY = frozenset({"name", "normalized_name", "bin", "details", "merged_into_id", "archived_at"})
+#: Больше стольких операций разом (загрузили выписку) - дешевле провести журнал денег целиком.
+_OPERATIONS_MAX = 400
 #: Счётчики компании: номер проведения, правки хранилищ, при какой правке проведено.
 SEQ, INPUTS, POSTED = "facts", "facts.inputs", "facts.posted"
 #: Вид документа ядра → вид факта: «верно у KORT» - решение человека.
@@ -86,6 +108,8 @@ _BULK = "finance.journal.bulk"
 _SEEN = "finance.journal.seen"
 _POSTED_HERE = "finance.journal.posted"
 _SCOPED_DONE = "finance.journal.scoped"
+#: Регистры итогов, построенные этой сессией (`core/registers.of`): запись в хранилища их сбрасывает.
+REGISTERS = "finance.registers"
 #: Больше стольких договоров документы ядра проводятся целиком, а не по договорам.
 _SCOPE_MAX = 300
 _TRACKED = "_finance_journal"
@@ -198,8 +222,8 @@ def _months(start: date | None, end: date | None, accrued: date | None) -> list[
 
 
 def _kort_drafts(session: Session, workspace: Any, contracts: set[uuid.UUID] | None = None) -> dict[str, Draft]:
-    """Документы ядра, соглашения и решения по оплатам; `contracts` - только документы и соглашения этих договоров."""
-    from app.finance.contracts.models import ContractAmendment, ContractPayment
+    """Документы ядра и соглашения; `contracts` - только этих договоров."""
+    from app.finance.contracts.models import ContractAmendment
     from app.finance.core.models import Document
 
     out: dict[str, Draft] = {}
@@ -231,22 +255,16 @@ def _kort_drafts(session: Session, workspace: Any, contracts: set[uuid.UUID] | N
                 "applied": row.applied_at is not None,
             },
         )
-    if contracts is not None:
-        return out
-    for row in session.scalars(sa.select(ContractPayment).where(ContractPayment.workspace_id == workspace.id)):
-        key = f"cp:{row.operation_id}"
-        out[key] = Draft(
-            key=key, kind="decision", source="kort", day=row.created_at.date() if row.created_at else None,
-            contract_id=row.contract_id, author=row.created_by,
-            data={"what": "payment", "operation": row.operation_id, "action": "link" if row.contract_id else "none"},
-        )
     return out
 
 
-def _journal_drafts(session: Session, workspace: Any) -> dict[str, Draft]:
-    """Операции журнала денег - оплаты с договором по разнесению."""
+def _journal_drafts(session: Session, workspace: Any, operations: set[uuid.UUID] | None = None) -> dict[str, Draft]:
+    """Операции журнала денег - оплаты с договором по разнесению - и решения человека по ним.
+
+    `operations` - только эти операции: разнесение одной не зависит от других.
+    """
     from app.finance.contracts import payments as contract_payments
-    from app.finance.contracts.models import Contract
+    from app.finance.contracts.models import Contract, ContractPayment
     from app.finance.contracts.service import Registry
     from app.finance.models import Account, Operation
 
@@ -254,7 +272,7 @@ def _journal_drafts(session: Session, workspace: Any) -> dict[str, Draft]:
     contracts = list(
         session.scalars(sa.select(Contract).where(Contract.workspace_id == workspace.id, Contract.deleted_at.is_(None)))
     )
-    allocation = contract_payments.allocate(session, workspace, registry, contracts)
+    allocation = contract_payments.allocate(session, workspace, registry, contracts, operations=operations)
     paid = {operation.id: (contract_id, how) for contract_id, items in allocation.paid.items() for operation, how in items}
     disputed: dict[uuid.UUID, set[uuid.UUID]] = defaultdict(set)
     for contract_id, items in allocation.open.items():
@@ -265,18 +283,21 @@ def _journal_drafts(session: Session, workspace: Any) -> dict[str, Draft]:
     )
     out: dict[str, Draft] = {}
     # Колонками, а не строками операций: строка тащит `raw` выписки, а его здесь не читают.
-    for operation in session.execute(
-        sa.select(
-            Operation.id, Operation.kind, Operation.paid_at, Operation.amount_base, Operation.counterparty_id,
-            Operation.account_to_id, Operation.account_from_id, Operation.period_start, Operation.period_end,
-            Operation.accrued_at, Operation.period_label, Operation.comment, Operation.contract_ref,
-        ).where(
-            Operation.workspace_id == workspace.id,
-            Operation.deleted_at.is_(None),
-            Operation.status == "fact",
-            Operation.kind.in_(("income", "expense")),
-        )
-    ):
+    query = sa.select(
+        Operation.id, Operation.kind, Operation.paid_at, Operation.amount_base, Operation.counterparty_id,
+        Operation.account_to_id, Operation.account_from_id, Operation.period_start, Operation.period_end,
+        Operation.accrued_at, Operation.period_label, Operation.comment, Operation.contract_ref,
+    ).where(
+        Operation.workspace_id == workspace.id,
+        Operation.deleted_at.is_(None),
+        Operation.status == "fact",
+        Operation.kind.in_(("income", "expense")),
+    )
+    decisions = sa.select(ContractPayment).where(ContractPayment.workspace_id == workspace.id)
+    if operations is not None:
+        query = query.where(Operation.id.in_(list(operations) or [WHOLE]))
+        decisions = decisions.where(ContractPayment.operation_id.in_(list(operations) or [WHOLE]))
+    for operation in session.execute(query):
         found = paid.get(operation.id)
         candidates = disputed.get(operation.id)
         if operation.kind == "expense" and found is None and not candidates:
@@ -295,6 +316,13 @@ def _journal_drafts(session: Session, workspace: Any) -> dict[str, Draft]:
                 "label": operation.period_label, "comment": operation.comment, "contract_ref": operation.contract_ref,
                 "open": sorted(str(item) for item in candidates) if candidates else None,
             },
+        )
+    for row in session.scalars(decisions):
+        key = f"cp:{row.operation_id}"
+        out[key] = Draft(
+            key=key, kind="decision", source="kort", day=row.created_at.date() if row.created_at else None,
+            contract_id=row.contract_id, author=row.created_by,
+            data={"what": "payment", "operation": row.operation_id, "action": "link" if row.contract_id else "none"},
         )
     return out
 
@@ -367,30 +395,47 @@ BUILDERS = {"kort": _kort_drafts, "journal": _journal_drafts, "1c": _onec_drafts
 
 
 def post(
-    session: Session, workspace: Any, parts: Iterable[str] = PARTS, *, contracts: Iterable[uuid.UUID] | None = None
+    session: Session,
+    workspace: Any,
+    parts: Iterable[str] = PARTS,
+    *,
+    contracts: Iterable[uuid.UUID] | None = None,
+    operations: Iterable[uuid.UUID] | None = None,
 ) -> dict[str, int]:
     """Провести части в журнал: новое, изменённое, снятое. Возвращает, сколько чего записано.
 
     `contracts` - только документы ядра и соглашения этих договоров (часть
     `kort`): так начисления одного договора не ждут проведения всей компании.
     Договор у документа и соглашения не меняется, поэтому сравнивать с
-    журналом можно по договору.
+    журналом можно по договору. `operations` - только эти операции и решения
+    по ним (часть `journal`): разнесение одной операции от других не зависит.
     """
     from app.finance.contracts.fields import bump
 
     chosen = [part for part in PARTS if part in set(parts)]
     wanted: dict[str, Draft] = {}
     scope = set(contracts) if contracts is not None else None
+    picked = set(operations) if operations is not None else None
     if scope is not None:
         if chosen != ["kort"]:
             raise ValueError("по договорам проводятся только документы ядра и соглашения")
         wanted.update(_kort_drafts(session, workspace, scope))
         prefixes = list(SCOPED)
+    elif picked is not None:
+        if chosen != ["journal"]:
+            raise ValueError("по операциям проводится только журнал денег")
+        wanted.update(_journal_drafts(session, workspace, picked))
+        prefixes = list(PREFIXES["journal"])
     else:
         for part in chosen:
             wanted.update(BUILDERS[part](session, workspace))
         prefixes = [prefix for part in chosen for prefix in PREFIXES[part]]
-    query = sa.select(Fact).where(
+    # Строками, а не объектами: сравнению нужны поля подписи, а объектов ORM
+    # на журнал денег - тысячи (27.10.2026).
+    query = sa.select(
+        Fact.id, Fact.key, Fact.kind, Fact.source, Fact.day, Fact.period, Fact.amount, Fact.contract_id,
+        Fact.party_id, Fact.entity_id, Fact.data, Fact.author, Fact.void,
+    ).where(
         Fact.workspace_id == workspace.id,
         Fact.ended_seq.is_(None),
         sa.or_(*(Fact.key.startswith(prefix) for prefix in prefixes)),
@@ -399,7 +444,13 @@ def post(
         # И по ключу: если документ всё же сменил договор, его прежняя версия
         # найдётся, а не останется второй действующей.
         query = query.where(sa.or_(Fact.contract_id.in_(list(scope)), Fact.key.in_(list(wanted) or [""])))
-    current = {fact.key: fact for fact in session.scalars(query)}
+    if picked is not None:
+        keys = [f"{prefix}{item}" for item in picked for prefix in prefixes]
+        current = {}
+        for start in range(0, len(keys), _CHUNK):
+            current.update({fact.key: fact for fact in session.execute(query.where(Fact.key.in_(keys[start : start + _CHUNK])))})
+    else:
+        current = {fact.key: fact for fact in session.execute(query)}
     writes: list[tuple[Draft, Fact | None]] = []
     counts = {"new": 0, "changed": 0, "void": 0}
     for key, draft in wanted.items():
@@ -441,7 +492,9 @@ def post(
     # Прежние версии могли лежать в карте сессии с пустым `ended_seq`.
     for _draft, old in writes:
         if old is not None:
-            session.expire(old)
+            loaded = session.identity_map.get(session.identity_key(Fact, old.id))
+            if loaded is not None:
+                session.expire(loaded)
     counts["seq"] = seq
     return counts
 
@@ -508,13 +561,13 @@ def ensure(
             # Много договоров - дешевле провести документы компании целиком.
             scope = None
     tracked = getattr(type(session), _TRACKED, False)
+    pending: dict[str, set[uuid.UUID]] = info.setdefault(_PENDING, {}).get(workspace_id) or {}
+    # Не верить очереди: слежения нет, была массовая правка без объектов или
+    # компания в этом процессе ещё не проводилась (старый процесс на выкладке
+    # пишет, не зная очереди).
+    blind = not tracked or bool(info.get(_BULK)) or workspace_id not in _CHECKED
     # Своя незакоммиченная правка: метка общая для всех сессий, её правку она ещё не знает.
-    own = (
-        not tracked
-        or bool(info.get(_BULK))
-        or workspace_id in info.get(_PENDING, set())
-        or workspace_id not in _CHECKED
-    )
+    own = blind or any(pending.values())
     observed: dict[uuid.UUID, int] = info.setdefault(_OBSERVED, {})
     if not own:
         inputs = _counter(session, workspace_id, INPUTS) or 0
@@ -523,7 +576,8 @@ def ensure(
             return
     _lock(session, workspace_id)
     inputs = _counter(session, workspace_id, INPUTS) or 0
-    if not own and _counter(session, workspace_id, POSTED) == inputs:
+    posted = _counter(session, workspace_id, POSTED) or 0
+    if not own and posted == inputs:
         # Пока ждали замка, провёл другой запрос.
         fresh.update(PARTS)
         return
@@ -535,14 +589,66 @@ def ensure(
         info.setdefault(_SCOPED_DONE, {}).setdefault(workspace_id, set()).update(scope)
         return
     observed.setdefault(workspace_id, inputs)
-    post(session, workspace, missing)
-    fresh.update(missing)
+    work = {part: {WHOLE} for part in PARTS} if blind else _queued(session, workspace_id, posted, inputs)
+    for part, refs in pending.items():
+        work.setdefault(part, set()).update(refs)
+    # Метку «проведено до N» ставит только то проведение, после которого свежи
+    # все части: оно проводит и очередь частей, проведённых этой сессией
+    # раньше, - иначе чужая правка между двумя проведениями осталась бы за меткой.
+    closing = fresh.union(missing).issuperset(PARTS)
+    for part in PARTS:
+        if part in missing or (closing and work.get(part)):
+            _post_part(session, workspace, part, work.get(part) or set())
+            fresh.add(part)
+            pending.pop(part, None)
     if fresh.issuperset(PARTS):
         # Весь журнал проведён после всех правок этой сессии: коммит унесёт их вместе.
-        _set_counter(session, workspace_id, POSTED, observed.pop(workspace_id))
-        info.get(_PENDING, set()).discard(workspace_id)
+        mark = observed.pop(workspace_id)
+        _set_counter(session, workspace_id, POSTED, mark)
+        session.execute(
+            sa.delete(FactInput).where(FactInput.workspace_id == workspace_id, FactInput.inputs <= mark)
+            .execution_options(synchronize_session=False)
+        )
+        info.get(_PENDING, {}).pop(workspace_id, None)
         # Проверенной компания станет с коммитом: откат унесёт и проведение.
         info.setdefault(_POSTED_HERE, set()).add(workspace_id)
+
+
+def _queued(session: Session, workspace_id: uuid.UUID, posted: int, inputs: int) -> dict[str, set[uuid.UUID]]:
+    """Что записано в очередь правками после проведённой: часть → ключи (`WHOLE` - вся часть).
+
+    Номер правки без строки в очереди - правку писал тот, кто очереди не знает
+    (старый процесс на выкладке): тогда не угадывать, что он менял, а
+    провести всё.
+    """
+    if inputs <= posted:
+        return {}
+    out: dict[str, set[uuid.UUID]] = {}
+    numbers: set[int] = set()
+    for number, part, ref in session.execute(
+        sa.select(FactInput.inputs, FactInput.part, FactInput.ref).where(
+            FactInput.workspace_id == workspace_id, FactInput.inputs > posted, FactInput.inputs <= inputs
+        )
+    ):
+        numbers.add(int(number))
+        out.setdefault(part, set()).add(ref)
+    if len(numbers) < inputs - posted:
+        return {part: {WHOLE} for part in PARTS}
+    return out
+
+
+def _post_part(session: Session, workspace: Any, part: str, refs: set[uuid.UUID]) -> None:
+    """Провести часть по ключам очереди: вся часть, операции или договоры."""
+    if not refs:
+        return
+    if WHOLE in refs:
+        post(session, workspace, [part])
+    elif part == "journal" and len(refs) <= _OPERATIONS_MAX:
+        post(session, workspace, ["journal"], operations=refs)
+    elif part == "kort" and len(refs) <= _SCOPE_MAX:
+        post(session, workspace, ["kort"], contracts=refs)
+    else:
+        post(session, workspace, [part])
 
 
 # ── События сессии ───────────────────────────────────────────────────────────
@@ -561,37 +667,107 @@ def _inputs() -> tuple[type, ...]:
     )
 
 
-def _mark(session: Session, workspaces: set[uuid.UUID]) -> None:
+def _changed(obj: Any, names: frozenset[str]) -> bool:
+    attrs = sa.inspect(obj).attrs
+    return any(name in attrs and attrs[name].history.has_changes() for name in names)
+
+
+def _was(obj: Any, name: str) -> list[Any]:
+    """Прежние значения поля в этой правке (договор документа сменили)."""
+    return list(sa.inspect(obj).attrs[name].history.deleted or ())
+
+
+def _dirt(obj: Any, how: str) -> list[tuple[str, uuid.UUID]]:
+    """Что правка объекта (`new`, `dirty`, `deleted`) делает несвежим: часть журнала и ключ."""
+    from app.finance.contracts.models import Contract, ContractAmendment, ContractPayment, CounterpartyName, GroupEntity
+    from app.finance.core.models import Document
+    from app.finance.models import Account, Counterparty, Operation
+    from app.finance.onec.models import OnecBase, OnecDocument
+
+    shape = [("journal", WHOLE), ("1c", WHOLE)]
+    if isinstance(obj, Operation):
+        return [("journal", obj.id)]
+    if isinstance(obj, ContractPayment):
+        return [("journal", obj.operation_id)]
+    if isinstance(obj, (Document, ContractAmendment)):
+        ids = {obj.contract_id, *(_was(obj, "contract_id") if how == "dirty" else ())}
+        return [("kort", item if item is not None else WHOLE) for item in ids]
+    if isinstance(obj, Contract):
+        if how == "dirty":
+            # Примечание, статус, отдел, свои поля - разнесению и 1С всё равно.
+            return shape if _changed(obj, SHAPE) else []
+        return [*shape, ("kort", obj.id)]
+    if isinstance(obj, Counterparty):
+        # Новый участник - ещё ничья сторона: операции с ним проводятся своими ключами.
+        if how == "new" or (how == "dirty" and not _changed(obj, PARTY)):
+            return []
+        return shape
+    if isinstance(obj, Account):
+        if how == "new" or (how == "dirty" and not _changed(obj, frozenset({"group_entity_id"}))):
+            return []
+        return [("journal", WHOLE)]
+    if isinstance(obj, (CounterpartyName, GroupEntity)):
+        return shape
+    if isinstance(obj, (OnecBase, OnecDocument)):
+        return [("1c", WHOLE)]
+    return []
+
+
+def _mark(session: Session, dirt: dict[uuid.UUID, dict[str, set[uuid.UUID]]]) -> None:
     info = session.info
-    info.setdefault(_PENDING, set()).update(workspaces)
-    info.setdefault(_SEEN, set()).update(workspaces)
-    for workspace_id in workspaces:
-        info.get(_FRESH, {}).pop(workspace_id, None)
+    pending = info.setdefault(_PENDING, {})
+    for workspace_id, parts in dirt.items():
+        mine = pending.setdefault(workspace_id, {})
+        fresh = info.get(_FRESH, {}).get(workspace_id)
+        done = info.get(_SCOPED_DONE, {}).get(workspace_id)
+        for part, refs in parts.items():
+            mine.setdefault(part, set()).update(refs)
+            if fresh is not None:
+                fresh.discard(part)
+            if part == "kort" and done is not None:
+                if WHOLE in refs:
+                    done.clear()
+                else:
+                    done.difference_update(refs)
         info.get(_OBSERVED, {}).pop(workspace_id, None)
-        info.get(_SCOPED_DONE, {}).pop(workspace_id, None)
 
 
 def _after_flush(session: Session, _context: Any) -> None:
+    from app.finance.core.models import RegisterState
     from app.finance.models import ActionLog
 
+    # Запомненные регистры - до любой правки этой сессии (условия договора,
+    # настройки оплат, смыслы статусов): дальше их надо проверить заново.
+    if REGISTERS in session.info and any(
+        not isinstance(obj, RegisterState) for obj in (*session.new, *session.dirty, *session.deleted)
+    ):
+        session.info.pop(REGISTERS, None)
     inputs = _inputs()
-    touched: set[uuid.UUID] = set()
+    dirt: dict[uuid.UUID, dict[str, set[uuid.UUID]]] = {}
+    seen: set[uuid.UUID] = session.info.setdefault(_SEEN, set())
+
+    def note(obj: Any, how: str) -> None:
+        if obj.workspace_id is None:
+            return
+        seen.add(obj.workspace_id)
+        for part, ref in _dirt(obj, how):
+            dirt.setdefault(obj.workspace_id, {}).setdefault(part, set()).add(ref)
+
     for obj in session.new:
         if isinstance(obj, inputs):
-            touched.add(obj.workspace_id)
+            note(obj, "new")
         elif isinstance(obj, ActionLog) and obj.workspace_id is not None:
             # Компания, о которой эта сессия писала журнал действий: на неё же
             # ложатся массовые правки без объектов в сессии.
-            session.info.setdefault(_SEEN, set()).add(obj.workspace_id)
+            seen.add(obj.workspace_id)
     for obj in session.dirty:
         if isinstance(obj, inputs) and session.is_modified(obj, include_collections=False):
-            touched.add(obj.workspace_id)
+            note(obj, "dirty")
     for obj in session.deleted:
         if isinstance(obj, inputs):
-            touched.add(obj.workspace_id)
-    touched.discard(None)  # type: ignore[arg-type]
-    if touched:
-        _mark(session, touched)
+            note(obj, "deleted")
+    if dirt:
+        _mark(session, dirt)
 
 
 def _on_execute(state: Any) -> None:
@@ -613,34 +789,59 @@ def _on_execute(state: Any) -> None:
 
 
 def _before_commit(session: Session) -> None:
+    if session.in_nested_transaction():
+        # Savepoint (первый `bump` счётчика, вложенная пачка): правки ещё не
+        # унесены, очередь пишет корневой коммит.
+        return
     if session.new or session.dirty or session.deleted:
         session.flush()
     info = session.info
-    targets = set(info.get(_PENDING) or ())
+    targets = {
+        workspace_id: {part: refs for part, refs in parts.items() if refs}
+        for workspace_id, parts in (info.get(_PENDING) or {}).items()
+        if any(parts.values())
+    }
     if info.get(_BULK):
         seen = info.get(_SEEN) or set()
-        if seen:
-            targets |= seen
-        else:
+        if not seen:
             from app.finance.contracts.models import Counter
 
-            targets |= set(session.scalars(sa.select(Counter.workspace_id).where(Counter.name == POSTED)))
+            seen = set(session.scalars(sa.select(Counter.workspace_id).where(Counter.name == POSTED)))
+        for workspace_id in seen:
+            targets[workspace_id] = {part: {WHOLE} for part in PARTS}
     if not targets:
         return
     from app.finance.contracts.fields import bump
 
-    for workspace_id in targets:
-        bump(session, workspace_id, INPUTS)
+    for workspace_id, parts in targets.items():
+        number = bump(session, workspace_id, INPUTS)
+        rows = [
+            {"workspace_id": workspace_id, "inputs": number, "part": part, "ref": ref}
+            for part, refs in parts.items()
+            for ref in ({WHOLE} if WHOLE in refs else refs)
+        ]
+        for start in range(0, len(rows), _CHUNK):
+            session.execute(sa.insert(FactInput.__table__), rows[start : start + _CHUNK])
 
 
 def _forget(session: Session, *_args: Any) -> None:
-    for key in (_PENDING, _FRESH, _OBSERVED, _BULK, _SEEN, _POSTED_HERE, _SCOPED_DONE):
+    for key in (_PENDING, _FRESH, _OBSERVED, _BULK, _SEEN, _POSTED_HERE, _SCOPED_DONE, REGISTERS):
         session.info.pop(key, None)
 
 
 def _after_commit(session: Session) -> None:
+    if session.in_nested_transaction():
+        # SQLAlchemy зовёт это событие и на savepoint: забыть правки сессии
+        # здесь значило бы не сдвинуть счётчик правок при корневом коммите.
+        return
     _CHECKED.update(session.info.get(_POSTED_HERE) or ())
     _forget(session)
+
+
+def _after_end(session: Session, transaction: Any) -> None:
+    """Корневая транзакция кончилась (откат, закрытие): правки сессии больше не её."""
+    if transaction.parent is None:
+        _forget(session)
 
 
 def register(factory: sessionmaker[Session]) -> None:
@@ -651,7 +852,8 @@ def register(factory: sessionmaker[Session]) -> None:
     event.listen(factory, "do_orm_execute", _on_execute)
     event.listen(factory, "before_commit", _before_commit)
     event.listen(factory, "after_commit", _after_commit)
-    event.listen(factory, "after_rollback", _forget)
+    # Не `after_rollback`: его зовут и на откат savepoint (гонка первого `bump`).
+    event.listen(factory, "after_transaction_end", _after_end)
     setattr(factory.class_, _TRACKED, True)
 
 

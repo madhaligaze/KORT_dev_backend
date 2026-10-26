@@ -27,13 +27,15 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+import sqlalchemy as sa
+
 from app.finance.contracts.models import Contract
-from app.finance.contracts.service import Access
-from app.finance.core.accruals import Ledger, month_key
+from app.finance.contracts.service import Access, Registry
+from app.finance.core.accruals import month_key
 from app.finance.core.acts import Acts
 from app.finance.core.debts import NOBODY, _SPECIAL, entity_codes, fractions, group_titles, side_of
-from app.finance.core.payments import OPENING, Money
-from app.finance.models import Workspace
+from app.finance.core.registers import totals
+from app.finance.models import Counterparty, Workspace
 
 _ZERO = Decimal("0")
 _ONE = Decimal("1")
@@ -75,13 +77,17 @@ class Revenue:
         self.months = year_months(year)
         self.side = side
         self.today = today
-        money = Money(session, workspace, today=today)
-        self.since = money.since
+        registry = Registry(session, workspace)
         # Подписи групп - те же, что у долгов.
-        self.names, self.codes = money.names, entity_codes(session, workspace)
-        visible = [item for item in _visible(session, workspace, access) if side_of(item, money.registry.is_own) == side]
+        self.names = dict(
+            session.execute(sa.select(Counterparty.id, Counterparty.name).where(Counterparty.workspace_id == workspace.id)).all()
+        )
+        self.codes = entity_codes(session, workspace)
+        visible = [item for item in _visible(session, workspace, access) if side_of(item, registry.is_own) == side]
         self.contracts: dict[uuid.UUID, Contract] = {item.id: item for item in visible}
-        ledger = Ledger(session, workspace.id, visible)
+        # Начисления и оплаты - из регистра итогов на сегодня (`core/registers.py`).
+        found = totals(session, workspace, visible, day=today)
+        self.since = found.since
         acts = Acts(session, workspace, access, book, today=today)
         first = month_key(self.since) if self.since else None
         start, end = date(year, 1, 1), date(year, 12, 1)
@@ -90,7 +96,7 @@ class Revenue:
         self.entity_of: dict[tuple[uuid.UUID, str], uuid.UUID | None] = {}
         for contract in visible:
             months: dict[str, dict[str, Decimal]] = defaultdict(dict)
-            for accrual in ledger.schedule(contract, since=start, until=end).accruals:
+            for accrual in found.ledger.accruals(contract, since=start, until=end):
                 if accrual.skipped or not accrual.amount:
                     continue
                 months[accrual.month]["accrued"] = months[accrual.month].get("accrued", _ZERO) + accrual.amount
@@ -99,25 +105,15 @@ class Revenue:
                 act = slot.chosen
                 if act is not None and act.amount is not None and month in self.months:
                     months[month]["acts"] = months[month].get("acts", _ZERO) + act.amount
-            if first is not None:
-                item = money.contract(contract, ledger)
-                for key, bucket in item.buckets.items():
-                    for part in bucket.parts:
-                        if part.payment.source == "opening":
-                            continue
-                        month = max(month_key(part.payment.paid_at), first) if key == OPENING else key
-                        if month in self.months:
-                            months[month]["paid"] = months[month].get("paid", _ZERO) + part.amount
-                for part in item.over:
-                    if part.payment.source == "opening":
-                        continue
-                    month = max(month_key(part.payment.paid_at), first)
+            item = found.settlements.get(contract.id)
+            if first is not None and item is not None:
+                # Оплачено за месяц - как держит таблица; поступило - по дню платежа.
+                for month, amount in item.attributed.items():
                     if month in self.months:
-                        months[month]["paid"] = months[month].get("paid", _ZERO) + part.amount
-                for payment in item.payments:
-                    month = month_key(payment.paid_at)
+                        months[month]["paid"] = months[month].get("paid", _ZERO) + amount
+                for month, amount in item.received.items():
                     if month in self.months:
-                        months[month]["received"] = months[month].get("received", _ZERO) + payment.amount
+                        months[month]["received"] = months[month].get("received", _ZERO) + amount
             if months:
                 self.cells[contract.id] = months
         #: С какого месяца KORT знает оплаты: раньше - «оплачено» пусто, а не ноль.

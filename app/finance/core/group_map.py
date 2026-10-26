@@ -32,8 +32,9 @@ from sqlalchemy.orm import Session
 
 from app.finance.contracts.service import Access, Registry
 from app.finance.core import vat
-from app.finance.core.accruals import Ledger, month_key
+from app.finance.core.accruals import month_key
 from app.finance.core.debts import entity_codes, side_of
+from app.finance.core.registers import ledger_on
 from app.finance.models import Account, Counterparty, Operation, Workspace
 
 _ZERO = Decimal("0")
@@ -78,15 +79,14 @@ def group_map(session: Session, workspace: Workspace, access: Access, *, year: i
     known = {item.entity_id for item in years.values()}
 
     visible = _visible(session, workspace, access)
-    ledger = Ledger(session, workspace.id, visible)
+    ledger = ledger_on(session, workspace, visible, day=today)
     since, until = date(year, 1, 1), date(year, 12, 1)
     current = month_key(today)
     intra: dict[tuple[uuid.UUID, uuid.UUID], dict[str, Any]] = {}
     moves: dict[tuple[uuid.UUID, uuid.UUID], dict[str, Any]] = {}
     for contract in visible:
         side = side_of(contract, registry.is_own)
-        schedule = ledger.schedule(contract, since=since, until=until)
-        accruals = [item for item in schedule.accruals if not item.skipped and item.amount]
+        accruals = [item for item in ledger.accruals(contract, since=since, until=until) if not item.skipped and item.amount]
         if side == "intra" and contract.executor_id in known and contract.customer_id in known:
             entry = intra.setdefault(
                 (contract.executor_id, contract.customer_id), {"contracts": 0, "accrued": _ZERO, "numbers": []}

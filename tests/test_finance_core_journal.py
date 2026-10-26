@@ -164,9 +164,9 @@ def test_svezhest_mezhdu_sessiyami_i_svoya_pravka(space, monkeypatch):
     calls_made: list[tuple] = []
     original = journal.post
 
-    def counting(session, workspace, parts=journal.PARTS, contracts=None):
+    def counting(session, workspace, parts=journal.PARTS, **keys):
         calls_made.append(tuple(parts))
-        return original(session, workspace, parts, contracts=contracts)
+        return original(session, workspace, parts, **keys)
 
     monkeypatch.setattr(journal, "post", counting)
     with finance_session() as session:
@@ -205,9 +205,9 @@ def test_nachisleniyam_hvataet_dokumentov_yadra(space, monkeypatch):
     parts_seen: list[tuple] = []
     original = journal.post
 
-    def counting(session, workspace, parts=journal.PARTS, contracts=None):
+    def counting(session, workspace, parts=journal.PARTS, contracts=None, **keys):
         parts_seen.append((tuple(parts), sorted(contracts) if contracts is not None else None))
-        return original(session, workspace, parts, contracts=contracts)
+        return original(session, workspace, parts, contracts=contracts, **keys)
 
     monkeypatch.setattr(journal, "post", counting)
     with finance_session() as session:

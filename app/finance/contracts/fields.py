@@ -17,6 +17,7 @@ from __future__ import annotations
 import re
 import uuid
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Any, Iterable
 
 import sqlalchemy as sa
@@ -333,7 +334,13 @@ def party_key(name: Any) -> str:
     лица, и склеивать их молча нельзя. Похожие, но не равные по ключу имена
     сводит только человек («Это ТОО «Атриум плюс»?»).
     """
-    text = _QUOTES.sub(" ", str(name or ""))
+    return _party_key(str(name or ""))
+
+
+@lru_cache(maxsize=65536)
+def _party_key(text: str) -> str:
+    # Одно имя разносится по тысячам операций и документов 1С: ключ - один раз.
+    text = _QUOTES.sub(" ", text)
     for pattern, short in _ORG_FORMS:
         text = pattern.sub(short, text)
     return squash(text)
