@@ -49,7 +49,7 @@ from sqlalchemy.orm import Session
 from app.finance.contracts import shares as shares_module
 from app.finance.contracts.models import Contract, ContractDepartment, ContractPerson, Department, Employee, GroupEntity
 from app.finance.contracts.service import Access, Registry, people_of
-from app.finance.core import opening as opening_module
+from app.finance.core import journal
 from app.finance.core.accruals import Ledger, month_key, month_start
 from app.finance.core.acts import Act, Acts
 from app.finance.core.payments import OPENING, ContractMoney, Money, Payment
@@ -351,7 +351,7 @@ class Debts:
         self.money = Money(session, workspace, today=day)
         self.since = self.money.since
         acts = Acts(session, workspace, access, book, today=day) if basis == "acts" else None
-        openings = opening_module.current(session, workspace, self.since, "acts") if acts is not None and self.since else {}
+        openings = journal.openings(session, workspace.id, self.since, "acts") if acts is not None and self.since else {}
         self.names = dict(
             session.execute(sa.select(Counterparty.id, Counterparty.name).where(Counterparty.workspace_id == workspace.id)).all()
         )
@@ -607,7 +607,7 @@ def reconcile_saldo(
     first = month_key(money.since) if money.since else ""
     window = [month for month in reconciler.window if first <= month <= current] if first else []
     acts = Acts(session, workspace, access, book, today=today) if basis == "acts" else None
-    openings = opening_module.current(session, workspace, money.since, "acts") if acts is not None and money.since else {}
+    openings = journal.openings(session, workspace.id, money.since, "acts") if acts is not None and money.since else {}
     lines: list[dict[str, Any]] = []
     counts = {"contracts": 0, "same": 0, "months": 0, "months_same": 0}
     contracts_out: dict[str, Any] = {}

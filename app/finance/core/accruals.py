@@ -18,6 +18,9 @@
 * **Поправка месяца** (`Document` вида `adjustment`) - решение человека:
   другая сумма или «не начислять», с причиной. Поправка в месяце, где по
   условиям начисления нет, - доначисление.
+
+Соглашения и поправки читаются из журнала фактов (`core/journal.py`), условия
+«сейчас» - из договора.
 """
 from __future__ import annotations
 
@@ -32,8 +35,9 @@ from typing import Any, Iterable, Iterator
 import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
-from app.finance.contracts.models import Contract, ContractAmendment, ListValue
-from app.finance.core.models import Document
+from app.finance.contracts.models import Contract, ListValue
+from app.finance.core import journal
+from app.finance.core.journal import Adjustment, Agreement
 from app.finance.core.terms import Terms, Timeline
 
 #: Фазы, при которых договор не начисляется вовсе.
@@ -96,7 +100,7 @@ class Accrual:
     amount: Decimal | None
     executor_id: uuid.UUID | None
     customer_id: uuid.UUID | None
-    adjustment: Document | None = None
+    adjustment: Adjustment | None = None
 
     @property
     def skipped(self) -> bool:
@@ -152,21 +156,17 @@ class Ledger:
         self.workspace_id = workspace_id
         self.contracts = {item.id: item for item in contracts}
         ids = list(self.contracts)
-        self.amendments: dict[uuid.UUID, list[ContractAmendment]] = defaultdict(list)
-        self.adjustments: dict[tuple[uuid.UUID, str], Document] = {}
+        self.amendments: dict[uuid.UUID, list[Agreement]] = defaultdict(list)
+        self.adjustments: dict[tuple[uuid.UUID, str], Adjustment] = {}
         if ids:
-            for row in session.scalars(sa.select(ContractAmendment).where(ContractAmendment.contract_id.in_(ids))):
-                self.amendments[row.contract_id].append(row)
-            for doc in session.scalars(
-                sa.select(Document).where(
-                    Document.workspace_id == workspace_id,
-                    Document.kind == "adjustment",
-                    Document.deleted_at.is_(None),
-                    Document.contract_id.in_(ids),
-                )
-            ):
-                if doc.period is not None and doc.contract_id is not None:
-                    self.adjustments[(doc.contract_id, month_key(doc.period))] = doc
+            # Начислениям нужны только соглашения и поправки - без разнесения журнала денег.
+            journal.ensure(session, workspace_id, ("kort",), contracts=ids)
+            for row in journal.agreements(session, workspace_id, ids):
+                if row.contract_id is not None:
+                    self.amendments[row.contract_id].append(row)
+            for item in journal.adjustments(session, workspace_id, ids):
+                if item.period is not None and item.contract_id is not None:
+                    self.adjustments[(item.contract_id, month_key(item.period))] = item
         self.phases: dict[uuid.UUID, str] = {
             row.id: str((row.meaning or {}).get("phase") or "")
             for row in session.scalars(

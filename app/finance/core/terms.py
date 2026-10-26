@@ -19,7 +19,7 @@ from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Iterable
 
-from app.finance.contracts.models import Contract, ContractAmendment
+from app.finance.contracts.models import Contract
 from app.finance.contracts.service import value_of
 
 #: Ключи, у которых бывает «с даты». `status` - с фазы 2 ядра (пауза,
@@ -75,7 +75,9 @@ class Timeline:
     def __init__(
         self,
         contract: Contract,
-        amendments: Iterable[ContractAmendment],
+        # Строки `contract_amendments` или соглашения журнала (`core/journal.Agreement`):
+        # у обоих `contract_id`, `effective_from`, `position`, `before`, `after`, `applied_at`.
+        amendments: Iterable[Any],
         phase_of: Callable[[uuid.UUID | None], str],
     ) -> None:
         self.contract = contract

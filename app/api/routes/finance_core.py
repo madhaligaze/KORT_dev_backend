@@ -464,6 +464,33 @@ def contract_months(contract_id: UUID, member: Member = Depends(viewer)) -> dict
     return _run(member, action)
 
 
+@router.get("/contracts/{contract_id}/facts")
+def contract_facts(contract_id: UUID, history: bool = Query(default=False), member: Member = Depends(viewer)) -> dict[str, Any]:
+    """Что было с договором: факты журнала одним списком и долг на сегодня по кускам - каждый со ссылкой на факт."""
+
+    def action(session, workspace, access):
+        from app.finance.core import calls
+
+        contract = _opened_contract(session, workspace, access, contract_id)
+        out = calls.contract_facts(session, workspace, access, contract, history=history)
+        out["explain"] = calls.explain(session, workspace, access, contract, day=contracts_service.today())
+        return out
+
+    return _run(member, action)
+
+
+@router.get("/facts")
+def facts_changes(
+    since: str = Query(default="0", max_length=300),
+    limit: int = Query(default=500, ge=1, le=2000),
+    member: Member = Depends(viewer),
+) -> dict[str, Any]:
+    """Факты журнала после курсора - новые, новые версии, снятые: «подписаться» выборкой."""
+    from app.finance.core import calls
+
+    return _run(member, lambda s, w, a: calls.changes(s, w, a, since=since, limit=limit))
+
+
 class AdjustmentIn(BaseModel):
     month: str = Field(pattern=r"^\d{4}-\d{2}$")
     amount: str | None = Field(default=None, max_length=40)
@@ -615,7 +642,7 @@ def _entities_out(session, workspace, money) -> list[dict[str, Any]]:
     from app.finance.onec.models import OnecBase, OnecDocument
 
     journal: dict[Any, int] = {}
-    for contract_id, items in money.allocation.paid.items():
+    for contract_id, items in money.journal_paid.items():
         contract = money.contracts.get(contract_id)
         entity = money.ours(contract) if contract is not None else None
         if entity is not None:

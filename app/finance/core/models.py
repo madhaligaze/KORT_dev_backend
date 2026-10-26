@@ -1,7 +1,13 @@
-"""Таблицы ядра: документы договора, налоговый профиль наших юрлиц по датам, налоговые годы.
+"""Таблицы ядра: журнал фактов, документы договора, налоговый профиль наших юрлиц, налоговые годы.
 
 Что здесь правда, а что производное
 ───────────────────────────────────
+**Журнал фактов** (`facts`, `core/journal.py`) - одна форма для всего, что
+случилось с договором: оплаты, счета, АВР, ЭСФ, соглашения, поправки, сальдо,
+решения. Факты проводятся из хранилищ - операций журнала денег, документов
+1С, документов ядра, соглашений - и не правятся: изменение - новая версия.
+Итоги ядра читают журнал.
+
 **Правда** - документы договора за месяц (`documents`: поправка начисления,
 счёт, АВР, ЭСФ, входящее сальдо), режим нашего юрлица с даты
 (`entity_tax_periods`), поправки компании к налоговым числам года
@@ -39,6 +45,12 @@ TAX_REGIMES = ("general", "simplified", "other")
 DOCUMENT_KINDS = ("adjustment", "bill", "act", "esf", "opening", "verified")
 #: Откуда документ: записан в KORT, прочитан из книги или из 1С.
 DOCUMENT_SOURCES = ("kort", "book", "1c")
+#: Виды фактов журнала (`core/journal.py`): оплата, счёт, АВР, ЭСФ,
+#: соглашение, поправка начисления, входящее сальдо, решение человека.
+FACT_KINDS = ("payment", "bill", "act", "esf", "agreement", "adjustment", "opening", "decision")
+#: Откуда факт: записан человеком в KORT, журнал движения денег (выписки),
+#: 1С, таблица Google.
+FACT_SOURCES = ("kort", "journal", "1c", "book")
 
 
 def _uuid() -> uuid.UUID:
@@ -109,6 +121,77 @@ class Document(FinanceBase):
         sa.DateTime(timezone=True), server_default=sa.func.now()
     )
     deleted_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True))
+
+
+class Fact(FinanceBase):
+    """Факт журнала: что случилось с договором, в одной форме для всех источников.
+
+    Журнал не правится. Источник изменился - пишется новая версия факта с тем
+    же ключом (`replaces` - прежняя, у прежней ставится `ended_seq`); источник
+    убрал факт - пишется пометка «снят» (`void`). Так у любого числа есть
+    ответ «из каких фактов и с какой записи», а у подписчика - «что изменилось
+    после номера N» (`seq`). Единственная правка строки - `ended_seq`, и она
+    выводима из `replaces`; хранится, чтобы «действующие» выбирались индексом.
+
+    `key` - кто этот факт в своём хранилище: `op:<операция>`, `1c:<документ
+    1С>`, `doc:<документ KORT>`, `amend:<соглашение>`, `cp:<операция>`
+    (решение по оплате), `1cm:<документ 1С>` (решение по документу 1С).
+    Ссылки на договор и стороны - без внешних ключей: журнал помнит и то, чего
+    в реестре уже нет.
+    """
+
+    __tablename__ = "facts"
+    __table_args__ = (
+        sa.CheckConstraint(_in("kind", FACT_KINDS), name="fact_kind"),
+        sa.CheckConstraint(_in("source", FACT_SOURCES), name="fact_source"),
+        sa.Index(
+            "uq_facts_current_key",
+            "workspace_id",
+            "key",
+            unique=True,
+            postgresql_where=sa.text("ended_seq IS NULL"),
+            sqlite_where=sa.text("ended_seq IS NULL"),
+        ),
+        sa.Index(
+            "ix_facts_current_kind",
+            "workspace_id",
+            "kind",
+            "contract_id",
+            postgresql_where=sa.text("ended_seq IS NULL"),
+            sqlite_where=sa.text("ended_seq IS NULL"),
+        ),
+        sa.Index("ix_facts_workspace_seq", "workspace_id", "seq"),
+        sa.Index("ix_facts_contract", "workspace_id", "contract_id", "seq"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(sa.Uuid, primary_key=True, default=_uuid)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(sa.Uuid, sa.ForeignKey("workspaces.id", ondelete="CASCADE"))
+    #: Номер проведения, в котором факт записан: один на всё проведение.
+    seq: Mapped[int] = mapped_column(sa.BigInteger)
+    key: Mapped[str] = mapped_column(sa.Text)
+    kind: Mapped[str] = mapped_column(sa.Text)
+    source: Mapped[str] = mapped_column(sa.Text)
+    #: Когда случилось: день платежа, дата документа, «с какого дня» соглашения.
+    day: Mapped[date | None] = mapped_column(sa.Date)
+    #: За какой месяц (первое число): месяц АВР, поправки, сальдо.
+    period: Mapped[date | None] = mapped_column(sa.Date)
+    amount: Mapped[Decimal | None] = mapped_column(MONEY)
+    contract_id: Mapped[uuid.UUID | None] = mapped_column(sa.Uuid)
+    #: Вторая сторона: плательщик, клиент.
+    party_id: Mapped[uuid.UUID | None] = mapped_column(sa.Uuid)
+    #: Наше юрлицо: чей счёт, чья база 1С.
+    entity_id: Mapped[uuid.UUID | None] = mapped_column(sa.Uuid)
+    #: Остальное своего вида: № и состояние, «за какие месяцы», как найден договор…
+    data: Mapped[dict] = mapped_column(JSONB, server_default=sa.text("'{}'"))
+    #: Кто записал: человек у фактов KORT, пусто у фактов источника.
+    author: Mapped[uuid.UUID | None] = mapped_column(sa.Uuid)
+    recorded_at: Mapped[datetime] = mapped_column(sa.DateTime(timezone=True), server_default=sa.func.now())
+    #: Прежняя версия того же факта.
+    replaces: Mapped[uuid.UUID | None] = mapped_column(sa.Uuid)
+    #: Источник факт убрал: строка - пометка «снят», без суммы.
+    void: Mapped[bool] = mapped_column(sa.Boolean, server_default=sa.text("false"))
+    #: Номер проведения, в котором факт сменила новая версия или пометка «снят».
+    ended_seq: Mapped[int | None] = mapped_column(sa.BigInteger)
 
 
 class EntityTaxPeriod(FinanceBase):
@@ -198,6 +281,9 @@ __all__ = [
     "DOCUMENT_SOURCES",
     "Document",
     "EntityTaxPeriod",
+    "FACT_KINDS",
+    "FACT_SOURCES",
+    "Fact",
     "TAX_REGIMES",
     "TaxYear",
 ]

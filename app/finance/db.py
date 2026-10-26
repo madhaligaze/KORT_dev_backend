@@ -93,8 +93,12 @@ def get_finance_session_factory() -> sessionmaker[Session]:
         # Номер изменения у каждой записанной операции - для живого режима
         # листа «Таблица» (см. `app/finance/live.py`).
         from app.finance import live
+        from app.finance.core import journal
 
         live.register(_session_factory)
+        # Журнал фактов замечает правки хранилищ и проводит их перед чтением
+        # итогов (`core/journal.py`) - после номеров живого режима.
+        journal.register(_session_factory)
     init_finance_database()
     return _session_factory
 

@@ -1,11 +1,12 @@
 """Оплаты договоров по месяцам: какой месяц чем оплачен и сколько осталось (фаза 4).
 
-К какому договору оплата - уже решено в двух местах: операции журнала
-движения денег - `contracts/payments.allocate` (сторона, счёт юрлица, номер
-договора из источника, решение человека), поступления 1С -
-`onec/match.resolve` (договор документа). Источник оплат - один на наше
-юрлицо (`core/settings.py`): журнал или 1С. Одна и та же оплата есть и в
-выписке, и в 1С, и сложить оба источника значило бы удвоить.
+Оплаты - факты журнала (`core/journal.py`, вид `payment`). К какому договору
+оплата, решено при проведении: операции журнала движения денег -
+`contracts/payments.allocate` (сторона, счёт юрлица, номер договора из
+источника, решение человека), поступления 1С - `onec/match.resolve` (договор
+документа). Источник оплат - один на наше юрлицо (`core/settings.py`): журнал
+или 1С. Одна и та же оплата есть и в выписке, и в 1С, и сложить оба источника
+значило бы удвоить.
 
 К какому месяцу - здесь, при чтении, ничего не храня:
 
@@ -45,18 +46,17 @@ import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
 from app.finance import history
-from app.finance.contracts import payments as contract_payments
 from app.finance.contracts.fields import number_key, party_key
 from app.finance.contracts.models import Contract, ContractPayment, CounterpartyName
 from app.finance.contracts.service import Access, Actor, Registry, ensure_writable, get_contract, people_of, visible_to
+from app.finance.core import journal
 from app.finance.core import settings as core_settings
 from app.finance.core.accruals import Ledger, month_key, month_start
-from app.finance.core.models import Document
+from app.finance.core.models import Fact
 from app.finance.layout import norm
 from app.finance.models import Account, Category, Counterparty, Operation, Workspace
-from app.finance.onec import match as onec_match
 from app.finance.onec.match import visual_key
-from app.finance.onec.models import OnecBase, OnecDocument
+from app.finance.onec.models import OnecBase
 from app.finance.service import FinanceError
 
 _ZERO = Decimal("0")
@@ -290,27 +290,43 @@ class Money:
         )
         #: Сколько поступлений «без договора» скрыто и почему - после `without_contract`.
         self.hidden: dict[str, int] = {}
-        self.allocation = contract_payments.allocate(session, workspace, self.registry, self.contracts.values())
+        #: Операции журнала денег, отнесённые к договору, - при любом источнике оплат юрлица.
+        self.journal_paid: dict[uuid.UUID, list[Fact]] = defaultdict(list)
+        #: Спорная операция → договоры, между которыми спор.
+        self.disputed: dict[uuid.UUID, set[uuid.UUID]] = {}
         self.by_contract: dict[uuid.UUID, list[Payment]] = defaultdict(list)
-        for contract_id, items in self.allocation.paid.items():
-            contract = self.contracts.get(contract_id)
-            if contract is None or self.settings.source_of(self.ours(contract)) != "journal":
-                continue
-            for operation, how in items:
-                self.by_contract[contract_id].append(self._from_operation(operation, contract_id, how))
-        for payment in self._onec():
-            self.by_contract[payment.contract_id].append(payment)
+        wanted = {entity for entity, source in self.settings.sources.items() if source == "1c"}
+        self._bases: dict[str, str] | None = None
+        first_income: date | None = None
+        journal.ensure(session, workspace.id)
+        for fact in journal.current(session, workspace.id, ("payment",)):
+            data = fact.data or {}
+            if fact.source == "journal":
+                if data.get("direction") == "in" and (first_income is None or fact.day < first_income):
+                    first_income = fact.day
+                if data.get("open"):
+                    self.disputed[journal.ref_of(fact)] = {uuid.UUID(item) for item in data["open"]}
+                if fact.contract_id is None:
+                    continue
+                self.journal_paid[fact.contract_id].append(fact)
+                contract = self.contracts.get(fact.contract_id)
+                if contract is None or self.settings.source_of(self.ours(contract)) != "journal":
+                    continue
+                self.by_contract[fact.contract_id].append(self._from_journal(fact))
+            elif fact.source == "1c":
+                # Поступления 1С - только у юрлиц, чей источник оплат 1С.
+                if (
+                    fact.entity_id not in wanted
+                    or not data.get("posted")
+                    or fact.amount is None
+                    or data.get("state") != "ok"
+                    or fact.contract_id not in self.contracts
+                ):
+                    continue
+                self.by_contract[fact.contract_id].append(self._from_onec(fact))
         # По первому поступлению вообще, а не первой разнесённой оплате: иначе
         # неразнесённое раньше неё выпадало из «Оплат без договора» как «до учёта».
         firsts = [payment.paid_at for items in self.by_contract.values() for payment in items]
-        first_income = session.scalar(
-            sa.select(sa.func.min(Operation.paid_at)).where(
-                Operation.workspace_id == workspace.id,
-                Operation.deleted_at.is_(None),
-                Operation.status == "fact",
-                Operation.kind == "income",
-            )
-        )
         if first_income is not None:
             firsts.append(first_income)
         first = min(firsts, default=None)
@@ -327,85 +343,56 @@ class Money:
             return contract.customer_id
         return None
 
-    def _from_operation(self, operation: Operation, contract_id: uuid.UUID, how: str) -> Payment:
-        account = operation.account_to_id if operation.kind == "income" else operation.account_from_id
+    def _from_journal(self, fact: Fact) -> Payment:
+        """Оплата из факта журнала денег: плательщик и счёт - по нынешним именам."""
+        data = fact.data or {}
+        months = data.get("months")
+        account = data.get("account")
         return Payment(
-            key=f"op:{operation.id}",
+            key=fact.key,
             source="journal",
-            contract_id=contract_id,
-            paid_at=operation.paid_at,
-            amount=operation.amount_base,
-            hint=_hint_of(operation.period_start, operation.period_end, operation.accrued_at),
-            how=how,
-            payer=self.names.get(operation.counterparty_id, "") if operation.counterparty_id else "",
-            comment=operation.comment or "",
-            contract_ref=operation.contract_ref or "",
-            account=self.accounts.get(account, "") if account else "",
-            label=operation.period_label or "",
+            contract_id=fact.contract_id,
+            paid_at=fact.day,
+            amount=fact.amount,
+            hint=(months[0], months[1]) if months else None,
+            how=data.get("how") or "",
+            payer=self.names.get(fact.party_id, "") if fact.party_id else "",
+            comment=data.get("comment") or "",
+            contract_ref=data.get("contract_ref") or "",
+            account=self.accounts.get(uuid.UUID(account), "") if account else "",
+            label=data.get("label") or "",
         )
 
-    def _onec(self) -> list[Payment]:
-        """Поступления 1С юрлиц, у которых источник оплат - 1С."""
-        wanted = {entity for entity, source in self.settings.sources.items() if source == "1c"}
-        if not wanted:
-            return []
-        bases = {
-            base.id: base
-            for base in self.session.scalars(
-                sa.select(OnecBase).where(
-                    OnecBase.workspace_id == self.workspace.id,
-                    OnecBase.group_entity_id.in_(wanted),
-                    OnecBase.state == "active",
+    def _from_onec(self, fact: Fact) -> Payment:
+        """Поступление 1С из факта: счёт - название базы, месяц - счёта, который оно оплачивает."""
+        if self._bases is None:
+            self._bases = {
+                str(base_id): title
+                for base_id, title in self.session.execute(
+                    sa.select(OnecBase.id, OnecBase.title).where(OnecBase.workspace_id == self.workspace.id)
                 )
-            )
-        }
-        if not bases:
-            return []
-        docs = list(
-            self.session.scalars(
-                sa.select(OnecDocument).where(
-                    OnecDocument.base_id.in_(list(bases)),
-                    OnecDocument.kind.in_(("payment", "invoice")),
-                    OnecDocument.deleted.is_(False),
-                    OnecDocument.gone.is_(False),
-                )
-            )
+            }
+        data = fact.data or {}
+        months = data.get("months")
+        return Payment(
+            key=fact.key,
+            source="1c",
+            contract_id=fact.contract_id,
+            paid_at=fact.day,
+            amount=fact.amount,
+            hint=(months[0], months[1]) if months else None,
+            how=data.get("how") or "",
+            payer=data.get("payer") or "",
+            comment=data.get("comment") or "",
+            contract_ref=data.get("contract_ref") or "",
+            account=self._bases.get(data.get("base") or "", ""),
         )
-        resolved = onec_match.resolve(docs, bases, onec_match.build_index(self.session, self.workspace.id))
-        invoices = {(doc.base_id, doc.ref): doc for doc in docs if doc.kind == "invoice"}
-        out: list[Payment] = []
-        for doc in docs:
-            if doc.kind != "payment" or not doc.posted or doc.amount is None:
-                continue
-            found = resolved.matches.get(doc.id)
-            if found is None or found.state != "ok" or found.contract_id not in self.contracts:
-                continue
-            invoice = invoices.get((doc.base_id, doc.basis_ref)) if doc.basis_ref else None
-            month = onec_match.month_key(invoice.period_from or invoice.doc_date) if invoice is not None else ""
-            out.append(
-                Payment(
-                    key=f"1c:{doc.id}",
-                    source="1c",
-                    contract_id=found.contract_id,
-                    paid_at=doc.doc_date,
-                    amount=doc.amount,
-                    hint=(month, month) if month else None,
-                    how=found.how,
-                    payer=doc.party_name,
-                    comment=doc.content or "",
-                    contract_ref=doc.contract_number or "",
-                    account=bases[doc.base_id].title,
-                )
-            )
-        return out
 
-    def _openings(self) -> dict[uuid.UUID, Document]:
+    def _openings(self) -> dict[uuid.UUID, Fact]:
         """Сальдо по начислениям: оплаты гасят его; сальдо по АВР - начало долга по актам (`core/debts.py`)."""
-        from app.finance.core import opening as opening_module
-
         if self.since is None:
             return {}
-        return opening_module.current(self.session, self.workspace, self.since, "accruals")
+        return journal.openings(self.session, self.workspace.id, self.since, "accruals")
 
     # ── Договор ──────────────────────────────────────────────────────────────
 
@@ -517,11 +504,8 @@ class Money:
         own_keys = {legal_tail(name) for account_id, name in self.accounts.items() if self.account_entity.get(account_id)}
         own_keys |= {bare_key(self.names.get(party_id, "")) for party_id in self.registry.own}
         own_keys.discard("")
-        allocated = {operation.id for items in self.allocation.paid.values() for operation, _how in items}
-        disputed: dict[uuid.UUID, set[uuid.UUID]] = defaultdict(set)
-        for contract_id, items in self.allocation.open.items():
-            for operation in items:
-                disputed[operation.id].add(contract_id)
+        allocated = {journal.ref_of(fact) for items in self.journal_paid.values() for fact in items}
+        disputed = self.disputed
         decided = set(
             self.session.scalars(
                 sa.select(ContractPayment.operation_id).where(ContractPayment.workspace_id == self.workspace.id)
