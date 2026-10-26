@@ -315,6 +315,7 @@ def test_oplacheno_iz_kort(space, audit, monkeypatch):
         after = Registry(session, workspace)
         kort = {number: after.summary_of(numbers[number]) for number in ("№1", "№2")}
         assert [(item.paid, item.source) for item in kort.values()] == [(Decimal("150000"), "kort"), (Decimal("0"), "kort")]
+        assert kort["№1"].months == ("СЕНТЯБРЬ 2026", "ОКТЯБРЬ 2026"), "месяцы строк таблицы остаются - по ним «Разовые» по месяцам"
         assert summary_module.contracts_out(session, workspace, FULL)["contracts"][str(numbers["№2"].id)]["source"] == "kort"
         legal = numbers["№3"]
         assert after.summary_of(legal).source == "", "BBCL на таблице - оплачено из таблицы"

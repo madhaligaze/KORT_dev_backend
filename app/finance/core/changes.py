@@ -596,6 +596,175 @@ def undo_transfer(
         done.append(f"{label}: исполнитель прежний")
 
 
+# ── «Верно у KORT» ───────────────────────────────────────────────────────────
+
+
+def _verified_doc(session: Session, workspace_id: uuid.UUID, contract_id: uuid.UUID, period: date) -> Document | None:
+    return session.scalar(
+        sa.select(Document).where(
+            Document.workspace_id == workspace_id,
+            Document.contract_id == contract_id,
+            Document.kind == "verified",
+            Document.period == period,
+            Document.deleted_at.is_(None),
+        )
+    )
+
+
+def _record_verified(
+    session: Session, workspace: Workspace, contract: Contract, actor: Actor, reconciler: Any, line: Any, *, batch: str = ""
+) -> Document:
+    """Одно решение на договор и месяц; прежнее, устаревшее, переписывается новыми снимками."""
+    from app.finance.core.shadow import book_side, kort_side, month_title
+
+    period = month_start(line.month)
+    doc = _verified_doc(session, workspace.id, contract.id, period)
+    before = {"month": line.month, **(doc.meta or {}), "reason": doc.reason} if doc is not None else {}
+    if doc is None:
+        doc = Document(workspace_id=workspace.id, contract_id=contract.id, kind="verified", period=period, created_by=actor.user_id)
+        session.add(doc)
+    reason = "; ".join(part for part in (reconciler.difference(line), line.hint) if part)
+    meta: dict[str, Any] = {"kort": kort_side(line.kort), "book": book_side(line.book), "codes": list(line.codes)}
+    if batch:
+        meta["batch"] = batch
+    doc.meta, doc.reason = meta, reason
+    doc.updated_by, doc.updated_at = actor.user_id, _now()
+    session.flush()
+    history.write(
+        session, workspace, kind="contract.verified", entity="contract", entity_id=contract.id,
+        title=f"договор {contract.number or ''} · {month_title(line.month)}: верно у KORT - {reason}".replace("  ", " "),
+        before=before, after={"month": line.month, **meta, "reason": reason},
+        actor=actor.email,
+    )
+    return doc
+
+
+def _drop_verified(session: Session, workspace: Workspace, contract: Contract, actor: Actor, doc: Document) -> None:
+    from app.finance.core.shadow import month_title
+
+    doc.deleted_at = _now()
+    doc.updated_by = actor.user_id
+    session.flush()
+    month = month_key(doc.period)
+    history.write(
+        session, workspace, kind="contract.verified.remove", entity="contract", entity_id=contract.id,
+        title=f"договор {contract.number or ''} · {month_title(month)}: «верно у KORT» снято - месяц снова сверяется с таблицей".replace(
+            "  ", " "
+        ),
+        before={"month": month, **(doc.meta or {}), "reason": doc.reason},
+        actor=actor.email,
+    )
+
+
+def verify_month(
+    session: Session, workspace: Workspace, access: Access, actor: Actor, book: Any, contract_id: uuid.UUID, month: str
+) -> tuple[Document, str]:
+    """«Верно у KORT» для месяца договора: ошиблась таблица, условия договора под неё не подгоняются.
+
+    Решение - документ `verified` со снимком обеих сторон: в сверке и
+    «Переходе» месяц сошёлся, пока KORT и таблица считают его так же, как в
+    момент решения. Поменялись условия договора или строка таблицы - месяц
+    снова расходится, с пометкой, что решение устарело.
+    """
+    from app.finance.core.shadow import Reconciler, month_title
+
+    try:
+        month_start(month)
+    except (ValueError, IndexError) as exc:
+        raise ChangeError("Месяц - в виде 2026-07") from exc
+    contract, registry = _contract(session, workspace, access, contract_id)
+    reconciler = Reconciler(session, workspace, access, book, only=contract)
+    if month not in reconciler.window:
+        raise ChangeError(f"{month_title(month)}: в сводной таблице такого месяца нет - сверять не с чем")
+    item = reconciler.contract_shadow(contract)
+    line = next((line for line in item.lines if line.month == month), None) if item else None
+    if line is None or not line.codes:
+        raise ChangeError(f"{month_title(month)}: KORT и таблица и так совпадают")
+    if line.verified is not None:
+        raise ChangeError(f"{month_title(month)} уже отмечен «верно у KORT»")
+    doc = _record_verified(session, workspace, contract, actor, reconciler, line)
+    _finish(session, registry, contract, actor, [])
+    return doc, f"{_label(contract)} · {month_title(month)}: верно у KORT"
+
+
+def unverify(session: Session, workspace: Workspace, access: Access, actor: Actor, document_id: uuid.UUID) -> str:
+    from app.finance.core.shadow import month_title
+
+    doc = session.get(Document, document_id)
+    if doc is None or doc.workspace_id != workspace.id or doc.kind != "verified" or doc.deleted_at is not None:
+        raise NotFound("Решения «верно у KORT» уже нет")
+    contract, registry = _contract(session, workspace, access, doc.contract_id)
+    _drop_verified(session, workspace, contract, actor, doc)
+    _finish(session, registry, contract, actor, [])
+    return f"{_label(contract)} · {month_title(month_key(doc.period))}: решение снято, месяц снова расходится"
+
+
+def verify_slips(
+    session: Session, workspace: Workspace, access: Access, actor: Actor, book: Any,
+    *, entity: uuid.UUID | None = None, code: str = "",
+) -> dict[str, Any]:
+    """«Верно у KORT» разом - месяцы, где таблица ошиблась в периодах сама.
+
+    Пропущенный или дважды посчитанный день и месяцы, которые таблица после
+    него продолжает со сдвигом (`Reconciler._explain`), - если расходится
+    одно начало периода. Сумма или юрлицо тоже другие - месяц решается по
+    одному. Решения пачки помечены общим `batch`: вернуть всё разом -
+    `unverify_batch`.
+    """
+    from app.finance.core.shadow import Reconciler
+
+    _require_edit(access)
+    reconciler = Reconciler(session, workspace, access, book)
+    shadow = reconciler.run()
+    if entity is not None:
+        shadow = shadow.of_entity(entity, code)
+    targets = [
+        (item.contract, line)
+        for item in shadow.contracts.values()
+        for line in item.lines
+        if line.codes == ["period"] and line.slip and line.verified is None
+    ]
+    batch = str(uuid.uuid4())
+    done, contracts, skipped = 0, set(), []
+    for contract, line in targets:
+        try:
+            with session.begin_nested():
+                writable, registry = _contract(session, workspace, access, contract.id)
+                _record_verified(session, workspace, writable, actor, reconciler, line, batch=batch)
+                _finish(session, registry, writable, actor, [])
+            done += 1
+            contracts.add(contract.id)
+        except (FinanceError, PermissionError) as exc:
+            skipped.append(f"{_label(contract)}: {exc}")
+    return {"done": done, "contracts": len(contracts), "batch": batch if done else None, "skipped": skipped}
+
+
+def unverify_batch(session: Session, workspace: Workspace, access: Access, actor: Actor, batch: str) -> dict[str, Any]:
+    """Вернуть пачку «верно у KORT» целиком - решения, записанные одним нажатием."""
+    docs = [
+        doc
+        for doc in session.scalars(
+            sa.select(Document).where(
+                Document.workspace_id == workspace.id, Document.kind == "verified", Document.deleted_at.is_(None)
+            )
+        )
+        if (doc.meta or {}).get("batch") == batch
+    ]
+    if not docs:
+        raise NotFound("Этих решений уже нет - их вернули")
+    done, skipped = 0, []
+    for doc in docs:
+        try:
+            with session.begin_nested():
+                contract, registry = _contract(session, workspace, access, doc.contract_id)
+                _drop_verified(session, workspace, contract, actor, doc)
+                _finish(session, registry, contract, actor, [])
+            done += 1
+        except (FinanceError, PermissionError) as exc:
+            skipped.append(f"{_label(session.get(Contract, doc.contract_id))}: {exc}")
+    return {"done": done, "skipped": skipped}
+
+
 __all__ = [
     "ChangeError",
     "ORIGINS",
@@ -609,4 +778,8 @@ __all__ = [
     "set_adjustment",
     "status_by_phase",
     "status_from",
+    "unverify",
+    "unverify_batch",
+    "verify_month",
+    "verify_slips",
 ]

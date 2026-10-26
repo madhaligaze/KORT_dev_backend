@@ -147,7 +147,7 @@ def _accruals(session: Session, workspace: Workspace, access: Access, book: Any)
     tally = EntityTally()
     for item in reconciler.run().contracts.values():
         for line in item.lines:
-            tally.add(month_owner(item.contract, line.kort, line.book), item.contract.id, not line.codes, line.month)
+            tally.add(month_owner(item.contract, line.kort, line.book), item.contract.id, line.same, line.month)
     return reconciler.window, tally.out()
 
 

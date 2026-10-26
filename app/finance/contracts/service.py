@@ -411,16 +411,15 @@ class Registry:
             ours, theirs = contract.executor_id, contract.customer_id
             if not self.is_own(ours) and self.is_own(theirs):
                 ours, theirs = theirs, ours
-            if ours is not None and ours in self.kort_payments():
-                from app.finance.contracts import summary as summary_module
-
-                hit = summary_module.Match("found", paid=self.kort_paid().get(contract.id, Decimal("0")), source="kort")
-                self._summary_matches[contract.id] = hit
-                return hit
             party = self.parties_for([theirs]).get(theirs) if theirs else None
             names = ([party.name] if party is not None else []) + self.aliases(theirs)
             entity = self.own.get(ours) if ours else None
             hit = index.match(contract.number, names, entity.code if entity is not None else "")
+            if ours is not None and ours in self.kort_payments():
+                # Оплаты юрлица ведёт KORT: «Оплачено» - его, а месяцы и строки
+                # таблицы остаются (по ним «Разовые» раскладывают договоры по месяцам).
+                paid = self.kort_paid().get(contract.id, Decimal("0"))
+                hit = replace(hit, state="found", paid=paid, candidates=(), source="kort")
             self._summary_matches[contract.id] = hit
         return hit
 

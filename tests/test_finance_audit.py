@@ -552,6 +552,29 @@ def test_kazhdyy_izmenyayushchiy_marshrut_pishet_sobytie(app: FastAPI, monkeypat
     walk.call(owner, "POST", "/core/shadow/apply", json={key: first_day[key] for key in ("contract_id", "kind", "value")})
     walk.call(owner, "POST", "/core/shadow/apply-all", json={"kind": "period_day"})
     walk.call(owner, "POST", "/core/shadow/create", json={"key": view["unknown"][0]["key"]})
+    # «Верно у KORT»: у ОБО/9 в июле в таблице другая сумма, у ОБО/8 таблица пропустила 01.07 - 02.07.
+    core_book.put(company, core_book.build_book(
+        [["Мес", "Техн. 1", "Наша Фирма", "Заказчик (Название Фирмы)", "Сумма Договора", "№ Договора",
+          "Период с (нач.)", "Период по (зав.)"],
+         ["6", "ИЮНЬ 2026", "BBC", "ТОО Омегаком", "500 000", "ОБО/8", "01.06.2026", "30.06.2026"],
+         ["7", "ИЮЛЬ 2026", "BBC", "ТОО Омегаком", "500 000", "ОБО/8", "03.07.2026", "31.07.2026"],
+         ["6", "ИЮНЬ 2026", "BBC", "ТОО Сигмаком", "500 000", "ОБО/9", "01.06.2026", "30.06.2026"],
+         ["7", "ИЮЛЬ 2026", "BBC", "ТОО Сигмаком", "400 000", "ОБО/9", "01.07.2026", "31.07.2026"]],
+        title="Сводка", worksheet="Сводка",
+    ))
+
+    def line_of(contract_id: str, month: str) -> dict:
+        lines = owner.get(f"{BASE}/core/shadow").json()["lines"]
+        return next(line for line in lines if line["contract_id"] == contract_id and line["month"] == month)
+
+    assert line_of(sigma, "2026-07")["codes"] == ["amount"]
+    walk.call(owner, "POST", "/core/shadow/verify", json={"contract_id": sigma, "month": "2026-07"})
+    walk.call(owner, "DELETE", "/core/shadow/verify/{document_id}", document_id=line_of(sigma, "2026-07")["verified"]["id"])
+    assert line_of(omega, "2026-07")["slip"] == "gap"
+    slips = walk.call(owner, "POST", "/core/shadow/verify-slips", json={}).json()
+    assert slips["done"] == 1, slips
+    walk.call(owner, "DELETE", "/core/shadow/verify-batch/{batch}", batch=slips["batch"])
+    assert line_of(omega, "2026-07")["verified"] is None
     # Оплаты: начало учёта, входящее сальдо из книги и руками, поступление без договора.
     walk.call(owner, "PUT", "/core/payments/settings", json={"since": "2026-06-01"})
     core_book.put(company, core_book.build_book(

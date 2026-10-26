@@ -34,7 +34,9 @@ from app.finance.models import JSONB, MONEY, _in
 #: плательщиком НДС не бывают (НК РК с 2026 года) - проверяет `core/tax.py`.
 TAX_REGIMES = ("general", "simplified", "other")
 #: Документы договора: поправка начисления, счёт, АВР, ЭСФ, входящее сальдо.
-DOCUMENT_KINDS = ("adjustment", "bill", "act", "esf", "opening")
+#: `verified` - решение человека по сверке с таблицей: месяц договора у KORT
+#: верен, таблица в нём ошиблась или ещё не дописана (`core/changes.verify_month`).
+DOCUMENT_KINDS = ("adjustment", "bill", "act", "esf", "opening", "verified")
 #: Откуда документ: записан в KORT, прочитан из книги или из 1С.
 DOCUMENT_SOURCES = ("kort", "book", "1c")
 

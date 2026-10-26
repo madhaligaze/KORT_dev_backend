@@ -335,6 +335,65 @@ def shadow_apply_all(body: ApplyAllIn, member: Member = Depends(editor)) -> dict
     return _run(member, action)
 
 
+class VerifyIn(BaseModel):
+    contract_id: UUID
+    month: str = Field(pattern=r"^\d{4}-\d{2}$")
+
+
+@router.post("/shadow/verify", status_code=201)
+def shadow_verify(body: VerifyIn, member: Member = Depends(editor)) -> dict[str, Any]:
+    """«Верно у KORT» для месяца договора: ошиблась таблица, условия договора не меняются."""
+
+    def action(session, workspace, access):
+        _setup_only(access)
+        doc, text = changes.verify_month(
+            session, workspace, access, _actor(member), _book(session, workspace), body.contract_id, body.month
+        )
+        return {"ok": True, "id": str(doc.id), "text": text}
+
+    return _run(member, action)
+
+
+@router.delete("/shadow/verify/{document_id}")
+def shadow_unverify(document_id: UUID, member: Member = Depends(editor)) -> dict[str, Any]:
+    """Снять «верно у KORT»: месяц снова сверяется с таблицей."""
+
+    def action(session, workspace, access):
+        _setup_only(access)
+        return {"ok": True, "text": changes.unverify(session, workspace, access, _actor(member), document_id)}
+
+    return _run(member, action)
+
+
+class VerifySlipsIn(BaseModel):
+    entity: UUID | None = None
+
+
+@router.post("/shadow/verify-slips")
+def shadow_verify_slips(body: VerifySlipsIn, member: Member = Depends(editor)) -> dict[str, Any]:
+    """«Верно у KORT» разом - месяцы, где таблица пропустила день периода или посчитала его дважды."""
+
+    def action(session, workspace, access):
+        _setup_only(access)
+        code = _entity_code(session, workspace, body.entity)
+        return changes.verify_slips(
+            session, workspace, access, _actor(member), _book(session, workspace), entity=body.entity, code=code
+        )
+
+    return _run(member, action)
+
+
+@router.delete("/shadow/verify-batch/{batch}")
+def shadow_unverify_batch(batch: UUID, member: Member = Depends(editor)) -> dict[str, Any]:
+    """Вернуть пачку «верно у KORT» целиком."""
+
+    def action(session, workspace, access):
+        _setup_only(access)
+        return changes.unverify_batch(session, workspace, access, _actor(member), str(batch))
+
+    return _run(member, action)
+
+
 class FromBookIn(BaseModel):
     key: str = Field(min_length=8, max_length=40)
 
@@ -887,17 +946,6 @@ def book_columns_set(body: BookColumnIn, member: Member = Depends(editor)) -> di
         return book_module.layout_of(session, workspace.id)
 
     return _run(member, action)
-
-
-# ── Слои настройки: шаблон → компания → отдел → человек (R15, R17) ───────────
-
-
-@router.get("/layers")
-def layers_view(member: Member = Depends(viewer)) -> dict[str, Any]:
-    """Что задаёт шаблон «Компания услуг по договорам», чем компания отличается от него, что - отделы и люди."""
-    from app.finance.core import layers
-
-    return _run(member, lambda s, w, a: layers.layers(s, w, a))
 
 
 # ── Слова компании в колонках таблицы (R12, R13) ─────────────────────────────
