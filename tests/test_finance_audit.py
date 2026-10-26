@@ -575,6 +575,9 @@ def test_kazhdyy_izmenyayushchiy_marshrut_pishet_sobytie(app: FastAPI, monkeypat
     assert slips["done"] == 1, slips
     walk.call(owner, "DELETE", "/core/shadow/verify-batch/{batch}", batch=slips["batch"])
     assert line_of(omega, "2026-07")["verified"] is None
+    # «Верно у KORT» вместо предложения «сумма с даты» у ОБО/9.
+    amount = next(item for item in owner.get(f"{BASE}/core/shadow").json()["proposals"] if item["contract_id"] == sigma)
+    walk.call(owner, "POST", "/core/shadow/verify-proposal", json={"contract_id": sigma, "months": amount["months"]})
     # Оплаты: начало учёта, входящее сальдо из книги и руками, поступление без договора.
     walk.call(owner, "PUT", "/core/payments/settings", json={"since": "2026-06-01"})
     core_book.put(company, core_book.build_book(

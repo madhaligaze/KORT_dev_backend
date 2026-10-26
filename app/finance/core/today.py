@@ -168,7 +168,7 @@ def shadow_card(session: Session, workspace: Workspace, access: Access, *, today
     card = _card(
         "shadow", "Сверка с таблицей",
         go={"section": "shadow", "session": {"core.shadow.what": "accruals", "core.shadow.view": "proposals"}},
-        unit="предложений",
+        unit="дел",
     )
     book, error = book_module.current(session, workspace.id, wait=book_module.FIRST_READ_WAIT)
     if book is None:
@@ -176,13 +176,22 @@ def shadow_card(session: Session, workspace: Workspace, access: Access, *, today
         return card
     shadow = Reconciler(session, workspace, access, book).run()
     counts = shadow.counts()
-    card["count"] = counts["proposals"]
+    # Дела сверки - то, что решает человек: предложение, расходящийся месяц без
+    # предложения («Верно у KORT» или правка договора), договор таблицы без пары.
+    # Месяц только с подсказкой - тоже дело: без него карточка говорила бы
+    # «совпадают», пока месяцы расходятся.
+    proposed = {(proposal.contract_id, month) for proposal in shadow.proposals() for month in proposal.months}
+    alone = sum(
+        1 for line in shadow.lines() if line.codes and line.verified is None and (line.contract_id, line.month) not in proposed
+    )
+    card["count"] = counts["proposals"] + alone + counts["unknown"]
     card["lines"] = [
         {"label": "договоров совпадает с таблицей", "count": counts["clean"], "of": counts["contracts"]},
         {"label": "предложений дописать условия", "count": counts["proposals"], "go": {"core.shadow.view": "proposals"}},
+        {"label": "месяцев расходится без предложения", "count": alone, "go": {"core.shadow.view": "lines", "core.shadow.code": "alone"}},
         {"label": "договоров таблицы нет в реестре", "count": counts["unknown"], "go": {"core.shadow.view": "unknown"}},
     ]
-    if not counts["proposals"] and not counts["unknown"]:
+    if not card["count"]:
         card["empty"] = "Начисления KORT и таблицы совпадают"
     return card
 

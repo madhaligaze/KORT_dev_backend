@@ -382,6 +382,20 @@ def apply_proposal(
         if kind == "pause" and value.get("to") and was:
             status_from(session, workspace, access, actor, contract.id, uuid.UUID(was), day("to"), origin="book", summary="по сводной таблице")
         return f"{number}: приостановка с {since:%d.%m.%Y}"
+    if kind == "status":
+        statuses = value.get("statuses") or {}
+        chosen = option or (next(iter(statuses)) if len(statuses) == 1 else "")
+        if chosen not in statuses:
+            raise ChangeError("Выберите статус")
+        try:
+            status_id = uuid.UUID(str(statuses[chosen]))
+        except ValueError as exc:
+            raise ChangeError("Такого статуса в реестре нет") from exc
+        value_row = registry.values.get(status_id)
+        if value_row is None or value_row.field_key != "status":
+            raise ChangeError("Такого статуса в реестре нет")
+        patch(session, workspace, access, actor, contract.id, {"status": {"id": str(status_id)}}, known_seq=seq, mode=Mode(kind="fix"))
+        return f"{number}: статус «{value_row.value}»"
     if kind in ("stop", "end"):
         end = day("end_date")
         phase = Ledger(session, workspace.id, [contract]).phase_of(contract.status_id)
@@ -687,6 +701,38 @@ def verify_month(
     return doc, f"{_label(contract)} · {month_title(month)}: верно у KORT"
 
 
+def _months_text(months: list[str]) -> str:
+    from app.finance.core.shadow import month_title
+
+    titles = [month_title(month) for month in sorted(months)]
+    return ", ".join(titles) if len(titles) <= 3 else f"{titles[0]} - {titles[-1]}"
+
+
+def verify_proposal(
+    session: Session, workspace: Workspace, access: Access, actor: Actor, book: Any, contract_id: uuid.UUID, months: list[str]
+) -> dict[str, Any]:
+    """«Верно у KORT» вместо предложения подогнать договор под таблицу - все его расходящиеся месяцы без решения.
+
+    Предложение после этого не показывается (`shadow._settled`); решения -
+    одна пачка: вернуть разом (`unverify_batch`) или по месяцу.
+    """
+    from app.finance.core.shadow import Reconciler
+
+    contract, registry = _contract(session, workspace, access, contract_id)
+    reconciler = Reconciler(session, workspace, access, book, only=contract)
+    item = reconciler.contract_shadow(contract)
+    wanted = set(months)
+    targets = [line for line in (item.lines if item else []) if line.month in wanted and line.codes and line.verified is None]
+    if not targets:
+        raise ChangeError("Расходящихся месяцев без решения у предложения уже нет - сверка обновилась")
+    batch = str(uuid.uuid4())
+    for line in targets:
+        _record_verified(session, workspace, contract, actor, reconciler, line, batch=batch)
+    _finish(session, registry, contract, actor, [])
+    text = f"{_label(contract)} · {_months_text([line.month for line in targets])}: верно у KORT"
+    return {"text": text, "batch": batch, "done": len(targets)}
+
+
 def unverify(session: Session, workspace: Workspace, access: Access, actor: Actor, document_id: uuid.UUID) -> str:
     from app.finance.core.shadow import month_title
 
@@ -781,5 +827,6 @@ __all__ = [
     "unverify",
     "unverify_batch",
     "verify_month",
+    "verify_proposal",
     "verify_slips",
 ]

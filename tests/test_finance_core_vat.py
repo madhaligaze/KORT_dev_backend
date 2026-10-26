@@ -170,3 +170,25 @@ def test_perevod_klientov_predprosmotr_zapis_i_vozvrat(space):
             assert back[legal].forecast == 0 and back[bbc].forecast == before[bbc].forecast
     finally:
         history.CONTEXT.reset(token)
+
+
+def test_nds_mesyaca_v_lente_dogovora(space):
+    """НДС счёта и АВР месяца - в ленте договора: у исполнителя-плательщика на день периода, по режиму договора."""
+    from app.finance.core import shadow
+
+    with finance_session() as session:
+        workspace = finance_service.get_workspace(session, space)
+        included = _contract(session, workspace, "ТОО Альфаком", "116000")
+        on_top = _contract(session, workspace, "ТОО Бетаком", "100000", vat_mode="on_top")
+        tax.add_period(session, workspace, FULL, OWNER, _entity(session, "BBC"), {"valid_from": "2026-08-01", "regime": "general", "vat_payer": True})
+
+        def months(contract):
+            out = shadow.contract_months(session, workspace, FULL, contract, None, money=True, on=TODAY)
+            return {row["month"]: row["vat"] for row in out["months"]}
+
+        before, after = months(included)["2026-07"], months(included)["2026-08"]
+        assert before is None, "до постановки на НДС у месяца НДС нет"
+        assert after["mode"] == "included" and after["rate"] == "16" and Decimal(after["vat"]) == Decimal("16000")
+        assert Decimal(after["net"]) == Decimal("100000") and Decimal(after["gross"]) == Decimal("116000")
+        top = months(on_top)["2026-09"]
+        assert top["mode"] == "on_top" and Decimal(top["vat"]) == Decimal("16000") and Decimal(top["gross"]) == Decimal("116000")

@@ -354,6 +354,25 @@ def shadow_verify(body: VerifyIn, member: Member = Depends(editor)) -> dict[str,
     return _run(member, action)
 
 
+class VerifyProposalIn(BaseModel):
+    contract_id: UUID
+    months: list[str] = Field(min_length=1, max_length=36)
+
+
+@router.post("/shadow/verify-proposal", status_code=201)
+def shadow_verify_proposal(body: VerifyProposalIn, member: Member = Depends(editor)) -> dict[str, Any]:
+    """«Верно у KORT» вместо предложения: ошиблась таблица, договор под неё не подгоняется."""
+
+    def action(session, workspace, access):
+        _setup_only(access)
+        result = changes.verify_proposal(
+            session, workspace, access, _actor(member), _book(session, workspace), body.contract_id, body.months
+        )
+        return {"ok": True, **result}
+
+    return _run(member, action)
+
+
 @router.delete("/shadow/verify/{document_id}")
 def shadow_unverify(document_id: UUID, member: Member = Depends(editor)) -> dict[str, Any]:
     """Снять «верно у KORT»: месяц снова сверяется с таблицей."""

@@ -34,7 +34,7 @@ import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
 from app.finance.contracts.fields import number_key
-from app.finance.contracts.models import Contract, GroupEntity
+from app.finance.contracts.models import Contract, GroupEntity, ListValue
 from app.finance.contracts.service import Access, Registry, people_of, visible_to
 from app.finance.core import book as book_module
 from app.finance.core.accruals import WHY, Accrual, Ledger, Schedule, month_key, month_start
@@ -48,7 +48,7 @@ LINE_CODES = ("amount", "period", "executor", "no_kort", "no_book")
 #: Виды предложений. Простые (поле договора) применяются и пачкой.
 PROPOSAL_KINDS = (
     "billing", "period_day", "billing_from", "amount_from", "amount_before", "amount_fix",
-    "executor_from", "executor_before", "adjust", "pause", "stop", "end",
+    "executor_from", "executor_before", "adjust", "pause", "stop", "end", "status",
 )
 BULK_KINDS = ("billing", "period_day", "billing_from")
 
@@ -354,6 +354,8 @@ class Proposal:
     #: Что человек выбирает, если предложение - вопрос («с этого месяца» или
     #: «только этот месяц»; «закончился» или «стоит»).
     options: list[str] = field(default_factory=list)
+    #: Подписи ответов, которых нет в интерфейсе заранее: названия статусов компании.
+    labels: dict[str, str] = field(default_factory=dict)
 
     @property
     def key(self) -> str:
@@ -369,6 +371,7 @@ class Proposal:
             "text": self.text,
             "months": self.months,
             "options": self.options,
+            "labels": self.labels,
         }
 
 
@@ -513,6 +516,18 @@ class Reconciler:
         self.names = dict(
             session.execute(sa.select(Counterparty.id, Counterparty.name).where(Counterparty.workspace_id == workspace.id)).all()
         )
+        self.status_names: dict[uuid.UUID, str] = {}
+        #: Фаза → статус компании с этой фазой, первый по порядку списка.
+        self.statuses: dict[str, ListValue] = {}
+        for row in session.scalars(
+            sa.select(ListValue)
+            .where(ListValue.workspace_id == workspace.id, ListValue.field_key == "status")
+            .order_by(ListValue.position, ListValue.created_at)
+        ):
+            self.status_names[row.id] = row.value
+            phase = (row.meaning or {}).get("phase")
+            if phase and row.archived_at is None:
+                self.statuses.setdefault(phase, row)
         self.codes = {
             entity_id: code
             for entity_id, code in session.execute(
@@ -594,6 +609,10 @@ class Reconciler:
                 line.hint, line.slip = slip.text, slip.kind
             elif run is not None:
                 line.hint, line.slip = run.shift_text, "shift"
+            elif "no_kort" in line.codes:
+                line.hint = self._why_not(contract, schedule, line)
+            elif "no_book" in line.codes:
+                line.hint = self._why_missing(schedule, line, book)
             elif "period" in line.codes and line.kort is not None and schedule.period_day:
                 if contract.period_day:
                     line.hint = f"у KORT день периода {schedule.period_day} - так в условиях договора"
@@ -610,6 +629,42 @@ class Reconciler:
             else:
                 line.stale = doc
                 line.stale_side = "both" if not (kort_same or book_same) else "kort" if not kort_same else "book"
+
+    def _why_not(self, contract: Contract, schedule: Schedule, line: Line) -> str:
+        """Почему у KORT нет начисления за месяц, который есть в таблице, - из условий договора."""
+        if line.month in schedule.paused:
+            return "у KORT в этом месяце договор приостановлен"
+        # Причина всего договора - первой; «закончился без даты» - только после его начала.
+        if schedule.why in ("terms", "unset", "no_date", "never"):
+            return f"у KORT не начисляется: {WHY[schedule.why]}"
+        start = schedule.start
+        if start is not None and schedule.kind == "total":
+            return f"у KORT разовый договор начислен в {month_in(month_key(start))}"
+        if start is not None and line.month < month_key(start):
+            return f"у KORT начисления с {start:%d.%m.%Y}"
+        if schedule.why:
+            return f"у KORT не начисляется: {WHY[schedule.why]}"
+        day = line.book.period_from if line.book is not None and line.book.period_from else month_start(line.month)
+        end = self.ledger.timeline(contract).on(day).end_date
+        if end is not None and day > end:
+            return f"у KORT договор закончился {end:%d.%m.%Y}"
+        return ""
+
+    @staticmethod
+    def _why_missing(schedule: Schedule, line: Line, book: dict[str, BookMonth]) -> str:
+        """Почему KORT начисляет месяц, которого в таблице нет, - из того, что в таблице есть.
+
+        Конец договора в таблице и пропуск посреди - у своих предложений
+        («закончился или стоит», «пауза»); здесь - таблица, которая договор
+        ещё не ведёт или ведёт с более позднего месяца.
+        """
+        since = f"; у KORT начисления с {schedule.start:%d.%m.%Y}" if schedule.start else ""
+        if not book:
+            return "в таблице у договора нет ни одной строки" + since
+        first = min(book)
+        if line.month < first:
+            return f"в таблице договор с {month_from(first)}" + since
+        return ""
 
     def difference(self, line: Line) -> str:
         """Чем месяц расходится - словами, для решения и журнала."""
@@ -647,8 +702,8 @@ class Reconciler:
         if not book:
             return []
         out: list[Proposal] = []
-        add = lambda kind, value, text, months=(), options=(): out.append(  # noqa: E731
-            Proposal(contract.id, kind, value, text, list(months), list(options))
+        add = lambda kind, value, text, months=(), options=(), labels=None: out.append(  # noqa: E731
+            Proposal(contract.id, kind, value, text, list(months), list(options), dict(labels or {}))
         )
         months = sorted(book)
         if contract.billing not in ("month", "total"):
@@ -668,11 +723,18 @@ class Reconciler:
             add("billing_from", {"billing_from": first.isoformat()}, f"начислять с {first:%d.%m.%Y} - как первый месяц в таблице", months[:1])
             return out
         if contract.billing == "total":
-            self._propose_total(schedule, book, add)
+            if not self._propose_status(contract, schedule, kort, book, add):
+                self._propose_total(schedule, book, add)
+            return out
+        if schedule.why == "never" and not kort:
+            self._propose_status(contract, schedule, kort, book, add)
             return out
         if schedule.why == "ended_unknown" and not kort:
             last = months[-1]
-            if last < self.window[-1]:
+            if last >= self.window[-1]:
+                # Таблица начисляет до конца окна - договор не закончился, ошибся статус или таблица.
+                self._propose_status(contract, schedule, kort, book, add)
+            else:
                 end = book[last].period_to or (month_start(last) + timedelta(days=27))
                 add(
                     "end",
@@ -686,11 +748,47 @@ class Reconciler:
         if started_inside:
             first = book[months[0]].period_from
             if first and first != start and not (contract.billing_from == first):
-                add("billing_from", {"billing_from": first.isoformat()}, f"начислять с {first:%d.%m.%Y} - так первый месяц в таблице", months[:1])
+                # Начало позже - уходят и месяцы KORT до первого месяца таблицы: они - месяцы предложения.
+                earlier = [month for month in sorted(kort) if month < months[0]]
+                add(
+                    "billing_from",
+                    {"billing_from": first.isoformat()},
+                    f"начислять с {first:%d.%m.%Y} - так первый месяц в таблице",
+                    earlier + months[:1],
+                )
         self._propose_executor(contract, kort, book, add)
         self._propose_amount(contract, kort, book, add)
         self._propose_gaps(contract, kort, book, months, add)
         return out
+
+    def _propose_status(self, contract, schedule, kort, book, add) -> bool:
+        """Статус не даёт KORT начислять, а таблица начисляет: договор действует - или ошиблась таблица.
+
+        Только когда из-за статуса KORT не начисляет совсем («не состоялся»,
+        «закончился» без даты окончания) и статус не менялся соглашениями с
+        датой: тогда исправить статус - сказать, что он записан неверно, без
+        выдуманной истории «до такого-то дня был расторгнут». Разовому - два
+        ответа («На исполнении», «Исполнен»): какой из них, знает человек.
+        """
+        if kort or schedule.why not in ("never", "ended_unknown"):
+            return False
+        if self.ledger.timeline(contract).changes("status"):
+            return False
+        months = [month for month in sorted(book) if (book[month].amount or _ZERO) > 0]
+        phases = ("in_progress", "fulfilled") if contract.billing == "total" else ("active",)
+        choices = {phase: self.statuses[phase] for phase in phases if phase in self.statuses}
+        if not months or not choices:
+            return False
+        current = self.status_names.get(contract.status_id) if contract.status_id else None
+        add(
+            "status",
+            {"statuses": {phase: str(row.id) for phase, row in choices.items()}},
+            f"статус «{current or 'не задан'}» - KORT не начисляет, а таблица начисляет: {_months_word(months)}",
+            months,
+            tuple(choices),
+            {phase: f"Статус «{row.value}»" for phase, row in choices.items()},
+        )
+        return True
 
     def _propose_period_day(self, contract, schedule, book, months, started_inside, add) -> None:
         froms = [book[month].period_from for month in months if book[month].period_from]
@@ -872,7 +970,12 @@ class Reconciler:
             row = book[month]
             if accrual is None or accrual.month != month:
                 start = row.period_from or month_start(month)
-                add("billing_from", {"billing_from": start.isoformat()}, f"начислить в {month_in(month)} ({start:%d.%m.%Y}) - так в таблице", [month])
+                add(
+                    "billing_from",
+                    {"billing_from": start.isoformat()},
+                    f"начислить в {month_in(month)} ({start:%d.%m.%Y}) - так в таблице",
+                    sorted({month, accrual.month} if accrual is not None else {month}),
+                )
             elif row.amount is not None and accrual.adjustment is None and accrual.amount != row.amount:
                 add(
                     "amount_fix",
@@ -981,6 +1084,33 @@ def _shift_month(key: str, by: int) -> str:
     return f"{index // 12:04d}-{index % 12 + 1:02d}"
 
 
+def _vat_reader(session: Session, workspace: Workspace, contract: Contract):
+    """НДС месяца договора для счёта и АВР: у исполнителя-плательщика на день «Периода с», ставка года, режим договора.
+
+    Не плательщик или «без НДС» - `None`: строки НДС у месяца нет.
+    """
+    from app.finance.core import tax
+    from app.finance.core import vat as vat_module
+
+    periods: dict[uuid.UUID, list] = {}
+    known = tax.years(session, workspace.id)
+    mode = contract.vat_mode or "included"
+
+    def read(accrual: Accrual | None) -> dict[str, Any] | None:
+        if accrual is None or accrual.skipped or not accrual.amount or accrual.executor_id is None:
+            return None
+        period = tax.regime_on(session, accrual.executor_id, accrual.period_from, periods)
+        if period is None or not period.vat_payer:
+            return None
+        rate = tax.year_of(session, workspace.id, accrual.period_from.year, known).vat_rate
+        net, vat, gross = vat_module.vat_of(accrual.amount, payer=True, mode=mode, rate=rate)
+        if not vat:
+            return None
+        return {"mode": mode, "rate": format(rate.normalize(), "f"), "net": _money(net), "vat": _money(vat), "gross": _money(gross)}
+
+    return read
+
+
 def contract_months(
     session: Session,
     workspace: Workspace,
@@ -1011,6 +1141,7 @@ def contract_months(
     book_months = reconciler.grouped.get(contract.id, {}) if reconciler else {}
     item = reconciler.contract_shadow(contract) if reconciler else None
     lines = {line.month: line for line in item.lines} if item else {}
+    vat_of = _vat_reader(session, workspace, contract)
     rows = []
     for month in reversed(ordered):
         accrual, row = kort.get(month), book_months.get(month)
@@ -1026,6 +1157,7 @@ def contract_months(
                 "paused": month in schedule.paused,
                 "hint": line.hint if line else "",
                 "verified": decision_out(line.verified) if line else None,
+                "vat": vat_of(accrual),
             }
         )
     proposals = [proposal.out() for proposal in item.proposals] if item and access.edit else []

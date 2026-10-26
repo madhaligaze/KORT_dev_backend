@@ -205,3 +205,94 @@ def test_dvazhdy_den_i_den_perioda_kort(space):
         ribbon = shadow.contract_months(session, workspace, FULL, twice, book, money=True, on=date(2026, 10, 25))
         august = next(row for row in ribbon["months"] if row["month"] == "2026-08")
         assert august["verified"] is not None and august["hint"].startswith("таблица считает 29.08 дважды")
+
+
+def test_status_protiv_tablicy(space):
+    with finance_session() as session:
+        workspace = _ws(session, space)
+        # Как №RENT/74: в реестре «Недействующий» без даты окончания, а таблица начисляет по октябрь.
+        rent = _make(session, space, customer="ТОО Арендаком", amount="50000", signed_at="2025-03-01", number="№RENT/74",
+                     status="Недействующий")
+        # Как №ЮО/145: разовый «Не состоялся», а в таблице начисление за сентябрь.
+        once = _make(session, space, customer="ТОО Юрком", amount="340000", signed_at="2026-09-30", number="№ЮО/145",
+                     type="Разовая услуга", status="Не состоялся")
+        rows = _chain("№RENT/74", "Арендаком", [date(2026, month, 1) for month in (6, 7, 8, 9, 10)], {m: "50 000" for m in range(6, 11)})
+        rows.append(_row(9, "№ЮО/145", "Юрком", "340 000", date(2026, 9, 30), date(2026, 10, 29)))
+        book = _book(rows)
+
+        result = shadow.reconcile(session, workspace, FULL, book)
+        found = {(result.contracts[p.contract_id].contract.number, p.kind): p for p in result.proposals()}
+        assert set(found) == {("№RENT/74", "status"), ("№ЮО/145", "status")}
+        rent_status = found[("№RENT/74", "status")]
+        assert rent_status.text == "статус «Недействующий» - KORT не начисляет, а таблица начисляет: июнь - октябрь"
+        assert rent_status.options == ["active"] and rent_status.labels == {"active": "Статус «Действующий»"}
+        once_status = found[("№ЮО/145", "status")]
+        assert once_status.options == ["in_progress", "fulfilled"]
+        assert once_status.labels == {"in_progress": "Статус «На исполнении»", "fulfilled": "Статус «Исполнен»"}
+        lines = _lines(session, workspace, book)
+        assert lines[("№RENT/74", "2026-07")].hint == "у KORT не начисляется: договор закончился, а дата окончания не указана"
+        assert lines[("№ЮО/145", "2026-09")].hint == "у KORT не начисляется: договор не состоялся"
+
+        # Договор действует - статус исправлен, месяцы сходятся.
+        text = changes.apply_proposal(session, workspace, FULL, OWNER, rent.id, "status", rent_status.value, option="active")
+        assert text == "№RENT/74: статус «Действующий»"
+        # Разовый не состоялся, ошиблась таблица - «Верно у KORT» вместо предложения.
+        result = changes.verify_proposal(session, workspace, FULL, OWNER, book, once.id, once_status.months)
+        assert result["text"] == "№ЮО/145 · сентябрь 2026: верно у KORT" and result["done"] == 1 and result["batch"]
+        with pytest.raises(changes.ChangeError, match="уже нет"):
+            changes.verify_proposal(session, workspace, FULL, OWNER, book, once.id, once_status.months)
+        after = shadow.reconcile(session, workspace, FULL, book)
+        assert list(after.proposals()) == []
+        assert after.contracts[rent.id].clean and after.contracts[once.id].clean
+
+
+def test_v_tablice_net_stroki(space):
+    with finance_session() as session:
+        workspace = _ws(session, space)
+        _make(session, space, customer="ТОО Новаком", amount="50000", signed_at="2026-10-21", number="№RENT/113")
+        _make(session, space, customer="ТОО Позднеком", amount="50000", signed_at="2026-09-10", number="№RENT/90")
+        later = _make(session, space, customer="ТОО Сдвигком", amount="50000", signed_at="2026-09-10", number="№RENT/91")
+        late = _row(10, "№RENT/90", "Позднеком", "50 000", date(2026, 10, 10), date(2026, 11, 9))
+        late[7] = late[8] = ""  # как в таблице BBC: у октябрьской строки нет периода
+        rows = [late, _row(10, "№RENT/91", "Сдвигком", "50 000", date(2026, 10, 10), date(2026, 11, 9))]
+        rows += _chain("№БезДоговора", "Прочеком", [date(2026, month, 1) for month in (6, 7, 8, 9, 10)])
+        book = _book(rows)
+
+        lines = _lines(session, workspace, book)
+        assert lines[("№RENT/113", "2026-10")].hint == "в таблице у договора нет ни одной строки; у KORT начисления с 21.10.2026"
+        assert lines[("№RENT/90", "2026-09")].hint == "в таблице договор с октября 2026; у KORT начисления с 10.09.2026"
+        # С периодом в таблице - предложение начала, и сентябрь KORT - его месяц.
+        start = [p for p in shadow.reconcile(session, workspace, FULL, book).proposals() if p.contract_id == later.id]
+        assert [(p.kind, p.months) for p in start] == [("billing_from", ["2026-09", "2026-10"])]
+
+
+def test_podskazka_do_nachala_ranshe_prichiny_statusa(space):
+    with finance_session() as session:
+        workspace = _ws(session, space)
+        # Начат в августе, в реестре «Недействующий» без даты окончания; таблица ведёт его с июля.
+        _make(session, space, customer="ТОО Гаммаком", amount="50000", signed_at="2026-08-01", number="№RENT/77", status="Недействующий")
+        rows = _chain("№RENT/77", "Гаммаком", [date(2026, month, 1) for month in (7, 8, 9, 10)])
+        rows += _chain("№БезДоговора", "Прочеком", [date(2026, month, 1) for month in (6, 7, 8, 9, 10)])
+        lines = _lines(session, workspace, _book(rows))
+        assert lines[("№RENT/77", "2026-07")].hint == "у KORT начисления с 01.08.2026"
+        assert lines[("№RENT/77", "2026-08")].hint == "у KORT не начисляется: договор закончился, а дата окончания не указана"
+
+
+def test_segodnya_schitaet_mesyacy_bez_predlozheniya(space, monkeypatch):
+    from app.finance.core import today as core_today
+
+    with finance_session() as session:
+        workspace = _ws(session, space)
+        _make(session, space, customer="ТОО Альфа", amount="150000", signed_at="2025-02-07", number="№ОБО/100")
+        rows = _chain("№ОБО/100", "Альфа", [date(2026, 6, 7), date(2026, 7, 7), date(2026, 8, 8), date(2026, 9, 8), date(2026, 10, 8)])
+        rows[1][8] = "06.08.2026"
+        book = _book(rows)
+        monkeypatch.setattr(book_module, "current", lambda *args, **kwargs: (book, ""))
+        # Ошибка периода таблицы: предложений нет, а три месяца расходятся - три дела, «совпадают» не пишется.
+        card = core_today.shadow_card(session, workspace, FULL, today=date(2026, 10, 26))
+        alone = next(line for line in card["lines"] if line["label"] == "месяцев расходится без предложения")
+        assert card["count"] == 3 and alone["count"] == 3 and not card.get("empty")
+        assert alone["go"] == {"core.shadow.view": "lines", "core.shadow.code": "alone"}
+        changes.verify_slips(session, workspace, FULL, OWNER, book)
+        card = core_today.shadow_card(session, workspace, FULL, today=date(2026, 10, 26))
+        assert card["count"] == 0 and card["empty"] == "Начисления KORT и таблицы совпадают"
