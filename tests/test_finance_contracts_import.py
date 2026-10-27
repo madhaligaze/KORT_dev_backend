@@ -9,10 +9,12 @@ import io
 from datetime import datetime
 
 import pytest
+import sqlalchemy as sa
 from openpyxl import Workbook
 
 from app.finance import service as finance_service
 from app.finance.contracts import export, importer, service
+from app.finance.contracts.models import Contract
 from app.finance.db import finance_session
 
 FULL = service.Access(view=True, edit=True, setup=True)
@@ -271,3 +273,57 @@ def test_vygruzka_i_obratnaya_zagruzka(finance_db, tmp_path, monkeypatch):
         again = _decide_all(session, workspace, again, note_t=False)
         result = importer.apply(session, workspace, FULL, ACTOR, again.id)
         assert result["created"] == count
+
+
+# ── Реестр офис-менеджера (полигон «Тумар», приёмник шага 3) ─────────────────
+
+
+def _tumar_registry() -> bytes:
+    from polygon import sources
+    from polygon.world import build
+
+    return sources.registry(build())
+
+
+def test_reestr_ofisa_bez_ruchnoi_razmetki_kolonok(finance_db):
+    """Шапка в две строки (Ф1), «Сумма в месяц, тг», «Наше ТОО» и «БИН/ИИН» ложатся сами."""
+    with finance_session() as session:
+        workspace = finance_service.ensure_workspace(session)
+        batch = importer.start(session, workspace, ACTOR, _tumar_registry(), "Реестр договоров 2026.xlsx")
+        columns = [c for block in _section(batch, "columns")["items"] for c in block["columns"]]
+        assert [c["header"] for c in columns if c["decision"].get("action") == "ask"] == []
+        clean = {c["header"].replace("\n", " "): c["decision"].get("field") for c in columns if c["decision"].get("action") == "field"}
+        assert clean["Сумма в месяц, тг"] == "amount" and clean["Договор №"] == "number" and clean["дата Договор"] == "signed_at"
+        purchase = next(b for b in _section(batch, "columns")["items"] if b["sheet"] == "Поставщики")
+        own = {c["header"]: c["key"] for c in purchase["columns"] if c["how"] == "own"}
+        assert own == {"Наше ТОО": "customer"}  # рядом «Поставщик» - мы заказчик
+        titles = [b["title"] for b in _section(batch, "blocks")["items"]]
+        assert titles[0] == "РЕЕСТР ДОГОВОРОВ: КЛИНИНГ"
+        proposed = {item["names"][0] for item in _section(batch, "entities")["items"] if item["own"]}
+        assert {"Тумар Сервис", "Тумар Офис"} <= proposed
+
+
+def test_skrytaya_stroka_ne_zavoditsya_molcha_a_bin_s_opechatkoi_ne_prinyat(finance_db):
+    """Ф9: скрытый черновик держит «Завести», пока человек не ответит; У4: БИН с опечаткой не принят."""
+    from app.finance.models import Counterparty
+
+    with finance_session() as session:
+        workspace = finance_service.ensure_workspace(session)
+        batch = importer.start(session, workspace, ACTOR, _tumar_registry(), "Реестр договоров 2026.xlsx")
+        assert "hidden" in batch.report["blocking"]
+        refused = [item for item in _section(batch, "bins")["items"] if item["refused"]]
+        assert [item["name"] for item in refused] == ['ТОО "Самал Клиник"']
+        own = [item["key"] for item in _section(batch, "entities")["items"] if item["own"]]
+        rules = {item["block"]: {"action": "accept"} for item in _section(batch, "rules")["items"]}
+        batch = importer.decide(session, workspace, batch.id, {"entities": {"confirmed": True, "own": own}, "rules": rules})
+        with pytest.raises(Exception, match="Скрытые строки"):
+            importer.apply(session, workspace, FULL, ACTOR, batch.id)
+        importer.decide(session, workspace, batch.id, {"hidden": "skip"})
+        result = importer.apply(session, workspace, FULL, ACTOR, batch.id)
+        assert result["created"] == 57 and not result["failed"]
+        numbers = {c.number for c in session.scalars(sa.select(Contract).where(Contract.workspace_id == workspace.id))}
+        assert not any("28/2026" in number for number in numbers)
+        samal = session.scalar(sa.select(Counterparty).where(Counterparty.workspace_id == workspace.id, Counterparty.name.like("%Самал%")))
+        assert samal is not None and not samal.bin
+        with_bin = session.scalar(sa.select(sa.func.count()).select_from(Counterparty).where(Counterparty.workspace_id == workspace.id, Counterparty.bin != ""))
+        assert with_bin >= 30

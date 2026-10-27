@@ -37,6 +37,7 @@ ALLOWED: dict[tuple[str, str], str] = {
     ("POST", "/contracts/{contract_id}/amendments/parse"): "читает текст соглашений, в базу не пишет",
     ("POST", "/contracts/setup/views/preview"): "считает договоры под правило листа, в базу не пишет",
     ("POST", "/core/vat/preview"): "считает оборот юрлиц до и после перевода клиентов, в базу не пишет",
+    ("POST", "/core/intake"): "приёмник называет форму каждого листа файла, в базу не пишет",
     ("POST", "/contracts/imports/{batch_id}/decide"): (
         "решения протокола - черновик разбора; события пишут загрузка файла и заведение"
     ),

@@ -27,7 +27,6 @@
 """
 from __future__ import annotations
 
-import io
 import re
 import uuid
 from collections import Counter as Tally
@@ -41,10 +40,14 @@ from sqlalchemy.orm import Session
 
 from app.finance.layout import norm, squash
 from app.finance import history
+from app.finance.intake import header as intake_header
+from app.finance.intake import tables as intake_tables
 from app.finance.contracts import setup
+from app.finance.core import bin as bins
 from app.finance.contracts.fields import (
     ENTITY,
     COMPUTED_FIELDS,
+    FIELD_BY_KEY,
     SNAPSHOT_FIELDS,
     SYSTEM_KEYS,
     bump,
@@ -79,7 +82,6 @@ APPLY_CHUNK = 1_000
 HEADER_MIN_MATCHES = 4
 #: Мягкое совпадение шапки: одно начало другого, и доля длины не меньше этой.
 LOOSE_MIN_RATIO = 0.6
-_PAREN = re.compile(r"\([^)]*\)", re.S)
 ROW_NUMBER = "row_number"
 #: Поля, различие которых между листами - «расхождение». Снимки оплат не
 #: сравниваются: это поле ФО, его и так ведут в одном из листов.
@@ -132,73 +134,29 @@ def _plain_cell(value: Any) -> Any:
     return text or None
 
 
-def _color(fill: Any) -> str:
+#: Лист - таблица приёмника: значения, скрытые строки, объединённые ячейки,
+#: ширины колонок и заливка шапок.
+SheetData = intake_tables.Table
+
+
+def read_workbook(data: bytes, file_name: str = "") -> list[SheetData]:
+    """Все видимые листы файла - общим читателем приёмника (`intake.tables`).
+
+    Читает не только xlsx: старый .xls, HTML под видом .xls и CSV - тоже, формат
+    решает содержимое файла.
+    """
     try:
-        rgb = fill.start_color.rgb if fill is not None and fill.fill_type else None
-    except AttributeError:
-        return ""
-    return rgb[-6:] if isinstance(rgb, str) and len(rgb) >= 6 and rgb not in ("00000000",) else ""
-
-
-@dataclass
-class SheetData:
-    name: str
-    rows: list[list[Any]]
-    widths: dict[int, float] = field(default_factory=dict)
-    fills: dict[tuple[int, int], str] = field(default_factory=dict)
-
-
-def read_workbook(data: bytes) -> list[SheetData]:
-    """Все листы книги: значения, ширины колонок и заливка шапок."""
-    try:
-        from openpyxl import load_workbook
-    except ImportError as exc:  # pragma: no cover
-        raise ImportFailed("Не установлен openpyxl") from exc
-    try:
-        book = load_workbook(io.BytesIO(data), data_only=True)
-    except Exception as exc:  # noqa: BLE001 - любой битый файл
-        raise ImportFailed("Файл не читается как Excel (.xlsx)") from exc
-    out: list[SheetData] = []
-    try:
-        from openpyxl.utils import column_index_from_string
-
-        for sheet in book.worksheets:
-            if sheet.sheet_state != "visible":
-                continue
-            rows: list[list[Any]] = []
-            fills: dict[tuple[int, int], str] = {}
-            max_col = min(sheet.max_column or 0, MAX_COLS)
-            for r_index, row in enumerate(sheet.iter_rows(max_col=max_col), start=0):
-                if r_index >= MAX_ROWS:
-                    raise ImportFailed(f"Лист «{sheet.title}»: больше {MAX_ROWS} строк")
-                values = []
-                for c_index, cell in enumerate(row):
-                    values.append(cell.value)
-                    if cell.value not in (None, "") and r_index < 400:
-                        color = _color(cell.fill)
-                        if color:
-                            fills[(r_index, c_index)] = color
-                rows.append(values)
-            widths: dict[int, float] = {}
-            for letter, dimension in sheet.column_dimensions.items():
-                try:
-                    index = column_index_from_string(letter) - 1
-                except ValueError:
-                    continue
-                if dimension.width:
-                    widths[index] = round(float(dimension.width), 1)
-            out.append(SheetData(sheet.title, rows, widths, fills))
-    finally:
-        book.close()
-    return out
+        return intake_tables.read(data, file_name or "реестр.xlsx", detail=True, max_rows=MAX_ROWS)
+    except intake_tables.TableError as exc:
+        raise ImportFailed(str(exc)) from exc
 
 
 # ── Шапки ────────────────────────────────────────────────────────────────────
 
 
 def header_core(text: Any) -> str:
-    """Шапка без пояснений в скобках: «Отдел (ОБО, НО…)» → «отдел»."""
-    return norm(_PAREN.sub(" ", str(text or "")))
+    """Шапка без пояснений в скобках и единицы: «Отдел (ОБО, НО…)» → «отдел», «Сумма, тг» → «сумма»."""
+    return intake_header.core(text)
 
 
 @dataclass
@@ -209,16 +167,42 @@ class FieldNames:
     squashed: set[str]
 
 
+#: Колонка «наша сторона» - «Наше ТОО» в реестре офиса. Кто это в договоре,
+#: решает вторая сторона блока: рядом «Клиент» - мы исполнитель, рядом
+#: «Поставщик» - мы заказчик (`_resolve_own`). Поля такого нет - это роль.
+OWN_SIDE = "own_side"
+#: БИН/ИИН второй стороны договора - не поле договора, а номер участника.
+#: Принимается только с верной контрольной цифрой (`_party_bins`).
+PARTY_BIN = "party_bin"
+_PSEUDO_FIELDS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    (OWN_SIDE, "Наше юрлицо", ("наше тоо", "наше юрлицо", "наше юр. лицо", "наша организация", "наша компания")),
+    (PARTY_BIN, "БИН/ИИН стороны", ("бин/иин", "иин/бин", "бин", "иин", "бин клиента", "иин клиента", "бин/иин клиента", "бин контрагента")),
+)
+
+
 def field_names(fields: Sequence[EntityField]) -> list[FieldNames]:
+    live = [item for item in fields if item.key not in COMPUTED_FIELDS]
+    # Считаемые поля (из журнала, сводки или самого договора) колонкой файла
+    # быть не могут. Написания, которые компания записала своему полю, -
+    # только за ним.
+    stored = {
+        item.key: {norm(name) for name in (item.names or [])} | {norm(item.title)} for item in live
+    }
+    own = {name for item in live if not getattr(item, "system", False) for name in stored[item.key]}
     out = []
-    for item in fields:
-        if item.key in COMPUTED_FIELDS:
-            # Считаются из журнала, сводки или самого договора - в файле
-            # такой колонки быть не может.
-            continue
-        names = {norm(name) for name in (item.names or [])} | {norm(item.title)}
+    for item in live:
+        names = set(stored[item.key])
+        if getattr(item, "system", False) and item.key in FIELD_BY_KEY:
+            # Написания системного поля из кода доезжают и до компании,
+            # заведённой раньше них: при засеве они копируются в базу один раз.
+            names |= {norm(name) for name in FIELD_BY_KEY[item.key].names} - own
         names.discard("")
         out.append(FieldNames(item.key, item.title, names, {squash(name) for name in names}))
+    taken = {name for item in out for name in item.names}
+    for key, title, spellings in _PSEUDO_FIELDS:
+        # Написание, которое компания уже отдала своему полю, остаётся за ним.
+        names = {norm(name) for name in spellings} - taken
+        out.append(FieldNames(key, title, names, {squash(name) for name in names}))
     return out
 
 
@@ -261,9 +245,8 @@ class HeaderMatcher:
             return None, "empty", []
         if full in _ROW_NUMBER_NAMES:
             return ROW_NUMBER, "exact", []
-        raw = str(text or "")
-        # Без скобок `_PAREN` строку не меняет, и ядро совпадает с full.
-        core = norm(_PAREN.sub(" ", raw)) if "(" in raw else full
+        # Ядро - без скобок и единицы («Сумма в месяц, тг»); без них оно совпадает с full.
+        core = intake_header.core(text)
         squashed = squash(core)
         for how, found in (
             ("exact", self.by_name.get(full, [])),
@@ -328,6 +311,8 @@ class Block:
     columns: list[Column]
     rows: list[tuple[int, list[Any]]]
     header_fill: str = ""
+    #: Строки, спрятанные в файле: заводятся только по решению человека.
+    hidden: frozenset[int] = frozenset()
 
     @property
     def id(self) -> str:
@@ -378,47 +363,104 @@ def _is_header_row(cells: Sequence[tuple[int, Any]], matcher: HeaderMatcher) -> 
     return False
 
 
+#: Строка-дата над шапкой («на 20.10.2026») - не название блока.
+_DATE_LINE = re.compile(r"^(?:на|по|с|от|за)?\s*[\d.\-/ ]+(?:г\.?)?$", re.IGNORECASE)
+
+
+def _strength(matcher: HeaderMatcher) -> Any:
+    tiers = {"exact": 2, "core": 2, "squashed": 2, "loose": 1}
+    return lambda text: tiers.get(matcher.match(text)[1], 0) if text and str(text).strip() else 0
+
+
+def _score(matcher: HeaderMatcher) -> Any:
+    return lambda row: sum(1 for value in row if _cell_text(value) and matcher.match(_cell_text(value))[0] is not None)
+
+
+def _is_total_line(row: Sequence[Any]) -> bool:
+    """Строка итога реестра: единственный текст в ней - «Итого»/«Всего», остальное - суммы.
+
+    Строже, чем у выписки (`intake.rows.is_total`): у договора бывает
+    примечание «Всего три платежа» или предмет «Баланс», и такой договор
+    пропал бы молча. У итога текст один - подпись.
+    """
+    texts = [norm(value) for value in row if isinstance(value, str) and value.strip() and not looks_numeric(value)]
+    return len(texts) == 1 and texts[0].startswith(("итого", "всего", "total"))
+
+
+def _resolve_own(columns: list[Column]) -> None:
+    """Колонка «Наше ТОО» - наша сторона: при «Клиенте» мы исполнитель, при «Поставщике» - заказчик.
+
+    Обе стороны уже есть или нет ни одной - кто мы в этом договоре, по шапке
+    не сказать, и колонка ждёт решения человека.
+    """
+    own = [column for column in columns if column.key == OWN_SIDE]
+    if not own:
+        return
+    keys = {column.key for column in columns}
+    for column in own:
+        if "customer" in keys and "executor" not in keys:
+            column.key, column.how = "executor", "own"
+        elif "executor" in keys and "customer" not in keys:
+            column.key, column.how = "customer", "own"
+        else:
+            column.key, column.how, column.candidates = None, "ambiguous", ["executor", "customer"]
+
+
 def find_blocks(sheet: SheetData, catalog: Sequence[FieldNames]) -> list[Block]:
-    """Блоки листа: название → шапка → строки до следующего блока."""
+    """Блоки листа: название → шапка (одна или две строки) → строки до следующего блока."""
     matcher = HeaderMatcher(catalog)
-    headers: list[tuple[int, list[Column]]] = []
-    for r_index, row in enumerate(sheet.rows):
-        cells = _nonempty(row)
-        if len(cells) < HEADER_MIN_MATCHES or not _is_header_row(cells, matcher):
+    strength, score = _strength(matcher), _score(matcher)
+    found = [
+        r_index
+        for r_index, row in enumerate(sheet.rows)
+        if len(cells := _nonempty(row)) >= HEADER_MIN_MATCHES and _is_header_row(cells, matcher)
+    ]
+    headers: list[tuple[int, int, list[Column]]] = []
+    consumed: set[int] = set()
+    for r_index in found:
+        if r_index in consumed:
             continue
+        # Шапка в две строки: «Договор» объединён над «№ | дата» (`intake.header`).
+        texts, body = intake_header.compose(sheet.rows, r_index, strength, score, table=sheet)
+        if body > r_index + 1:
+            consumed.add(r_index + 1)
         columns = []
-        for c_index, value in enumerate(row):
-            text = _cell_text(value)
+        for c_index, text in enumerate(texts):
+            text = _cell_text(text)
             key, how, candidates = matcher.match(text) if text else (None, "empty", [])
             columns.append(Column(c_index, text, key, how, candidates, width=sheet.widths.get(c_index)))
-        headers.append((r_index, columns))
+        _resolve_own(columns)
+        headers.append((r_index, body, columns))
     blocks: list[Block] = []
-    for number, (h_index, columns) in enumerate(headers):
-        previous_end = headers[number - 1][0] if number else -1
+    for number, (h_index, body, columns) in enumerate(headers):
+        previous_end = headers[number - 1][1] - 1 if number else -1
         title = ""
-        for back in (1, 2, 3):
+        for back in (1, 2, 3, 4):
             probe = h_index - back
             if probe <= previous_end:
                 break
             cells = _nonempty(sheet.rows[probe])
             if len(cells) == 1 and isinstance(cells[0][1], str):
+                if _DATE_LINE.match(_label(cells[0][1])):
+                    continue
                 title = _label(cells[0][1])
                 break
             if cells:
                 break
         next_header = headers[number + 1][0] if number + 1 < len(headers) else len(sheet.rows)
         data: list[tuple[int, list[Any]]] = []
-        for r_index in range(h_index + 1, next_header):
+        for r_index in range(body, next_header):
             row = sheet.rows[r_index]
             cells = _nonempty(row)
             # Строка договора - хотя бы два узнанных поля. Строка-название
-            # следующего блока или пустая строка-отступ сюда не проходят.
+            # следующего блока или пустая строка-отступ сюда не проходят;
+            # строка «Итого:» с суммой - тоже (`intake.rows`).
             mapped = [
                 (c, v)
                 for c, v in cells
                 if c < len(columns) and columns[c].key not in (None, ROW_NUMBER)
             ]
-            if len(mapped) >= 2:
+            if len(mapped) >= 2 and not _is_total_line(row):
                 data.append((r_index, row))
         # Колонки без шапки, но с данными (колонка T «Сводной»).
         width = max((len(row) for _, row in data), default=len(columns))
@@ -447,6 +489,7 @@ def find_blocks(sheet: SheetData, catalog: Sequence[FieldNames]) -> list[Block]:
                 ],
                 rows=data,
                 header_fill=header_fill[0][0] if header_fill else "",
+                hidden=frozenset(r_index for r_index, _ in data if r_index in sheet.hidden),
             )
         )
     return blocks
@@ -463,9 +506,11 @@ class Row:
     line: int
     values: dict[str, Any]
     extra: dict[str, Any]
+    #: Строка спрятана в файле - заводится только по решению человека.
+    hidden: bool = False
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out = {
             "ref": self.ref,
             "sheet": self.sheet,
             "block": self.block,
@@ -473,6 +518,9 @@ class Row:
             "values": self.values,
             "extra": self.extra,
         }
+        if self.hidden:
+            out["hidden"] = True
+        return out
 
 
 def rows_of(block: Block) -> list[Row]:
@@ -492,7 +540,7 @@ def rows_of(block: Block) -> list[Row]:
                 values[column.key] = value
             else:
                 extra[str(column.index)] = value
-        out.append(Row(f"{block.sheet}!{line + 1}", block.sheet, block.id, line + 1, values, extra))
+        out.append(Row(f"{block.sheet}!{line + 1}", block.sheet, block.id, line + 1, values, extra, line in block.hidden))
     return out
 
 
@@ -523,7 +571,7 @@ def analyze(session: Session, workspace: Workspace, data: bytes, file_name: str)
     """Разобрать файл: блоки, колонки, строки. Решений ещё нет."""
     registry = Registry(session, workspace)
     catalog = field_names(registry.fields)
-    sheets = read_workbook(data)
+    sheets = read_workbook(data, file_name)
     blocks: list[Block] = []
     for sheet in sheets:
         blocks.extend(find_blocks(sheet, catalog))
@@ -546,7 +594,7 @@ def analyze(session: Session, workspace: Workspace, data: bytes, file_name: str)
 
 
 def _block_meta(block: Block) -> dict[str, Any]:
-    return {
+    meta = {
         "id": block.id,
         "sheet": block.sheet,
         "index": block.index,
@@ -570,6 +618,13 @@ def _block_meta(block: Block) -> dict[str, Any]:
             for column in block.columns
         ],
     }
+    own = next((column for column in block.columns if column.how == "own"), None)
+    if own is not None:
+        # Колонка «Наше ТОО»: её значения - наши юрлица по слову самой таблицы.
+        meta["own"] = {"slot": own.key, "index": own.index, "header": _label(own.header)}
+    if block.hidden:
+        meta["hidden"] = sorted(line + 1 for line in block.hidden)
+    return meta
 
 
 def _letter(index: int) -> str:
@@ -704,6 +759,10 @@ class Plan:
     #: Строка листа → договор главного листа с тем же номером, но без единой
     #: общей стороны. Не сводится, пока человек не скажет «это он».
     number_only: dict[str, str] = field(default_factory=dict)
+    #: Строки, спрятанные в файле; заводятся только при `decisions["hidden"] == "take"`.
+    hidden_rows: list[dict[str, Any]] = field(default_factory=list)
+    #: Ключи сторон из колонки «Наше ТОО» - наши юрлица по слову самой таблицы.
+    declared_own: set[str] = field(default_factory=set)
 
 
 def _column_decisions(staged: dict[str, Any], decisions: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -765,7 +824,11 @@ def plan(session: Session, workspace: Workspace, batch: ContractImport, registry
     block_by_id = {block["id"]: block for block in blocks}
     sheet_rows: dict[str, list[dict[str, Any]]] = {}
     main_rows: list[dict[str, Any]] = []
+    hidden_rows: list[dict[str, Any]] = []
+    declared_own: set[str] = set()
+    take_hidden = decisions.get("hidden") == "take"
     for block in blocks:
+        own = block.get("own") or {}
         for row in staged["rows"].get(block["id"], []):
             item = {
                 "ref": row["ref"],
@@ -774,6 +837,16 @@ def plan(session: Session, workspace: Workspace, batch: ContractImport, registry
                 "line": row["line"],
                 "values": _apply_columns(row, block["id"], columns, block_by_id[block["id"]]),
             }
+            if row.get("hidden"):
+                # Спрятанную строку человек убрал с глаз - черновик, отказ,
+                # старьё. Заводить её молча нельзя (полигон, Ф9).
+                hidden_rows.append(item)
+                if not take_hidden:
+                    continue
+            if own.get("slot") and item["values"].get(own["slot"]):
+                decision = columns.get(f"{block['id']}#{own['index']}") or {}
+                if decision.get("action") == "field" and decision.get("field") == own["slot"]:
+                    declared_own.add(party_key(item["values"][own["slot"]]))
             if block["sheet"] == main_sheet:
                 main_rows.append(item)
             else:
@@ -868,10 +941,13 @@ def plan(session: Session, workspace: Workspace, batch: ContractImport, registry
                 existing[item["ref"]] = found
 
     clusters = _party_clusters(main_rows + orphans, registry, decisions, main_refs={row["ref"] for row in main_rows})
+    for key in declared_own:
+        if key in clusters:
+            clusters[key]["declared"] = True
     own_keys = _own_keys(clusters, decisions)
     return Plan(
         main_sheet, blocks, columns, main_rows, sheet_rows, matches, loose, orphans, existing, own_keys, clusters,
-        loose_kinds=loose_kinds, number_only=number_only,
+        loose_kinds=loose_kinds, number_only=number_only, hidden_rows=hidden_rows, declared_own=declared_own,
     )
 
 
@@ -931,13 +1007,16 @@ def _own_keys(clusters: dict[str, dict[str, Any]], decisions: dict[str, Any]) ->
 
 
 def _proposed_own(cluster: dict[str, Any]) -> bool:
-    """Предложить нашим: исполнитель хотя бы в двух строках главного листа и
-    исполнителем бывает чаще, чем заказчиком.
+    """Предложить нашим: имя стоит в колонке «Наше ТОО», или исполнитель хотя
+    бы в двух строках главного листа и исполнителем бывает чаще, чем заказчиком.
 
     Это предложение, а не решение: список подтверждает человек, и число строк
     стоит рядом с каждым именем. Частное лицо, которое и даёт заём, и берёт,
-    сюда не попадёт; ТОО группы с одной строкой человек отметит сам.
+    сюда не попадёт; ТОО группы с одной строкой человек отметит сам - если
+    таблица не назвала его своим сама.
     """
+    if cluster.get("declared"):
+        return True
     return cluster["main_executor"] >= 2 and cluster["main_executor"] > cluster["main_customer"]
 
 
@@ -974,6 +1053,8 @@ def _report_and_plan(
         _section_statuses(current_plan, registry, decisions),
         _section_end_dates(current_plan, registry, decisions),
         _section_numbers(current_plan),
+        _section_hidden(current_plan, decisions),
+        _section_bins(current_plan),
         _section_orphans(current_plan, decisions),
         _section_diffs(current_plan, registry, decisions),
         _section_rules(current_plan, registry, decisions),
@@ -1215,6 +1296,89 @@ def _section_numbers(current: Plan) -> dict[str, Any]:
             "договоры заведутся, у каждого будет замечание"
         ),
         items=items,
+    )
+
+
+def _section_hidden(current: Plan, decisions: dict[str, Any]) -> dict[str, Any]:
+    """Скрытые строки файла: черновик, который не заключили, отказ, старьё - решает человек.
+
+    Ответ один на файл: «пропустить» или «завести». Пока его нет, «Завести»
+    ждёт: спрятанную строку человек убрал с глаз, и завести её молча значит
+    завести то, чего в реестре для него нет.
+    """
+    rows = current.hidden_rows
+    choice = decisions.get("hidden") if decisions.get("hidden") in ("skip", "take") else None
+    count = len(rows)
+    if not count:
+        summary = "Скрытых строк нет"
+    else:
+        lead = f"{count} {_plural(count, 'строка спрятана', 'строки спрятаны', 'строк спрятано')} в файле"
+        summary = lead + {"skip": " - пропускаются", "take": " - заведутся"}.get(choice or "", " - завести или пропустить?")
+    return _section(
+        "hidden",
+        "Скрытые строки",
+        blocking=bool(count),
+        done=not count or choice is not None,
+        summary=summary,
+        items=[{**_brief(row), "sheet": row["sheet"], "line": row["line"]} for row in rows],
+        choice=choice,
+    )
+
+
+def _party_bins(current: Plan) -> dict[str, dict[str, Any]]:
+    """БИН второй стороны из колонки «БИН/ИИН»: ключ стороны → номер, отказы и споры.
+
+    Вторая сторона - та, что не наше юрлицо. Номер принимается только с верной
+    контрольной цифрой: «БИН с опечаткой» в реестре - не номер участника
+    (полигон, У4), а два разных годных номера у одного имени - спор, не выбор.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    for row in current.main_rows + current.orphans:
+        values = row["values"]
+        raw = values.get(PARTY_BIN)
+        if raw in (None, ""):
+            continue
+        customer, executor = values.get("customer"), values.get("executor")
+        if customer and party_key(customer) not in current.own_keys:
+            name = customer
+        elif executor and party_key(executor) not in current.own_keys:
+            name = executor
+        else:
+            continue
+        key = party_key(name)
+        checked = bins.check(raw, str(name))
+        entry = out.setdefault(key, {"key": key, "name": str(name).strip(), "numbers": set(), "refused": []})
+        if checked.ok:
+            entry["numbers"].add(checked.number)
+        else:
+            entry["refused"].append({"ref": row["ref"], "raw": str(raw).strip(), "error": checked.error})
+    for entry in out.values():
+        numbers = sorted(entry.pop("numbers"))
+        entry["bin"] = numbers[0] if len(numbers) == 1 else ""
+        entry["conflict"] = numbers if len(numbers) > 1 else []
+    return out
+
+
+def _section_bins(current: Plan) -> dict[str, Any]:
+    entries = list(_party_bins(current).values())
+    taken = [entry for entry in entries if entry["bin"]]
+    refused = [entry for entry in entries if entry["refused"] or entry["conflict"]]
+    if not entries:
+        summary = "Колонки БИН нет"
+    else:
+        summary = f"{len(taken)} {_plural(len(taken), 'участник получит', 'участника получат', 'участников получат')} БИН"
+        if refused:
+            summary += f"; не принято у {len(refused)}"
+    return _section(
+        "bins",
+        "БИН сторон",
+        blocking=False,
+        done=True,
+        summary=summary,
+        items=[
+            {"name": entry["name"], "bin": entry["bin"], "refused": entry["refused"], "conflict": entry["conflict"]}
+            for entry in sorted(entries, key=lambda entry: (not (entry["refused"] or entry["conflict"]), entry["name"]))
+        ],
     )
 
 
@@ -1802,12 +1966,16 @@ def _apply(session: Session, workspace: Workspace, access: Access, actor: Actor,
             insert_chunk()
     insert_chunk()
 
-    # 5. Листы: главный - по главному листу, остальные - по блокам.
+    # 5. БИН сторон из колонки «БИН/ИИН» - только годные и только пустым
+    # участникам: номер, уже записанный у участника, файл не перебивает.
+    bin_count = _write_bins(session, workspace, registry, current, actor)
+
+    # 6. Листы: главный - по главному листу, остальные - по блокам.
     _build_views(session, workspace, registry, current, decisions, batch)
 
     batch.status = "applied"
     batch.applied_at = now
-    batch.report = {**batch.report, "result": {"created": created, "failed": failed}}
+    batch.report = {**batch.report, "result": {"created": created, "failed": failed, "bins": bin_count}}
     # Разобранные строки после заведения не нужны: протокол остаётся в
     # отчёте, файл второй раз не читается. На 20 000 строк это 6 МБ в базе.
     batch.staged = {}
@@ -1830,6 +1998,40 @@ def _apply(session: Session, workspace: Workspace, access: Access, actor: Actor,
     )
     session.flush()
     return {"created": created, "failed": failed}
+
+
+def _write_bins(session: Session, workspace: Workspace, registry: Registry, current: Plan, actor: Actor) -> int:
+    from app.finance.models import Counterparty
+
+    written: list[str] = []
+    for entry in _party_bins(current).values():
+        if not entry["bin"]:
+            continue
+        party = registry.resolve_party(entry["name"], slot="customer", create=False).party
+        if party is None or party.bin or registry.is_own(party.id):
+            continue
+        other = session.scalar(
+            sa.select(Counterparty.id).where(
+                Counterparty.workspace_id == workspace.id,
+                Counterparty.bin == entry["bin"],
+                Counterparty.id != party.id,
+                Counterparty.archived_at.is_(None),
+            )
+        )
+        if other is not None:
+            # Номер уже у другого участника - это, похоже, один участник; свести -
+            # решение человека («Участники → Двойники»), не загрузки.
+            continue
+        party.bin, party.kind = entry["bin"], bins.kind_of(entry["bin"], party.name)
+        written.append(f"{party.name}: {party.bin}")
+    if written:
+        session.flush()
+        history.write(
+            session, workspace, kind="participant.bin", entity="contract_import", entity_id=None,
+            title=f"БИН из реестра: {len(written)} {_plural(len(written), 'участник', 'участника', 'участников')}",
+            after={"bins": written, "source": "registry"}, actor=actor.email,
+        )
+    return len(written)
 
 
 def _learn_names(session: Session, workspace: Workspace, current: Plan) -> None:
@@ -1917,7 +2119,8 @@ def _contract_from_row(
     lists: dict[str, list[Any]] = {}
     changed: set[str] = set()
     for key, raw in values.items():
-        if key in SNAPSHOT_FIELDS:
+        if key in SNAPSHOT_FIELDS or key == PARTY_BIN:
+            # БИН - номер участника, а не поле договора (`_write_bins`).
             continue
         if key.startswith("custom:"):
             field_key = custom_keys.get(key[len("custom:"):])

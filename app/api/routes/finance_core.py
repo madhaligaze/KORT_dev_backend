@@ -15,7 +15,7 @@ from datetime import timedelta
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 
 from app.api.routes.finance import _guard, _workspace, require_access
@@ -1357,3 +1357,32 @@ def contract_status_from(contract_id: UUID, body: StatusFromIn, member: Member =
         return {"id": str(amendment.id)}
 
     return _run(member, action)
+
+
+# ── Приёмник ─────────────────────────────────────────────────────────────────
+
+
+@router.post("/intake")
+def intake_describe(file: UploadFile = File(...), member: Member = Depends(editor)) -> dict[str, Any]:
+    """«Предложить» для файла: что значит строка каждого листа, колонки, вопросы и отказы. Ничего не пишет."""
+    from app.finance import heap
+    from app.finance.config import finance_settings
+    from app.finance.contracts.fields import fields_of
+    from app.finance.intake import recognize
+
+    limit = int(finance_settings.import_max_mb * 1024 * 1024)
+    data = file.file.read(limit + 1)
+    if len(data) > limit:
+        raise HTTPException(status_code=413, detail=f"Файл больше {finance_settings.import_max_mb} МБ")
+    name = file.filename or "файл"
+    content = [data]
+    del data
+
+    def action(session, workspace, _access):
+        return recognize.describe(content.pop(), name, contract_fields=fields_of(session, workspace.id))
+
+    try:
+        return _run(member, action)
+    finally:
+        content.clear()
+        heap.trim()
