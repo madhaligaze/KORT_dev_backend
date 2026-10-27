@@ -763,6 +763,8 @@ class Plan:
     hidden_rows: list[dict[str, Any]] = field(default_factory=list)
     #: Ключи сторон из колонки «Наше ТОО» - наши юрлица по слову самой таблицы.
     declared_own: set[str] = field(default_factory=set)
+    #: Блок → поле → значение, выведенное из файла, а не из колонки (`implied_departments`).
+    implied: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 def _column_decisions(staged: dict[str, Any], decisions: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -814,6 +816,38 @@ def _apply_columns(row: dict[str, Any], block_id: str, columns: dict[str, dict[s
     return values
 
 
+#: Сколько листов должны держать «отдел = название листа», чтобы лист без колонки «Отдел» получил её так же.
+IMPLIED_SHEETS = 2
+
+
+def implied_departments(blocks: list[dict[str, Any]], items: dict[str, list[dict[str, Any]]]) -> dict[str, str]:
+    """Отдел строк блока без колонки «Отдел» - название его листа, когда так устроен весь файл.
+
+    Реестр офиса ведут листом на отдел: в «Клининге» у каждой строки отдел
+    «Клининг», в «Техобслуживании» - «Техобслуживание». Лист «Аренда» колонку
+    «Отдел» заменил на «Помещение», и правилу листа не на что было опереться:
+    оно ловило все договоры с нашим исполнителем, 39 лишних при 17 своих
+    (полигон, 27.10.2026). Вывод делается, только если не меньше
+    `IMPLIED_SHEETS` других листов держат этот образец во всех строках, а у
+    листа нет ни одного значения отдела; в отчёте колонок он виден словами.
+    """
+    holding = 0
+    bare: list[dict[str, Any]] = []
+    for block in blocks:
+        rows = items.get(block["id"], [])
+        if not rows:
+            continue
+        values = [row["values"].get("department") for row in rows]
+        if not any(values):
+            bare.append(block)
+            continue
+        if all(value and norm(str(value)) == norm(block["sheet"]) for value in values):
+            holding += 1
+    if holding < IMPLIED_SHEETS:
+        return {}
+    return {block["id"]: block["sheet"] for block in bare}
+
+
 def plan(session: Session, workspace: Workspace, batch: ContractImport, registry: Registry | None = None) -> Plan:
     staged = batch.staged or {}
     decisions = batch.decisions or {}
@@ -827,16 +861,26 @@ def plan(session: Session, workspace: Workspace, batch: ContractImport, registry
     hidden_rows: list[dict[str, Any]] = []
     declared_own: set[str] = set()
     take_hidden = decisions.get("hidden") == "take"
-    for block in blocks:
-        own = block.get("own") or {}
-        for row in staged["rows"].get(block["id"], []):
-            item = {
+    built = {
+        block["id"]: [
+            {
                 "ref": row["ref"],
                 "block": block["id"],
                 "sheet": block["sheet"],
                 "line": row["line"],
                 "values": _apply_columns(row, block["id"], columns, block_by_id[block["id"]]),
             }
+            for row in staged["rows"].get(block["id"], [])
+        ]
+        for block in blocks
+    }
+    implied = implied_departments(blocks, built)
+    for block_id, department in implied.items():
+        for item in built[block_id]:
+            item["values"]["department"] = department
+    for block in blocks:
+        own = block.get("own") or {}
+        for row, item in zip(staged["rows"].get(block["id"], []), built[block["id"]]):
             if row.get("hidden"):
                 # Спрятанную строку человек убрал с глаз - черновик, отказ,
                 # старьё. Заводить её молча нельзя (полигон, Ф9).
@@ -948,6 +992,7 @@ def plan(session: Session, workspace: Workspace, batch: ContractImport, registry
     return Plan(
         main_sheet, blocks, columns, main_rows, sheet_rows, matches, loose, orphans, existing, own_keys, clusters,
         loose_kinds=loose_kinds, number_only=number_only, hidden_rows=hidden_rows, declared_own=declared_own,
+        implied={block_id: {"department": department} for block_id, department in implied.items()},
     )
 
 
@@ -1055,6 +1100,7 @@ def _report_and_plan(
         _section_numbers(current_plan),
         _section_hidden(current_plan, decisions),
         _section_bins(current_plan),
+        _section_amounts(current_plan),
         _section_orphans(current_plan, decisions),
         _section_diffs(current_plan, registry, decisions),
         _section_rules(current_plan, registry, decisions),
@@ -1121,7 +1167,10 @@ def _section_columns(current: Plan, registry: Registry) -> dict[str, Any]:
             if decision.get("action") == "ask":
                 open_questions += 1
             columns.append({**column, "id": cid, "decision": decision})
-        items.append({"block": block["id"], "sheet": block["sheet"], "title": block["title"], "roles": block["roles"], "columns": columns})
+        items.append({
+            "block": block["id"], "sheet": block["sheet"], "title": block["title"], "roles": block["roles"], "columns": columns,
+            "implied": current.implied.get(block["id"]) or {},
+        })
     return _section(
         "columns",
         "Колонки",
@@ -1379,6 +1428,40 @@ def _section_bins(current: Plan) -> dict[str, Any]:
             {"name": entry["name"], "bin": entry["bin"], "refused": entry["refused"], "conflict": entry["conflict"]}
             for entry in sorted(entries, key=lambda entry: (not (entry["refused"] or entry["conflict"]), entry["name"]))
         ],
+    )
+
+
+def _section_amounts(current: Plan) -> dict[str, Any]:
+    """Суммы, которые не число («1,5 млн»): ложатся «Условием суммы» и не начисляются.
+
+    KORT не переводит «1,5 млн» в 1 500 000 сам (полигон, Ф2 - «откажет»):
+    «млн», «тыс», «к» пишут по-разному, а ошибка в разряде - тысячекратная. Но и
+    молча класть текст в условие нельзя: договор без суммы не начисляется, и
+    человек должен узнать об этом до записи, строкой файла.
+    """
+    from app.finance.contracts.service import read_money
+
+    items = []
+    for row in [*current.main_rows, *current.orphans]:
+        raw = row["values"].get("amount")
+        if raw in (None, "") or isinstance(raw, (int, float, Decimal)):
+            continue
+        try:
+            amount, terms = read_money(raw, field="Сумма")
+        except FinanceError:
+            continue
+        if amount is None and terms:
+            items.append({**_brief(row), "sheet": row.get("sheet", ""), "line": row.get("line"), "text": terms})
+    return _section(
+        "amounts",
+        "Суммы не числом",
+        blocking=False,
+        done=True,
+        summary=(
+            f"{len(items)} {_plural(len(items), 'сумма', 'суммы', 'сумм')} не число - ляжет условием, начислений не будет"
+            if items else "все суммы - числа"
+        ),
+        items=items,
     )
 
 

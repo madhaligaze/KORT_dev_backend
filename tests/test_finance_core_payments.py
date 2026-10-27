@@ -297,7 +297,7 @@ def test_bez_dogovora_ne_perevody_i_ne_otmechennoe(space, audit):
         core_settings.set_ignore(session, workspace, FULL, OWNER, kind="payers", name="вознаграждение ", on=True)
         again = core_payments.Money(session, workspace, today=TODAY)
         assert [item["payer"] for item in again.without_contract()] == ["ИП Клиентов"]
-        assert again.hidden == {"own": 1, "ignored": 1, "decided": 0}
+        assert again.hidden == {"own": 1, "ignored": 1, "decided": 0, "returned": 0}
         core_settings.set_ignore(session, workspace, FULL, OWNER, kind="payers", name="Вознаграждение", on=False)
         assert len(core_payments.Money(session, workspace, today=TODAY).without_contract()) == 2
 

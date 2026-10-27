@@ -9,6 +9,13 @@
   Сумма, стороны и статус - на день начала периода (`core/terms.py`):
   клиента перевели на другое ТОО с июля - июльское начисление уже у него.
 * **Вся сумма** - одно начисление в день начала.
+* **По счетам и актам** - сумма месяца из документов 1С по договору: АВР
+  месяца, а пока его нет - счёт на оплату этого месяца. Так начисляется
+  аренда с коммунальными по счётчикам: сумма разная каждый месяц, и знает её
+  только документ бухгалтера (полигон, Д11). Месяц без документов не
+  начисляется: суммы ещё нет, придумывать её нельзя. Счета KORT сюда не
+  входят - они сами считаются из начислений. Статус на день периода - как у
+  «в месяц».
 * **Условие** («20% по разовым») и не заданный вид - не начисляются: сумму
   из текста KORT не придумывает.
 * Статус на день периода: приостановлен - месяц пропущен; не состоялся или
@@ -40,6 +47,7 @@ from app.finance.core import journal
 from app.finance.core.journal import Adjustment, Agreement
 from app.finance.core.terms import Terms, Timeline
 
+_ZERO = Decimal("0")
 #: Фазы, при которых договор не начисляется вовсе.
 NEVER = ("failed", "draft")
 #: Начало окна «с начала договора».
@@ -73,6 +81,10 @@ def _shift(year: int, month: int, by: int) -> tuple[int, int]:
 
 def _on_day(year: int, month: int, day: int) -> date:
     return date(year, month, min(day, calendar.monthrange(year, month)[1]))
+
+
+def _month_end(day: date) -> date:
+    return date(day.year, day.month, calendar.monthrange(day.year, day.month)[1])
 
 
 def periods(start: date, day: int) -> Iterator[tuple[date, date]]:
@@ -171,6 +183,17 @@ class Ledger:
             for item in journal.adjustments(session, workspace_id, ids):
                 if item.period is not None and item.contract_id is not None:
                     self.adjustments[(item.contract_id, month_key(item.period))] = item
+        #: «По счетам и актам»: (договор, месяц) → [сумма АВР, сумма счетов] из 1С.
+        self.documents: dict[tuple[uuid.UUID, str], list[Decimal]] = {}
+        by_documents = [item.id for item in self.contracts.values() if item.billing == "documents"]
+        if by_documents:
+            journal.ensure(session, workspace_id, ("1c",))
+            for fact in journal.current(session, workspace_id, ("act", "bill"), contracts=by_documents, sources=("1c",)):
+                # Непроведённый документ 1С - черновик бухгалтера, не начисление.
+                if fact.period is None or fact.amount is None or not (fact.data or {}).get("posted", True):
+                    continue
+                slot = self.documents.setdefault((fact.contract_id, month_key(fact.period)), [_ZERO, _ZERO])
+                slot[0 if fact.kind == "act" else 1] += fact.amount
         self.phases: dict[uuid.UUID, str] = {
             row.id: str((row.meaning or {}).get("phase") or "")
             for row in session.scalars(
@@ -208,7 +231,7 @@ class Ledger:
         timeline = self.timeline(contract)
         start = contract.billing_from or contract.signed_at
         day = contract.period_day or (start.day if start else None)
-        kind = contract.billing if contract.billing in ("month", "total") else ""
+        kind = contract.billing if contract.billing in ("month", "total", "documents") else ""
         out = Schedule(contract_id=contract.id, kind=kind, start=start, period_day=day)
         if not kind:
             out.why = "terms" if contract.billing == "terms" else "unset"
@@ -220,6 +243,8 @@ class Ledger:
                 out.why = "never"
             elif first <= month_key(start) <= last:
                 out.accruals.append(self._accrual(contract, start, terms.end_date, terms))
+        elif kind == "documents":
+            self._by_documents(contract, out, start, first, last, timeline)
         else:
             for period_from, period_to in periods(start, day or start.day):
                 month = month_key(period_from)
@@ -245,6 +270,30 @@ class Ledger:
         if out.accruals and all(item.base is None and item.adjustment is None for item in out.accruals):
             out.why = out.why or "no_amount"
         return out
+
+    def _by_documents(self, contract: Contract, out: Schedule, start: date, first: str, last: str, timeline: Timeline) -> None:
+        """«По счетам и актам»: месяц с документом 1С - АВР месяца, без АВР - счёт."""
+        months = sorted(month for contract_id, month in self.documents if contract_id == contract.id)
+        for month in months:
+            if not first <= month <= last or month < month_key(start):
+                continue
+            period_from = max(month_start(month), start)
+            terms = timeline.on(period_from)
+            if terms.end_date is not None and period_from > terms.end_date:
+                break
+            if terms.phase in NEVER:
+                out.why = out.why or "never"
+                continue
+            if terms.phase == "suspended":
+                out.paused.append(month)
+                continue
+            acts, bills = self.documents[(contract.id, month)]
+            amount = acts if acts else bills
+            period_to = _month_end(month_start(month))
+            out.accruals.append(Accrual(
+                contract_id=contract.id, month=month, period_from=period_from, period_to=period_to, base=amount,
+                amount=amount, executor_id=terms.executor_id, customer_id=terms.customer_id,
+            ))
 
     def _accrual(self, contract: Contract, period_from: date, period_to: date | None, terms: Terms) -> Accrual:
         return Accrual(

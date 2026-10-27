@@ -17,12 +17,18 @@
    актам: месяцами - «в месяц» с самой частой суммой (опечатка в одном акте -
    Д6 - сумму не сдвигает), сумма, державшаяся два месяца и дольше, -
    соглашение «сумма с даты» (Д5); один акт или разовые акты на «Основной
-   договор» - разовый договор на каждый акт (Д15). Месяцы без актов внутри
+   договор» - разовый договор на каждый акт (Д15). Сумма разная почти каждый
+   месяц (аренда с коммунальными по счётчикам, Д11) - «по счетам и актам»:
+   месяц начисляется по своему АВР, а до него - по счёту. Месяцы без актов внутри
    ряда - пауза, предложением (Д8); акты кончились раньше прошлого месяца -
    вопрос «договор закончился?» (Д9): без ответа такой договор не заводится,
    иначе он начислял бы месяцы, которых не было.
+   Покупки - так же, по актам поставщика («Поступление товаров и услуг»):
+   договор, где исполнитель - поставщик, а заказчик - наше юрлицо (Д17).
 4. **Начало учёта и сальдо** - с первого числа периода ОСВ; сальдо договора -
-   дебет минус кредит на начало (аванс со знаком минус, С3).
+   дебет минус кредит на начало (аванс со знаком минус, С3). ОСВ - файлом или,
+   у базы в интернете, остатками 1210 из самой 1С на выбранное первое число
+   (`onec/balances.py`, `take_balances`): та же ведомость, без выгрузки.
 5. **Оплаты** - поступления 1С становятся источником оплат юрлица.
 
 Слов BBC модуль не знает: всё - из документов 1С и стандартного отчёта.
@@ -50,9 +56,11 @@ from app.finance.core import opening as opening_module
 from app.finance.core import settings as core_settings
 from app.finance.core.accruals import month_key, month_start
 from app.finance.models import Counterparty, Workspace
+from app.finance.onec import files as onec_files
 from app.finance.onec import match as onec_match
 from app.finance.onec.models import OnecBase, OnecDocument
 from app.finance.onec.osv import Osv
+from app.finance.onec.sync import PURCHASE_KINDS
 from app.finance.service import FinanceError
 
 _ZERO = Decimal("0")
@@ -60,6 +68,9 @@ _ZERO = Decimal("0")
 MAIN = "Основной договор"
 #: Сколько месяцев подряд должна держаться новая сумма, чтобы стать «с даты».
 STEADY = 2
+#: Сколько разных сумм актов (при том что ни одна не держит и половины месяцев)
+#: делают договор «по счетам и актам», а не «в месяц».
+VARIABLE = 3
 #: Пометки карточек 1С, которые не имя клиента: «Таза Су (не использовать)».
 _STALE = ("не использовать", "не исп.", "удален", "удалён", "старый", "дубль")
 
@@ -147,7 +158,11 @@ class Draft:
     party_key: str
     number: str
     signed: date | None
+    #: `sale` - мы исполнитель, `purchase` - мы заказчик (акты поставщика).
+    side: str = "sale"
     acts: list[Act] = field(default_factory=list)
+    #: Счета на оплату с периодом: месяц без АВР (акт ещё не выписан) - по счёту.
+    bills: list[Act] = field(default_factory=list)
     docs: int = 0
     billing: str = ""
     amount: Decimal | None = None
@@ -162,6 +177,11 @@ class Draft:
     #: Разовый договор одного акта «Основного договора».
     act: Act | None = None
     contract_id: uuid.UUID | None = None
+    #: Первый день, за который у договора есть документ этой базы.
+    first: date | None = None
+    #: Договор другого нашего ТОО с тем же клиентом и номером: клиента перевели
+    #: на юрлицо этой базы (Д7) - (договор, прежний исполнитель).
+    moved: tuple[uuid.UUID, uuid.UUID] | None = None
 
     @property
     def label(self) -> str:
@@ -174,6 +194,7 @@ class Draft:
         return {
             "key": self.key,
             "label": self.label,
+            "side": self.side,
             "number": self.number,
             "customer": party.name if party else "",
             "signed": self.signed.isoformat() if self.signed else None,
@@ -186,6 +207,8 @@ class Draft:
             "outliers": self.outliers,
             "acts": len(self.acts),
             "contract_id": str(self.contract_id) if self.contract_id else None,
+            "moved_from": str(self.moved[1]) if self.moved else None,
+            "since": month_start(month_key(self.first)).isoformat() if self.moved and self.first else None,
         }
 
 
@@ -224,23 +247,41 @@ def _runs(months: list[tuple[date, Decimal]]) -> tuple[list[tuple[date, Decimal]
 
 
 def shape(draft: Draft, today: date) -> None:
-    """Условия договора по его актам: как начислять, сумма, смены суммы, паузы, конец."""
+    """Условия договора по его актам: как начислять, сумма, смены суммы, паузы, конец.
+
+    Месяц ряда - месяц АВР за полный месяц, а где АВР ещё нет - счёта на оплату
+    за полный месяц: аренда с 01.09 к 25.10 знает один АВР (сентябрь) и счёт за
+    октябрь, и это уже ряд «в месяц», а не разовый договор на одну сумму.
+    """
     acts = sorted(draft.acts, key=lambda act: (act.start or act.day, act.day))
     monthly = [act for act in acts if act.monthly]
-    if len(monthly) >= 2:
-        by_month: dict[date, Decimal] = {}
-        for act in monthly:
-            by_month[act.start] = by_month.get(act.start, _ZERO) + act.amount
+    by_month: dict[date, Decimal] = {}
+    for act in monthly:
+        by_month[act.start] = by_month.get(act.start, _ZERO) + act.amount
+    billed: dict[date, Decimal] = {}
+    for bill in draft.bills:
+        if bill.monthly and bill.start not in by_month:
+            billed[bill.start] = billed.get(bill.start, _ZERO) + bill.amount
+    if monthly and len(by_month) + len(billed) >= 2:
+        by_month.update(billed)
         months = sorted(by_month.items())
-        runs, draft.outliers = _runs(months)
-        draft.billing = "month"
         draft.billing_from = months[0][0]
-        draft.amount = runs[0][1]
-        draft.changes = runs[1:]
+        counts = Counter(amount for _month, amount in months)
+        if len(counts) >= VARIABLE and counts.most_common(1)[0][1] * 2 < len(months):
+            # Сумма разная почти каждый месяц - аренда с коммунальными по
+            # счётчикам (Д11): одной суммой договора её не выразить, месяц
+            # начисляется по своему АВР (а пока его нет - по счёту).
+            draft.billing = "documents"
+            draft.amount = months[-1][1]
+        else:
+            runs, draft.outliers = _runs(months)
+            draft.billing = "month"
+            draft.amount = runs[0][1]
+            draft.changes = runs[1:]
         present = {month for month, _ in months}
         cursor = months[0][0]
         gap_start: date | None = None
-        while cursor <= months[-1][0]:
+        while draft.billing == "month" and cursor <= months[-1][0]:
             if cursor not in present and gap_start is None:
                 gap_start = cursor
             if cursor in present and gap_start is not None:
@@ -309,22 +350,28 @@ def read_source(session: Session, workspace: Workspace, base: OnecBase, *, today
     matched: dict[str, uuid.UUID] = {}
     votes: dict[str, Counter] = {}
     for doc in docs:
-        if doc.kind not in ("sale", "invoice", "payment"):
+        if doc.kind not in ("sale", "invoice", "payment", *PURCHASE_KINDS):
             continue
+        side = "purchase" if doc.kind in PURCHASE_KINDS else "sale"
         key_party = _party_key_of(doc)
-        contract_key = doc.contract_ref or f"main:{key_party}"
-        if not doc.contract_number:
-            contract_key = f"main:{key_party}"
+        # «Основной договор» продажи и покупки у одного контрагента - разные договоры.
+        main = f"main:{key_party}" if side == "sale" else f"main:buy:{key_party}"
+        contract_key = doc.contract_ref if doc.contract_ref and doc.contract_number else main
         found = onec_match.match_own(doc, entity_id, index) if entity_id else None
         if found is not None and found.state == "ok" and found.contract_id:
             votes.setdefault(contract_key, Counter())[found.contract_id] += 1
         draft = drafts.setdefault(
             contract_key,
-            Draft(key=contract_key, party_key=key_party, number=doc.contract_number or "", signed=doc.contract_date),
+            Draft(key=contract_key, party_key=key_party, number=doc.contract_number or "", signed=doc.contract_date, side=side),
         )
         draft.docs += 1
-        if doc.kind == "sale" and doc.amount is not None:
+        day = doc.period_from or doc.doc_date
+        if draft.first is None or day < draft.first:
+            draft.first = day
+        if doc.kind in ("sale", "purchase") and doc.amount is not None:
             draft.acts.append(Act(doc.number, doc.doc_date, doc.period_from, doc.period_to, doc.amount))
+        elif doc.kind == "invoice" and doc.amount is not None and doc.period_from:
+            draft.bills.append(Act(doc.number, doc.doc_date, doc.period_from, doc.period_to, doc.amount))
     for key, counter in votes.items():
         matched[key] = counter.most_common(1)[0][0]
     # Разовые акты «Основного договора» - договор на каждый акт (Д15); акты
@@ -338,7 +385,7 @@ def read_source(session: Session, workspace: Workspace, base: OnecBase, *, today
         if key.startswith("main:") and draft.acts and sum(1 for act in draft.acts if act.monthly) < 2:
             for act in draft.acts:
                 single = Draft(key=f"{key}:{act.number}:{act.day:%Y%m%d}", party_key=draft.party_key, number="",
-                               signed=act.day, acts=[act], docs=1, act=act)
+                               signed=act.day, side=draft.side, acts=[act], docs=1, act=act)
                 shape(single, today)
                 out[single.key] = single
             continue
@@ -405,6 +452,37 @@ def resolve_parties(session: Session, workspace: Workspace, source: Source) -> N
         party.action = "create"
 
 
+def find_moves(session: Session, workspace: Workspace, source: Source) -> None:
+    """Договоры базы, которые KORT уже ведёт у другого нашего ТОО: клиента перевели (Д7).
+
+    Одна 1С ведёт два ТОО, и с октября счета арендатора выписывает новое: в
+    его базе договор «А-05» того же клиента, которого у нового ТОО нет, а у
+    прежнего - есть. Это не второй договор, а перевод с первого документа
+    нового ТОО. Кандидат ровно один - иначе не перевод, а вопрос.
+    """
+    if source.entity_id is None:
+        return
+    registry = Registry(session, workspace)
+    contracts = list(
+        session.scalars(
+            sa.select(Contract).where(Contract.workspace_id == workspace.id, Contract.deleted_at.is_(None))
+        )
+    )
+    for draft in source.drafts.values():
+        if draft.contract_id is not None or not draft.number or draft.first is None or draft.side != "sale":
+            continue
+        party = source.parties.get(draft.party_key)
+        if party is None or party.party_id is None:
+            continue
+        found = [
+            item for item in contracts
+            if item.customer_id == party.party_id and item.number_key == number_key(draft.number)
+            and item.executor_id is not None and item.executor_id != source.entity_id and registry.is_own(item.executor_id)
+        ]
+        if len(found) == 1:
+            draft.moved = (found[0].id, found[0].executor_id)
+
+
 def plan(
     session: Session, workspace: Workspace, access: Access, base_id: uuid.UUID, *, today: date, osv: Osv | None = None,
     answers: dict[str, Any] | None = None,
@@ -414,25 +492,31 @@ def plan(
     base = _base(session, workspace, base_id)
     source = read_source(session, workspace, base, today=today)
     resolve_parties(session, workspace, source)
+    find_moves(session, workspace, source)
     entity = session.get(GroupEntity, base.group_entity_id) if base.group_entity_id else None
     actions = Counter(party.action for party in source.parties.values())
-    drafts = [draft for draft in source.drafts.values() if draft.contract_id is None]
+    moves = [draft for draft in source.drafts.values() if draft.moved]
+    drafts = [draft for draft in source.drafts.values() if draft.contract_id is None and not draft.moved]
     answers = answers or {}
     questions = [draft for draft in drafts if draft.last_day and draft.key not in answers]
     settings = core_settings.payments(session, workspace)
     openings = _osv_openings(session, workspace, source, osv) if osv is not None else None
     return {
-        "base": {"id": str(base.id), "title": base.title, "organization": base.organization_name, "bin": base.organization_bin},
+        "base": {
+            "id": str(base.id), "title": base.title, "organization": base.organization_name, "bin": base.organization_bin,
+            "files": onec_files.is_files(base),
+        },
         "entity": {"id": str(entity.counterparty_id) if entity else None, "name": base.organization_name, "bin": base.organization_bin},
         "participants": {
             "counts": dict(actions),
             "items": [party.to_dict() for party in sorted(source.parties.values(), key=lambda item: item.name)],
         },
         "contracts": {
-            "known": len(source.drafts) - len(drafts),
+            "known": len(source.drafts) - len(drafts) - len(moves),
             "new": len(drafts) - len(questions),
             "questions": [draft.to_dict(source.parties) for draft in questions],
             "items": [draft.to_dict(source.parties) for draft in sorted(drafts, key=lambda item: (item.party_key, item.label))],
+            "moves": [draft.to_dict(source.parties) for draft in sorted(moves, key=lambda item: (item.party_key, item.label))],
         },
         "since": {
             "current": settings.since.isoformat() if settings.since else None,
@@ -541,13 +625,23 @@ def add_contracts(
         raise StartError("Сначала - наше юрлицо базы")
     source = read_source(session, workspace, base, today=today)
     resolve_parties(session, workspace, source)
+    find_moves(session, workspace, source)
     answers = answers or {}
     active, suspended = _status(session, workspace, "active"), _status(session, workspace, "suspended")
     terminated, fulfilled = _status(session, workspace, "terminated"), _status(session, workspace, "fulfilled")
     ids: list[str] = []
     waiting: list[str] = []
+    moved: list[str] = []
     for draft in sorted(source.drafts.values(), key=lambda item: (item.party_key, item.label)):
-        if draft.contract_id is not None:
+        if draft.moved and draft.first is not None and (answers.get(draft.key) or {}).get("move", True):
+            # Перевод клиента на юрлицо этой базы - соглашение «исполнитель с даты».
+            since = month_start(month_key(draft.first))
+            mode = Mode(kind="from_date", effective_from=since, summary="документы 1С от другого нашего ТОО")
+            patch(session, workspace, access, actor, draft.moved[0], {"executor": {"id": str(base.group_entity_id)}},
+                  known_seq=None, mode=mode)
+            moved.append(str(draft.moved[0]))
+            continue
+        if draft.contract_id is not None or draft.moved:
             continue
         party = source.parties.get(draft.party_key)
         if party is None or party.party_id is None or draft.amount is None:
@@ -556,10 +650,11 @@ def add_contracts(
         if draft.last_day and not answer:
             waiting.append(draft.key)
             continue
+        ours, theirs = {"id": str(base.group_entity_id)}, {"id": str(party.party_id)}
         values: dict[str, Any] = {
             "number": draft.number,
-            "customer": {"id": str(party.party_id)},
-            "executor": {"id": str(base.group_entity_id)},
+            "customer": ours if draft.side == "purchase" else theirs,
+            "executor": theirs if draft.side == "purchase" else ours,
             "billing": draft.billing,
             "amount": format(draft.amount, "f"),
         }
@@ -567,7 +662,7 @@ def add_contracts(
             values["signed_at"] = draft.signed.isoformat()
         if draft.billing_from:
             values["billing_from"] = draft.billing_from.isoformat()
-            if draft.billing == "month":
+            if draft.billing in ("month", "documents"):
                 values["period_day"] = draft.billing_from.day
         if draft.billing == "total" and fulfilled:
             values["status"] = {"id": str(fulfilled)}
@@ -588,14 +683,14 @@ def add_contracts(
                 status_from(session, workspace, access, actor, contract.id, active, end + timedelta(days=1), summary="акты 1С снова")
         ids.append(str(contract.id))
     if not ids:
-        return {"done": 0, "waiting": waiting, "point": None}
+        return {"done": 0, "waiting": waiting, "moved": moved, "point": None}
     title = f"из 1С заведено договоров: {len(ids)}"
     point = restore._point(session, workspace, actor, "contracts_create", title, {"ids": ids})
     history.write(
         session, workspace, kind="core.onec_start", entity="contracts", entity_id=None,
         title=title, after={"count": len(ids), "waiting": len(waiting)}, actor=actor.email,
     )
-    return {"done": len(ids), "waiting": waiting, "point": restore._point_ref(point)}
+    return {"done": len(ids), "waiting": waiting, "moved": moved, "point": restore._point_ref(point)}
 
 
 def _osv_openings(session: Session, workspace: Workspace, source: Source, osv: Osv) -> dict[str, Any]:
@@ -616,15 +711,27 @@ def osv_wanted(session: Session, workspace: Workspace, base: OnecBase, osv: Osv)
     Договор ищется у участника строки (по написанию, 1С их уже записала) по
     номеру; «Основной договор» - единственный договор клиента без номера, а у
     клиента с одним договором - он (С2: сальдо к договору реестра).
+
+    Чьи договоры: юрлица базы и других наших ТОО из «Отбора» ведомости (одна
+    1С на два ТОО - одна ОСВ на оба), в том числе тех, с кого клиента потом
+    перевели (Д7): на начало учёта договор был их.
     """
+    from app.finance.contracts.payments import former_executors
+
     registry = Registry(session, workspace)
-    contracts = list(
-        session.scalars(
-            sa.select(Contract).where(
-                Contract.workspace_id == workspace.id, Contract.deleted_at.is_(None), Contract.executor_id == base.group_entity_id
-            )
+    owners = {base.group_entity_id} - {None}
+    for name in osv.organizations:
+        found = registry.resolve_party(name, slot="executor", create=False).party
+        if found is not None and registry.is_own(found.id):
+            owners.add(found.id)
+    former = former_executors(session, workspace.id)
+    contracts = [
+        item
+        for item in session.scalars(
+            sa.select(Contract).where(Contract.workspace_id == workspace.id, Contract.deleted_at.is_(None))
         )
-    )
+        if {item.executor_id, *former.get(item.id, ())} & owners
+    ]
     by_party: dict[uuid.UUID, list[Contract]] = {}
     for contract in contracts:
         if contract.customer_id:
@@ -709,17 +816,62 @@ def keep_osv(session: Session, workspace: Workspace, access: Access, actor: Acto
     return osv.to_dict()
 
 
+def from_files(session: Session, workspace: Workspace, access: Access, actor: Actor, upload: onec_files.Upload) -> dict[str, Any]:
+    """Выгрузка 1С файлами: документы - в базы её организаций, ОСВ - к каждой из них.
+
+    Дальше база из файлов проходит те же шаги, что база в интернете; одна
+    ОСВ на два ТОО («Отбор: Организация В списке») запоминается к обеим.
+    """
+    _require(access)
+    report = onec_files.apply(session, workspace, upload, actor=actor.email)
+    if upload.osv is not None:
+        named = {party_key(name) for name in upload.osv.organizations}
+        for base_id, item in report["bases"].items():
+            if not named or party_key(item["organization"]) in named:
+                keep_osv(session, workspace, access, actor, uuid.UUID(base_id), upload.osv)
+    history.write(
+        session, workspace, kind="core.onec_start", entity="onec_bases", entity_id=None,
+        title=f"выгрузка 1С файлами: {', '.join(item['organization'] for item in report['bases'].values())}",
+        after={key: item["counts"] for key, item in report["bases"].items()}, actor=actor.email,
+    )
+    return {**report, "upload": upload.to_dict()}
+
+
+def take_balances(
+    session: Session, workspace: Workspace, access: Access, actor: Actor, base_id: uuid.UUID, day: date, *, client: Any = None,
+) -> dict[str, Any]:
+    """Сальдо 1210 на `day` из базы 1С по REST - как ОСВ, запомнить к базе (`keep_osv`).
+
+    `client` - готовый клиент 1С (тесты); без него - по подключению базы. Маршрут
+    читает 1С вне транзакции и передаёт сюда клиента-снимок.
+    """
+    from app.finance.onec import balances
+    from app.finance.onec import sync as onec_sync
+    from app.finance.onec.client import Client
+
+    _require(access)
+    base = _base(session, workspace, base_id)
+    if onec_files.is_files(base):
+        raise StartError("У базы из файлов REST-сервиса нет - сальдо загрузите ОСВ по 1210 файлом")
+    if day.day != 1:
+        raise StartError("Учёт начинается с первого числа месяца - выберите первое число")
+    found = balances.read(client or Client(onec_sync.connection_of(base)), organization_ref=base.organization_ref, day=day)
+    return keep_osv(session, workspace, access, actor, base_id, found)
+
+
 def use_payments(session: Session, workspace: Workspace, access: Access, actor: Actor, base_id: uuid.UUID) -> dict[str, Any]:
     """Шаг 5: поступления 1С - источник оплат юрлица базы."""
     _require(access)
     base = _base(session, workspace, base_id)
     if not base.group_entity_id:
         raise StartError("Сначала - наше юрлицо базы")
+    if onec_files.is_files(base):
+        raise StartError("В выгрузке 1С нет поступлений - оплаты юрлица берутся из выписок банка")
     core_settings.set_payments(session, workspace, access, actor, entity_id=base.group_entity_id, source="1c")
     return {"done": 1}
 
 
 __all__ = [
-    "Act", "Draft", "MAIN", "Party", "Source", "StartError", "add_contracts", "add_entity", "add_participants",
-    "keep_osv", "osv_wanted", "plan", "read_source", "resolve_parties", "shape", "start_since", "stored_osv", "use_payments",
+    "Act", "Draft", "MAIN", "Party", "Source", "StartError", "add_contracts", "add_entity", "add_participants", "find_moves",
+    "from_files", "keep_osv", "osv_wanted", "plan", "take_balances", "read_source", "resolve_parties", "shape", "start_since", "stored_osv", "use_payments",
 ]

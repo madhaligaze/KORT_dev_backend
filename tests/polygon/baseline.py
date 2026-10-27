@@ -146,17 +146,13 @@ def run() -> dict[str, Any]:
         registry_out["own_entities"] = [row.name for row in own_rows]
         entity_id = next((row.counterparty_id for row in own_rows if "сервис" in row.name.lower()), None)
 
-        class Fake:
-            def rows(self, entity: str, **_: Any):
-                yield from odata.get(entity, [])
-
         if not finance_settings.secrets_key:
             finance_settings.secrets_key = "polygon-baseline"
         base = OnecBase(workspace_id=workspace.id, title="1С Тумар Сервис", url="https://1cfresh.kz/a/ea201/1", login="odata",
                         secret=secretbox.seal("x"), group_entity_id=entity_id, organization_ref=org, sync_from=date(2026, 1, 1))
         session.add(base)
         session.flush()
-        snapshot = onec_sync.read(Fake(), organization_ref=org, since=date(2026, 1, 1))
+        snapshot = onec_sync.read(sources.OdataFake(odata), organization_ref=org, since=date(2026, 1, 1))
         onec_sync.apply(session, base, snapshot, since=base.sync_from)
         index = onec_match.build_index(session, workspace.id)
         ref_to_truth: dict[str, str] = {}

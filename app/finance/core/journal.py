@@ -99,7 +99,11 @@ SEQ, INPUTS, POSTED = "facts", "facts.inputs", "facts.posted"
 #: Вид документа ядра → вид факта: «верно у KORT» - решение человека.
 DOCUMENT_FACTS = {"adjustment": "adjustment", "bill": "bill", "act": "act", "esf": "esf", "opening": "opening", "verified": "decision"}
 #: Документ 1С → вид факта.
-ONEC_FACTS = {"payment": "payment", "refund": "payment", "invoice": "bill", "sale": "act", "sf": "esf", "esf": "esf"}
+ONEC_FACTS = {
+    "payment": "payment", "refund": "payment", "invoice": "bill", "sale": "act", "sf": "esf", "esf": "esf",
+    # Покупка: акт поставщика - АВР договора покупки, оплата поставщику - его оплата.
+    "purchase": "act", "supplier_payment": "payment",
+}
 
 _PENDING = "finance.journal.pending"
 _FRESH = "finance.journal.fresh"
@@ -274,6 +278,7 @@ def _journal_drafts(session: Session, workspace: Any, operations: set[uuid.UUID]
     )
     allocation = contract_payments.allocate(session, workspace, registry, contracts, operations=operations)
     paid = {operation.id: (contract_id, how) for contract_id, items in allocation.paid.items() for operation, how in items}
+    returned = allocation.returned
     disputed: dict[uuid.UUID, set[uuid.UUID]] = defaultdict(set)
     for contract_id, items in allocation.open.items():
         for operation in items:
@@ -315,6 +320,7 @@ def _journal_drafts(session: Session, workspace: Any, operations: set[uuid.UUID]
                 "months": _months(operation.period_start, operation.period_end, operation.accrued_at),
                 "label": operation.period_label, "comment": operation.comment, "contract_ref": operation.contract_ref,
                 "open": sorted(str(item) for item in candidates) if candidates else None,
+                "returned": str(returned[operation.id]) if operation.id in returned else None,
             },
         )
     for row in session.scalars(decisions):
@@ -368,8 +374,12 @@ def _onec_drafts(session: Session, workspace: Any) -> dict[str, Draft]:
         elif doc.kind == "refund":
             # Возврат покупателю - оплата договора со знаком минус: долг растёт обратно.
             data.update({"direction": "out", "refund": True, "comment": doc.content, "months": None})
+        elif doc.kind == "supplier_payment":
+            data.update({"direction": "out", "comment": doc.content, "months": None, "side": "purchase"})
         elif doc.kind == "sale":
             data["signed"] = doc.signed_at
+        elif doc.kind == "purchase":
+            data["side"] = "purchase"
         elif doc.kind in ("sf", "esf"):
             invoice = by_ref.get((doc.base_id, "sf", doc.basis_ref)) if doc.kind == "esf" and doc.basis_ref else None
             sale_ref = doc.basis_ref if doc.kind == "sf" else (invoice.basis_ref if invoice is not None else "")
@@ -690,6 +700,15 @@ def _dirt(obj: Any, how: str) -> list[tuple[str, uuid.UUID]]:
 
     shape = [("journal", WHOLE), ("1c", WHOLE)]
     if isinstance(obj, Operation):
+        from app.finance.contracts.payments import is_refund
+
+        # Возврат клиенту делает возвращённым прежнее поступление - другую
+        # операцию (`contracts/payments.returned_pairs`): такая правка проводит
+        # разнесение целиком. Возвраты редки, остальные списания - своим ключом.
+        kinds = [obj.kind, *(_was(obj, "kind") if how == "dirty" else ())]
+        comments = [obj.comment, *(_was(obj, "comment") if how == "dirty" else ())]
+        if any(is_refund(kind, comment) for kind in kinds for comment in comments):
+            return [("journal", WHOLE)]
         return [("journal", obj.id)]
     if isinstance(obj, ContractPayment):
         return [("journal", obj.operation_id)]

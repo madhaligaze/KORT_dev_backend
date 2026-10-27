@@ -32,6 +32,23 @@ AGENT = "pytest-agent"
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
+def _sales_file() -> bytes:
+    """Журнал «Реализация товаров и услуг» 1С, выгруженный списком: одна реализация."""
+    from datetime import datetime
+
+    from openpyxl import Workbook
+
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "Реализации"
+    sheet.append(["Дата", "Номер", "Организация", "Контрагент", "Договор", "Сумма", "Валюта", "Содержание"])
+    sheet.append([datetime(2026, 9, 30, 18), "00000000001", "ТОО BBC", "ТОО Альфа", "Договор № 1 от 01.01.2026", 100000, "KZT",
+                  "Услуги за период с 01.09.2026 по 30.09.2026"])
+    buffer = io.BytesIO()
+    book.save(buffer)
+    return buffer.getvalue()
+
+
 def _osv_file() -> bytes:
     """ОСВ по 1210 в форме отчёта 1С: шапка в две строки, контрагент и его договор отступом."""
     from openpyxl import Workbook
@@ -332,7 +349,24 @@ def test_kazhdyy_izmenyayushchiy_marshrut_pishet_sobytie(app: FastAPI, monkeypat
     )
     assert owner.post(f"{BASE}/core/onec-start/{onec_base}/entity", json={"answers": {}}).status_code == 200
     walk.call(owner, "POST", "/core/onec-start/{base_id}/{step}", base_id=onec_base, step="payments", json={"answers": {}})
+    # Сальдо 1210 из 1С по REST: чтение 1С подменено готовой ведомостью.
+    from datetime import date as _date
+    from decimal import Decimal as _Decimal
+
+    from app.finance.onec import balances as onec_balances
+    from app.finance.onec.osv import Line, Osv
+
+    rest = Osv("1С по REST", "", _date(2026, 9, 1), _date(2026, 9, 30), "1210", lines=[
+        Line("ТОО Альфа", "Договор № 1 от 01.01.2026", "1", _date(2026, 1, 1), _Decimal(100000), _Decimal(0), _Decimal(0), _Decimal(0), 1),
+    ], opening_total=_Decimal(100000))
+    monkeypatch.setattr(onec_balances, "read", lambda *args, **kwargs: rest)
+    walk.call(owner, "POST", "/core/onec-start/{base_id}/balances", base_id=onec_base, json={"day": "2026-09-01"})
     walk.call(owner, "DELETE", "/onec/bases/{base_id}", base_id=onec_base)
+    # 1С без интернета: журнал реализаций файлом - база организации из файлов.
+    walk.call(
+        owner, "POST", "/core/onec-files",
+        files=[("files", ("Реализация товаров и услуг.xlsx", _sales_file(), XLSX))],
+    )
 
     # ── компании ────────────────────────────────────────────────────────
     second = walk.call(owner, "POST", "/auth/companies", json={"title": "Вторая"}).json()["id"]

@@ -154,7 +154,7 @@ COMPUTED_FIELDS = LIVE_FIELDS + SUMMARY_FIELDS + DERIVED_FIELDS
 #: Книги листов: `""` - реестр (карточки и «Таблица»), `oneoff` - «Разовые».
 BOOKS = ("", "oneoff")
 CHOICES = {
-    "billing": (("month", "В месяц"), ("total", "Вся сумма"), ("terms", "Условие")),
+    "billing": (("month", "В месяц"), ("total", "Вся сумма"), ("terms", "Условие"), ("documents", "По счетам и актам")),
     "end_kind": (("terminated", "Расторжение"), ("fulfilled", "Исполнение"), ("unknown", "Не ясен")),
     "vat_mode": (("included", "В сумме"), ("on_top", "Сверху"), ("none", "Без НДС")),
 }

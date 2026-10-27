@@ -15,7 +15,11 @@
 * возврат покупателю - `Document_ПлатежноеПоручениеИсходящее` с видом
   «возврат денежных средств покупателю», так же по строкам: оплата договора со
   знаком минус (без него долг после возврата переплаты выходил меньше
-  настоящего - полигон, О6).
+  настоящего - полигон, О6);
+* покупки («мы должны», полигон Д17): акт поставщика -
+  `Document_ПоступлениеТоваровУслуг`, оплата поставщику -
+  `Document_ПлатежноеПоручениеИсходящее` с видом «оплата поставщику», по
+  строкам расшифровки. Наше юрлицо в них - заказчик.
 
 Чтение - за окно с `sync_from` и только организации базы. Документ из окна,
 которого в 1С больше нет, помечается `gone`, а не стирается: в KORT на нём
@@ -40,6 +44,8 @@ from app.finance.onec.models import OnecBase, OnecDocument
 
 EMPTY_REF = "00000000-0000-0000-0000-000000000000"
 SALE_TYPE = "StandardODATA.Document_РеализацияТоваровУслуг"
+#: Виды документов 1С, где наше юрлицо - заказчик (покупка), а не исполнитель.
+PURCHASE_KINDS = ("purchase", "supplier_payment")
 SF_TYPE = "StandardODATA.Document_СчетФактураВыданный"
 
 #: «за период с 01.10.2026 по 31.10.2026», «с 02.10.2026 года по 01.11.2026 года».
@@ -299,6 +305,28 @@ def read(client: Client, *, organization_ref: str, since: date) -> Snapshot:
         lambda: money_rows("Document_ПлатежноеПоручениеИсходящее", "refund", "ВозвратДенежныхСредствПокупателю"),
     )
 
+    # Покупки: акты поставщиков и оплаты им.
+    def read_purchases() -> None:
+        for row in client.rows(
+            "Document_ПоступлениеТоваровУслуг",
+            select=(
+                "Ref_Key,DataVersion,Number,Date,Posted,DeletionMark,ВидОперации,Контрагент_Key,ДоговорКонтрагента_Key,"
+                "СуммаДокумента,Услуги"
+            ),
+            where=window,
+            order="Date,Ref_Key",
+        ):
+            item = base_row("purchase", row)
+            item["content"] = _first_content(row.get("Услуги"))
+            item["period_from"], item["period_to"] = period_in(item["content"])
+            snapshot.documents.append(item)
+
+    optional("Поступления товаров и услуг", read_purchases)
+    optional(
+        "Оплаты поставщикам",
+        lambda: money_rows("Document_ПлатежноеПоручениеИсходящее", "supplier_payment", "ОплатаПоставщику"),
+    )
+
     return snapshot
 
 
@@ -362,6 +390,7 @@ def default_since(today: date | None = None) -> date:
 
 __all__ = [
     "FIELDS",
+    "PURCHASE_KINDS",
     "Snapshot",
     "apply",
     "choose_organization",

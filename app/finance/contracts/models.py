@@ -51,7 +51,7 @@ from app.finance.models import JSONB, MONEY, _in
 
 #: Как начислять по договору. `terms` - условие текстом («20% по разовым»):
 #: график по такому договору не ставится никогда.
-BILLING_KINDS = ("month", "total", "terms")
+BILLING_KINDS = ("month", "total", "terms", "documents")
 #: НДС договора у плательщика: в сумме, сверху, без НДС (пусто - в сумме).
 VAT_MODES = ("included", "on_top", "none")
 #: Смысл даты окончания. Одна колонка файла «дата расторжения / дата

@@ -313,7 +313,15 @@ def test_skrytaya_stroka_ne_zavoditsya_molcha_a_bin_s_opechatkoi_ne_prinyat(fina
         assert "hidden" in batch.report["blocking"]
         refused = [item for item in _section(batch, "bins")["items"] if item["refused"]]
         assert [item["name"] for item in refused] == ['ТОО "Самал Клиник"']
+        # Ф2: «1,5 млн» - не число; «150 000,00 тг» и «150.000» - числа. Отчёт говорит об этом до записи.
+        amounts = _section(batch, "amounts")["items"]
+        assert [(item["text"], item["sheet"]) for item in amounts] == [("1,5 млн", "Учебный центр")] and amounts[0]["line"]
         own = [item["key"] for item in _section(batch, "entities")["items"] if item["own"]]
+        # Лист «Аренда» без колонки «Отдел»: отдел - название листа, как во всех листах с колонкой; правило без лишних.
+        rent = next(item for item in _section(batch, "rules")["items"] if item["sheet"] == "Аренда")
+        assert not rent["needs_decision"] and rent["in_sheet"] == rent["caught"] == 17
+        implied = {item["sheet"]: item["implied"] for item in _section(batch, "columns")["items"] if item["implied"]}
+        assert implied == {"Аренда": {"department": "Аренда"}}
         rules = {item["block"]: {"action": "accept"} for item in _section(batch, "rules")["items"]}
         batch = importer.decide(session, workspace, batch.id, {"entities": {"confirmed": True, "own": own}, "rules": rules})
         with pytest.raises(Exception, match="Скрытые строки"):

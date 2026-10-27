@@ -65,11 +65,7 @@ def _connected(session, files):
     session.add(base)
     session.flush()
 
-    class Fake:
-        def rows(self, entity, **_):
-            yield from odata.get(entity, [])
-
-    snapshot = onec_sync.read(Fake(), organization_ref=org["Ref_Key"], since=date(2026, 1, 1))
+    snapshot = onec_sync.read(sources.OdataFake(odata), organization_ref=org["Ref_Key"], since=date(2026, 1, 1))
     onec_sync.apply(session, base, snapshot, since=base.sync_from)
     return workspace, base
 
@@ -121,12 +117,24 @@ def test_tumar_servis_iz_1s_vidit_nam_dolzhny(world_files, finance_db) -> None:
             session, workspace, FULL, ACTOR, base.id, today=TODAY, answers={questions[0]["key"]: {"end": "2026-05-31"}}
         )
         assert answered["done"] == 1
+        # Сальдо из самой 1С по REST (остатки 1210 на 01.06) ложится на те же договоры теми же суммами, что ОСВ файлом.
+        odata = files["1С Тумар Сервис/odata.json"]
+        rest = onec_start.take_balances(session, workspace, FULL, ACTOR, base.id, date(2026, 6, 1), client=sources.OdataFake(odata))
+        assert rest["start"] == "2026-06-01" and not rest["problems"]
+        from_rest = onec_start.stored_osv(session, workspace, base.id)
+        assert onec_start.osv_wanted(session, workspace, base, from_rest) == onec_start.osv_wanted(session, workspace, base, osv)
         moved = onec_start.start_since(session, workspace, FULL, ACTOR, base.id, osv)
         assert moved["missing"] == [] and moved["since"] == "2026-06-01"
         onec_start.use_payments(session, workspace, FULL, ACTOR, base.id)
         session.flush()
         totals = Debts(session, workspace, FULL, day=TODAY).totals()
         assert Decimal(totals["owed"]) == world.owed()["ТС"]
+        # Д17: покупка у субподрядчика «Сункар Клин» - договор из актов поставщика, «Мы должны» = правда.
+        owe = Debts(session, workspace, FULL, day=TODAY, side="payable").totals()
+        truth = sum((world.debt(k) for k, c in world.contracts.items() if c.side == "purchase" and c.entity == "ТС"), Decimal(0))
+        assert truth > 0 and Decimal(owe["owed"]) == truth
+        bought = [item for item in plan["contracts"]["items"] if item["side"] == "purchase"]
+        assert [item["number"] for item in bought] == ["СК-2026/01"] and bought[0]["billing"] == "month"
         made = session.scalar(sa.select(sa.func.count()).select_from(Contract).where(Contract.workspace_id == workspace.id))
         assert made == len(plan["contracts"]["items"])
 

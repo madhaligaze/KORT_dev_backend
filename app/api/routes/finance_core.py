@@ -11,7 +11,7 @@
 """
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import date, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -1420,6 +1420,64 @@ def onec_start_osv(base_id: UUID, file: UploadFile = File(...), member: Member =
     except osv_module.OsvError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return _run(member, lambda s, w, a: onec_start.keep_osv(s, w, a, _actor(member), base_id, parsed))
+
+
+@router.post("/onec-files")
+def onec_files_upload(files: list[UploadFile] = File(...), member: Member = Depends(editor)) -> dict[str, Any]:
+    """1С без интернета: журналы реализаций и счетов, контрагенты и ОСВ файлами - в базы организаций."""
+    from app.finance import heap
+    from app.finance.config import finance_settings
+    from app.finance.core import onec_start
+    from app.finance.onec import files as onec_files
+
+    limit = int(finance_settings.import_max_mb * 1024 * 1024)
+    read: list[tuple[str, bytes]] = []
+    for item in files:
+        data = item.file.read(limit + 1)
+        if len(data) > limit:
+            raise HTTPException(status_code=413, detail=f"Файл «{item.filename}» больше {finance_settings.import_max_mb} МБ")
+        read.append((item.filename or "1С.xlsx", data))
+    upload = onec_files.read(read)
+    read.clear()
+    try:
+        return _run(member, lambda s, w, a: onec_start.from_files(s, w, a, _actor(member), upload))
+    finally:
+        heap.trim()
+
+
+class OnecBalancesIn(BaseModel):
+    day: date
+
+
+@router.post("/onec-start/{base_id}/balances")
+def onec_start_balances(base_id: UUID, body: OnecBalancesIn, member: Member = Depends(editor)) -> dict[str, Any]:
+    """Сальдо 1210 на первое число из базы 1С по REST - вместо ОСВ файлом."""
+    from app.finance.core import onec_start
+    from app.finance.onec import balances
+    from app.finance.onec import files as onec_files
+    from app.finance.onec import sync as onec_sync
+    from app.finance.onec.client import Client, OnecError
+
+    if body.day.day != 1:
+        raise HTTPException(status_code=400, detail="Учёт начинается с первого числа месяца - выберите первое число")
+
+    def connection(session, workspace, access):
+        onec_start._require(access)
+        base = onec_start._base(session, workspace, base_id)
+        if onec_files.is_files(base):
+            raise onec_start.StartError("У базы из файлов REST-сервиса нет - сальдо загрузите ОСВ по 1210 файлом")
+        return onec_sync.connection_of(base), base.organization_ref
+
+    found = _run(member, connection)
+    if not isinstance(found, tuple):
+        return found
+    connect, organization = found
+    # Сеть - вне транзакции: 1С отвечает секундами, а база KORT ждать не должна.
+    try:
+        osv = balances.read(Client(connect), organization_ref=organization, day=body.day)
+    except OnecError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _run(member, lambda s, w, a: onec_start.keep_osv(s, w, a, _actor(member), base_id, osv))
 
 
 class OnecStartIn(BaseModel):

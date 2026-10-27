@@ -60,6 +60,7 @@ from app.finance.contracts.fields import number_key, party_key
 from app.finance.contracts.models import Contract, CounterpartyName, GroupEntity
 from app.finance.models import Counterparty
 from app.finance.onec.models import OnecBase, OnecDocument
+from app.finance.onec.sync import PURCHASE_KINDS
 
 #: Короче - не ищем одно имя внутри другого: «ТОО А» нашлось бы везде.
 MIN_CONTAINED = 5
@@ -185,6 +186,8 @@ class Index:
 
     contracts: dict[uuid.UUID, ContractInfo] = field(default_factory=dict)
     by_executor: dict[uuid.UUID, list[ContractInfo]] = field(default_factory=dict)
+    #: Договоры, где сторона - заказчик: у нашего юрлица это покупки.
+    by_customer: dict[uuid.UUID, list[ContractInfo]] = field(default_factory=dict)
     party_keys: dict[uuid.UUID, set[str]] = field(default_factory=dict)
     #: Ключи для сравнения при совпавшем номере (`loose_key`).
     party_loose: dict[uuid.UUID, set[str]] = field(default_factory=dict)
@@ -200,11 +203,18 @@ def build_index(session: Session, workspace_id: uuid.UUID) -> Index:
             Contract.signed_at, Contract.end_date, Contract.amount,
         ).where(Contract.workspace_id == workspace_id, Contract.deleted_at.is_(None))
     ).all()
+    from app.finance.contracts.payments import former_executors
+
+    # Документы прежнего ТОО - тоже документы договора: клиента перевели на
+    # другое наше юрлицо с даты, а его акты до неё остались в базе прежнего.
+    former = former_executors(session, workspace_id)
     for row in rows:
         info = ContractInfo(*row)
         index.contracts[info.id] = info
-        if info.executor_id is not None:
-            index.by_executor.setdefault(info.executor_id, []).append(info)
+        for owner in {info.executor_id, *former.get(info.id, ())} - {None}:
+            index.by_executor.setdefault(owner, []).append(info)
+        if info.customer_id is not None:
+            index.by_customer.setdefault(info.customer_id, []).append(info)
     party_ids = {info.customer_id for info in index.contracts.values() if info.customer_id} | {
         info.executor_id for info in index.contracts.values() if info.executor_id
     }
@@ -283,9 +293,15 @@ def _elsewhere(doc: OnecDocument, entity_id: uuid.UUID, index: Index) -> list[Co
 
 
 def match_own(doc: OnecDocument, entity_id: uuid.UUID | None, index: Index) -> Match:
-    """Договор по самому документу - номер договора 1С и клиент (пункты 3-5)."""
+    """Договор по самому документу - номер договора 1С и клиент (пункты 3-5).
+
+    Покупка (акт поставщика, оплата ему): наше юрлицо - заказчик договора, а
+    «клиент» документа - исполнитель.
+    """
     if entity_id is None:
         return Match("no_entity")
+    if doc.kind in PURCHASE_KINDS:
+        return _match_purchase(doc, entity_id, index)
     mine = index.by_executor.get(entity_id, [])
     key = number_key(doc.contract_number)
     if key:
@@ -318,6 +334,20 @@ def match_own(doc: OnecDocument, entity_id: uuid.UUID | None, index: Index) -> M
     chosen = _narrow(clients, doc)
     if len(chosen) == 1:
         return Match("ok", chosen[0].id, "client" if len(clients) == 1 else "window")
+    return Match("ambiguous", candidates=tuple(item.id for item in chosen))
+
+
+def _match_purchase(doc: OnecDocument, entity_id: uuid.UUID, index: Index) -> Match:
+    """Договор покупки: у нашего юрлица-заказчика, исполнитель - контрагент документа."""
+    mine = [item for item in index.by_customer.get(entity_id, []) if same_client(doc, item.executor_id, index)]
+    key = number_key(doc.contract_number)
+    if key:
+        mine = [item for item in mine if item.number_key == key or number_loose(item.number) == number_loose(doc.contract_number)]
+    if not mine:
+        return Match("missing")
+    chosen = _narrow(mine, doc)
+    if len(chosen) == 1:
+        return Match("ok", chosen[0].id, "number" if key else "client")
     return Match("ambiguous", candidates=tuple(item.id for item in chosen))
 
 
@@ -375,7 +405,7 @@ def resolve(documents: Iterable[OnecDocument], bases: dict[uuid.UUID, OnecBase],
         if doc.id in out.months:
             return out.months[doc.id]
         value = ""
-        if doc.kind in ("invoice", "sale"):
+        if doc.kind in ("invoice", "sale", "purchase"):
             value = month_key(doc.period_from or doc.doc_date)
         elif depth < 3:
             parent = basis(doc)

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import uuid
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -27,6 +28,7 @@ from openpyxl.styles import Alignment, Font
 
 from polygon.cases import CASES
 from polygon.world import (
+    YEAR,
     CLEANING,
     RENT,
     SCHOOL,
@@ -36,6 +38,7 @@ from polygon.world import (
     Contract,
     World,
     case_index,
+    first,
     month_end,
     month_range,
 )
@@ -90,6 +93,11 @@ def onec_odata(world: World, entity_key: str = "ТС") -> dict[str, list[dict[st
     docs = [doc for doc in world.documents if doc.entity == entity_key]
     contracts = {doc.contract for doc in docs}
     payments = [p for p in world.payments if p.dst == entity_key and p.kind == "contract" and p.day >= date(2026, 1, 1)]
+    # Покупки (Д17): акты поставщика за прошедшие месяцы и наши оплаты ему.
+    buying = [c for c in world.contracts.values() if c.side == "purchase" and c.entity == entity_key]
+    contracts |= {c.key for c in buying}
+    paid_out = [p for p in world.payments if p.src == entity_key and p.kind == "contract" and p.day >= date(2026, 1, 1)
+                and p.alloc and world.contracts[p.alloc[0][0]].side == "purchase"]
     party_keys = {world.contracts[c].party for c in contracts} | {p.src for p in payments}
     party_keys -= set(world.entities)
 
@@ -169,6 +177,29 @@ def onec_odata(world: World, entity_key: str = "ТС") -> dict[str, list[dict[st
             ],
         })
 
+    received = []
+    for contract in buying:
+        contract_ref = _onec_contract(contract)[0]
+        for index, accrual in enumerate(a for a in world.accruals(contract.key) if a.month < first(TODAY) and a.month >= YEAR):
+            received.append({
+                "Ref_Key": ref("purchase", contract.key, accrual.month), "DataVersion": "AAAAAQAAAAA=", "Number": f"СК-{index + 1:05d}",
+                "Date": iso(month_end(accrual.month), 17), "Posted": True, "DeletionMark": False, "Организация_Key": org,
+                "ВидОперации": "Услуги", "Контрагент_Key": ref("party", contract.party), "ДоговорКонтрагента_Key": contract_ref,
+                "СуммаДокумента": float(accrual.amount),
+                "Услуги": [{"LineNumber": "1", "Содержание": f"{contract.subject} за период с {accrual.month:%d.%m.%Y} по {month_end(accrual.month):%d.%m.%Y}"}],
+            })
+    outgoing = []
+    for payment in paid_out:
+        contract_ref = _onec_contract(world.contracts[payment.alloc[0][0]])[0]
+        outgoing.append({
+            "Ref_Key": ref("paid-out", payment.key), "DataVersion": "AAAAAQAAAAA=", "Number": f"{len(outgoing) + 101:011d}",
+            "Date": iso(payment.day, 11), "Posted": True, "DeletionMark": False, "Организация_Key": org,
+            "ВидОперации": "ОплатаПоставщику", "Контрагент_Key": ref("party", payment.dst),
+            "СуммаДокумента": float(payment.amount), "НазначениеПлатежа": payment.purpose,
+            "РасшифровкаПлатежа": [{"LineNumber": "1", "ДоговорКонтрагента_Key": contract_ref, "СуммаПлатежа": float(payment.amount),
+                                    "СчетНаОплату_Key": "00000000-0000-0000-0000-000000000000"}],
+        })
+
     # Возврат переплаты клиенту - «Платёжное поручение исходящее» (О6): в 1С он
     # лежит рядом с поступлениями, по договору клиента.
     refunds = []
@@ -183,7 +214,25 @@ def onec_odata(world: World, entity_key: str = "ТС") -> dict[str, list[dict[st
                                     "СчетНаОплату_Key": "00000000-0000-0000-0000-000000000000"}],
         })
 
+    # Остатки 1210 на начало учёта по контрагентам и договорам - те же, что в ОСВ файлом.
+    account = ref("account", "1210")
+    balance = []
+    for key, contract in sorted(world.contracts.items()):
+        if contract.side == "purchase" or contract.entity != entity_key:
+            continue
+        opening = world.debt(key, SINCE - timedelta(days=1))
+        if not opening:
+            continue
+        balance.append({
+            "Account_Key": account, "Организация_Key": org,
+            "ExtDimension1": ref("party", contract.party), "ExtDimension1_Type": "StandardODATA.Catalog_Контрагенты",
+            "ExtDimension2": _onec_contract(contract)[0], "ExtDimension2_Type": "StandardODATA.Catalog_ДоговорыКонтрагентов",
+            "СуммаBalance": float(opening), "СуммаBalanceDr": float(max(opening, 0)), "СуммаBalanceCr": float(max(-opening, 0)),
+        })
+
     return {
+        "ChartOfAccounts_Хозрасчетный": [{"Ref_Key": account, "Code": "1210", "Description": "Краткосрочная дебиторская задолженность покупателей и заказчиков"}],
+        f"AccountingRegister_Хозрасчетный/Balance@{SINCE:%Y-%m-%d}": balance,
         "Catalog_Организации": [{"Ref_Key": org, "Description": entity.name, "ИдентификационныйНомер": entity.number, "DeletionMark": False}],
         "Catalog_Контрагенты": parties,
         "Catalog_ДоговорыКонтрагентов": catalog,
@@ -193,8 +242,33 @@ def onec_odata(world: World, entity_key: str = "ТС") -> dict[str, list[dict[st
         "Document_СчетФактураВыданный": sfs,
         "Document_ЭСФ": esfs,
         "Document_ПлатежноеПоручениеВходящее": incoming,
-        "Document_ПлатежноеПоручениеИсходящее": refunds,
+        "Document_ПлатежноеПоручениеИсходящее": refunds + outgoing,
+        "Document_ПоступлениеТоваровУслуг": received,
     }
+
+
+class OdataFake:
+    """База 1С из снимка `onec_odata` для `onec/sync.read`: отбор по виду операции и направлению - как в OData.
+
+    Исходящие платёжки - и возвраты покупателям, и оплаты поставщикам: без
+    отбора `ВидОперации` одни читались бы другими.
+    """
+
+    _EQ = re.compile(r"(\w+) eq '([^']*)'")
+    _PERIOD = re.compile(r"^(\w+)/Balance\(Period=datetime'(\d{4}-\d{2}-\d{2})T")
+
+    def __init__(self, data: dict[str, list[dict[str, Any]]]):
+        self.data = data
+
+    def rows(self, entity: str, *, where: str = "", **_: Any):
+        # Виртуальная таблица остатков: снимок держит её на одну дату - `<регистр>/Balance@<дата>`.
+        period = self._PERIOD.match(entity)
+        if period:
+            entity = f"{period.group(1)}/Balance@{period.group(2)}"
+        wanted = dict(self._EQ.findall(where or ""))
+        for row in self.data.get(entity, []):
+            if all(str(row.get(name, "")) == value for name, value in wanted.items()):
+                yield row
 
 
 # ── 1С файлами: отчёты и списки ──────────────────────────────────────────────
@@ -595,4 +669,4 @@ def write(world: World, folder: str) -> list[str]:
     return written
 
 
-__all__ = ["kaspi_statement", "onec_odata", "osv_1210", "ref", "registry", "render", "rent_book", "school_book", "truth", "write"]
+__all__ = ["OdataFake", "kaspi_statement", "onec_odata", "osv_1210", "ref", "registry", "render", "rent_book", "school_book", "truth", "write"]

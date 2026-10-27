@@ -90,17 +90,10 @@ def test_snimok_1s_chitaet_podklyuchenie() -> None:
     """Снимок OData читается тем же `onec/sync.read`, что настоящая база."""
     from app.finance.onec import sync as onec_sync
 
-    class Fake:
-        def __init__(self, data):
-            self.data = data
-
-        def rows(self, entity, **_):
-            yield from self.data.get(entity, [])
-
     world = build()
     odata = sources.onec_odata(world, "ТС")
     org = odata["Catalog_Организации"][0]["Ref_Key"]
-    snapshot = onec_sync.read(Fake(odata), organization_ref=org, since=date(2026, 1, 1))
+    snapshot = onec_sync.read(sources.OdataFake(odata), organization_ref=org, since=date(2026, 1, 1))
     counts = snapshot.counts()
     assert counts["sale"] == sum(1 for d in world.documents if d.entity == "ТС" and d.kind == "act")
     assert counts["invoice"] == sum(1 for d in world.documents if d.entity == "ТС" and d.kind == "invoice")
