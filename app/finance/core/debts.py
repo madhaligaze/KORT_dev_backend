@@ -182,9 +182,15 @@ def accruals_debt(item: Settlement, *, day: date) -> Found | None:
 
 
 def acts_debt(
-    acts: Iterable[Act], opening: Decimal | None, paid: Decimal, *, day: date, since: date
+    acts: Iterable[Act], opening: Decimal | None, paid: Decimal, *, day: date, since: date, complete: bool = False
 ) -> Found | None:
-    """Долг по АВР: сальдо по АВР и акты месяцев учёта до дня, минус оплаченное в учёте; `None` - ни актов, ни сальдо."""
+    """Долг по АВР: сальдо по АВР и акты месяцев учёта до дня, минус оплаченное в учёте; `None` - долга не знаем.
+
+    `complete` - акты юрлица KORT знает все (подключена его 1С): тогда оплаты
+    без единого акта - аванс, как его и показывает 1С счётом 3510. Без этого
+    источника отсутствие актов значит лишь, что KORT их не видит, - долг
+    неизвестен.
+    """
     first = month_key(since)
     dated = sorted(
         (
@@ -194,7 +200,10 @@ def acts_debt(
         ),
         key=lambda item: item[0],
     )
-    if not dated and opening is None:
+    if not dated and opening is None and not (complete and paid):
+        # Ни актов, ни сальдо - о договоре по АВР сказать нечего. Кроме оплат по
+        # договору юрлица с 1С: это предоплата (живая 1С:Fresh BBC, 27.10.2026 -
+        # 41 договор с одной предоплатой и −4 987 000 по 1210 + 3510).
         return None
     # Аванс на начало учёта гасит акты, как оплата в первый день.
     credit = paid + (-opening if opening is not None and opening < 0 else _ZERO)
@@ -377,7 +386,7 @@ class Debts:
                 doc = openings.get(contract.id)
                 found = acts_debt(
                     _chosen(acts, contract.id), doc.amount if doc is not None else None, settled.paid,
-                    day=day, since=settled.since,
+                    day=day, since=settled.since, complete=contract.executor_id in acts.onec_entities,
                 )
             if found is None:
                 self.unknowns[side_key] += 1

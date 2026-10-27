@@ -228,11 +228,15 @@ def onec_odata(world: World, entity_key: str = "ТС") -> dict[str, list[dict[st
             "ExtDimension1": ref("party", contract.party), "ExtDimension1_Type": "StandardODATA.Catalog_Контрагенты",
             "ExtDimension2": _onec_contract(contract)[0], "ExtDimension2_Type": "StandardODATA.Catalog_ДоговорыКонтрагентов",
             "СуммаBalance": float(opening), "СуммаBalanceDr": float(max(opening, 0)), "СуммаBalanceCr": float(max(-opening, 0)),
+            # Как в живой 1С:Fresh: рядом с суммой - её «расщеплённая» форма, валютная сумма и количество.
+            "СуммаSplittedBalanceDr": float(max(opening, 0)), "СуммаSplittedBalanceCr": float(max(-opening, 0)),
+            "ВалютнаяСуммаBalanceDr": float(max(opening, 0)), "ВалютнаяСуммаBalanceCr": float(max(-opening, 0)),
+            "КоличествоBalanceDr": 0, "КоличествоBalanceCr": 0,
         })
 
     return {
-        "ChartOfAccounts_Хозрасчетный": [{"Ref_Key": account, "Code": "1210", "Description": "Краткосрочная дебиторская задолженность покупателей и заказчиков"}],
-        f"AccountingRegister_Хозрасчетный/Balance@{SINCE:%Y-%m-%d}": balance,
+        "ChartOfAccounts_Типовой": [{"Ref_Key": account, "Code": "1210", "Description": "Краткосрочная дебиторская задолженность покупателей и заказчиков"}],
+        f"AccountingRegister_Типовой/Balance@{SINCE:%Y-%m-%d}": balance,
         "Catalog_Организации": [{"Ref_Key": org, "Description": entity.name, "ИдентификационныйНомер": entity.number, "DeletionMark": False}],
         "Catalog_Контрагенты": parties,
         "Catalog_ДоговорыКонтрагентов": catalog,

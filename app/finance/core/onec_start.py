@@ -54,7 +54,7 @@ from app.finance.contracts.service import Access, Actor, Registry
 from app.finance.core import bin as bins
 from app.finance.core import opening as opening_module
 from app.finance.core import settings as core_settings
-from app.finance.core.accruals import month_key, month_start
+from app.finance.core.accruals import month_key, month_start, periods
 from app.finance.models import Counterparty, Workspace
 from app.finance.onec import files as onec_files
 from app.finance.onec import match as onec_match
@@ -145,9 +145,10 @@ class Act:
 
     @property
     def monthly(self) -> bool:
+        """Период ровно в месяц - с любого числа: у BBC «с 20.05 по 19.06», у аренды «с 01.06 по 30.06»."""
         if not self.start or not self.end:
             return False
-        return self.start.day == 1 and self.end == _month_end(self.start)
+        return next(periods(self.start, self.start.day)) == (self.start, self.end)
 
 
 @dataclass
@@ -249,23 +250,37 @@ def _runs(months: list[tuple[date, Decimal]]) -> tuple[list[tuple[date, Decimal]
 def shape(draft: Draft, today: date) -> None:
     """Условия договора по его актам: как начислять, сумма, смены суммы, паузы, конец.
 
-    Месяц ряда - месяц АВР за полный месяц, а где АВР ещё нет - счёта на оплату
-    за полный месяц: аренда с 01.09 к 25.10 знает один АВР (сентябрь) и счёт за
-    октябрь, и это уже ряд «в месяц», а не разовый договор на одну сумму.
+    Ряд - по месяцам начала периодов: АВР за период ровно в месяц (с любого
+    числа - у BBC периоды «с 20.05 по 19.06»), а где АВР ещё нет - счёт на
+    оплату за такой период. Аренда с 01.09 к 25.10 знает один АВР (сентябрь) и
+    счёт за октябрь - это уже ряд «в месяц». Начало начислений, смены суммы и
+    конец - настоящие даты периодов, а не первые числа. Договор без АВР -
+    по счетам: их сумма и есть сумма договора.
     """
     acts = sorted(draft.acts, key=lambda act: (act.start or act.day, act.day))
-    monthly = [act for act in acts if act.monthly]
+    bills = sorted(draft.bills, key=lambda bill: (bill.start or bill.day, bill.day))
     by_month: dict[date, Decimal] = {}
-    for act in monthly:
-        by_month[act.start] = by_month.get(act.start, _ZERO) + act.amount
+    #: Месяц ряда → настоящее начало и конец его периода.
+    starts: dict[date, date] = {}
+    ends: dict[date, date] = {}
+
+    def take(item: Act, into: dict[date, Decimal]) -> None:
+        month = item.start.replace(day=1)
+        into[month] = into.get(month, _ZERO) + item.amount
+        starts[month] = min(starts.get(month, item.start), item.start)
+        ends[month] = max(ends.get(month, item.end), item.end)
+
+    for act in acts:
+        if act.monthly:
+            take(act, by_month)
     billed: dict[date, Decimal] = {}
-    for bill in draft.bills:
-        if bill.monthly and bill.start not in by_month:
-            billed[bill.start] = billed.get(bill.start, _ZERO) + bill.amount
-    if monthly and len(by_month) + len(billed) >= 2:
+    for bill in bills:
+        if bill.monthly and bill.start.replace(day=1) not in by_month:
+            take(bill, billed)
+    if len(by_month) + len(billed) >= 2:
         by_month.update(billed)
         months = sorted(by_month.items())
-        draft.billing_from = months[0][0]
+        draft.billing_from = starts[months[0][0]]
         counts = Counter(amount for _month, amount in months)
         if len(counts) >= VARIABLE and counts.most_common(1)[0][1] * 2 < len(months):
             # Сумма разная почти каждый месяц - аренда с коммунальными по
@@ -277,7 +292,7 @@ def shape(draft: Draft, today: date) -> None:
             runs, draft.outliers = _runs(months)
             draft.billing = "month"
             draft.amount = runs[0][1]
-            draft.changes = runs[1:]
+            draft.changes = [(starts.get(month, month), amount) for month, amount in runs[1:]]
         present = {month for month, _ in months}
         cursor = months[0][0]
         gap_start: date | None = None
@@ -288,18 +303,23 @@ def shape(draft: Draft, today: date) -> None:
                 draft.pauses.append((gap_start, cursor - timedelta(days=1)))
                 gap_start = None
             cursor = _next_month(cursor)
-        # Акт месяца выписывают в его конце: акта прошлого месяца ещё может не
-        # быть, а позапрошлого - уже должен быть. Последний акт раньше - ряд
-        # кончился, и KORT спросит, закончился ли договор.
+        # Акт периода выписывают после его конца: за период, кончившийся в
+        # прошлом месяце, акта ещё может не быть. Последний период кончился
+        # раньше прошлого месяца - ряд кончился, и KORT спросит, закончился ли
+        # договор. По концу периода, а не по началу: у BBC период 20.08-19.09
+        # к 27.10 - живой ряд, а по началу (август) выглядел оборванным.
         due = month_start(month_key(today))
         due = date(due.year - (due.month == 1), (due.month - 2) % 12 + 1, 1)
-        if months[-1][0] < due:
-            draft.last_day = _month_end(months[-1][0])
+        if ends[months[-1][0]] < due:
+            draft.last_day = ends[months[-1][0]]
         return
     draft.billing = "total"
-    draft.amount = sum((act.amount for act in acts), _ZERO) if acts else None
-    first = acts[0] if acts else None
-    draft.billing_from = (first.start or first.day) if first else None
+    paper = acts or bills
+    draft.amount = sum((item.amount for item in paper), _ZERO) if paper else None
+    # Начало разового договора - самый ранний его документ: счёт на предоплату
+    # раньше АВР, и оплата по этому счёту должна застать начисление.
+    days = [item.start or item.day for item in (*acts, *bills)]
+    draft.billing_from = min(days) if days else None
 
 
 # ── Источник: документы базы ─────────────────────────────────────────────────
@@ -345,6 +365,23 @@ def read_source(session: Session, workspace: Workspace, base: OnecBase, *, today
         if doc.party_ref:
             party.refs.add(doc.party_ref)
             by_ref[doc.party_ref] = key
+    # Написание, общее для нескольких карточек 1С, сторону не называет: в живой
+    # 1С:Fresh BBC у пяти клиентов полное имя - «Филиал "Южная столица" АО
+    # "Kaspi Bank"» (банк-посредник Kaspi Pay). Записанное каждому, оно делало
+    # их всех спорными, и их договоры не заводились (27.10.2026).
+    holders: dict[str, set[str]] = {}
+    for party in parties.values():
+        for name in (*party.names, *party.full_names):
+            holders.setdefault(party_key(name), set()).add(party.key)
+    shared = {key for key, owners in holders.items() if len(owners) > 1}
+    for party in parties.values():
+        for name in [name for name in party.full_names if party_key(name) in shared]:
+            del party.full_names[name]
+        # Короткое имя - последнее, чем карточка называется: общее убирается, только если есть своё.
+        own_names = [name for name in party.names if party_key(name) not in shared]
+        if own_names:
+            for name in [name for name in party.names if party_key(name) in shared]:
+                del party.names[name]
     # Договор документа: ключ 1С, у «Основного договора» - вместе с клиентом.
     drafts: dict[str, Draft] = {}
     matched: dict[str, uuid.UUID] = {}
@@ -514,6 +551,8 @@ def plan(
         "contracts": {
             "known": len(source.drafts) - len(drafts) - len(moves),
             "new": len(drafts) - len(questions),
+            # Только оплаты, без счёта и АВР - договор заведётся без суммы.
+            "no_amount": sum(1 for draft in drafts if draft.amount is None),
             "questions": [draft.to_dict(source.parties) for draft in questions],
             "items": [draft.to_dict(source.parties) for draft in sorted(drafts, key=lambda item: (item.party_key, item.label))],
             "moves": [draft.to_dict(source.parties) for draft in sorted(moves, key=lambda item: (item.party_key, item.label))],
@@ -632,6 +671,8 @@ def add_contracts(
     ids: list[str] = []
     waiting: list[str] = []
     moved: list[str] = []
+    #: Что не заведено и почему - человеку словами, а не молча.
+    skipped: list[dict[str, str]] = []
     for draft in sorted(source.drafts.values(), key=lambda item: (item.party_key, item.label)):
         if draft.moved and draft.first is not None and (answers.get(draft.key) or {}).get("move", True):
             # Перевод клиента на юрлицо этой базы - соглашение «исполнитель с даты».
@@ -644,7 +685,8 @@ def add_contracts(
         if draft.contract_id is not None or draft.moved:
             continue
         party = source.parties.get(draft.party_key)
-        if party is None or party.party_id is None or draft.amount is None:
+        if party is None or party.party_id is None:
+            skipped.append({"key": draft.key, "label": draft.label, "why": "участник не заведён - шаг «Участники»"})
             continue
         answer = answers.get(draft.key) or {}
         if draft.last_day and not answer:
@@ -655,8 +697,8 @@ def add_contracts(
             "number": draft.number,
             "customer": ours if draft.side == "purchase" else theirs,
             "executor": theirs if draft.side == "purchase" else ours,
-            "billing": draft.billing,
-            "amount": format(draft.amount, "f"),
+            "billing": draft.billing if draft.amount is not None else None,
+            "amount": format(draft.amount, "f") if draft.amount is not None else None,
         }
         if draft.signed:
             values["signed_at"] = draft.signed.isoformat()
@@ -664,9 +706,11 @@ def add_contracts(
             values["billing_from"] = draft.billing_from.isoformat()
             if draft.billing in ("month", "documents"):
                 values["period_day"] = draft.billing_from.day
-        if draft.billing == "total" and fulfilled:
+        if draft.billing == "total" and draft.acts and fulfilled:
+            # Разовый договор с АВР исполнен - до конца последнего акта: без даты
+            # окончания «Исполнен» не начисляется вовсе.
             values["status"] = {"id": str(fulfilled)}
-            values["end_date"] = (draft.act.end or draft.act.day).isoformat() if draft.act else None
+            values["end_date"] = max(act.end or act.day for act in draft.acts).isoformat()
         elif answer.get("end") and terminated:
             values["status"] = {"id": str(terminated)}
             values["end_date"] = str(answer["end"])
@@ -682,15 +726,19 @@ def add_contracts(
                 status_from(session, workspace, access, actor, contract.id, suspended, start, summary="нет актов 1С")
                 status_from(session, workspace, access, actor, contract.id, active, end + timedelta(days=1), summary="акты 1С снова")
         ids.append(str(contract.id))
+        if draft.amount is None:
+            # Только оплаты - предоплата по договору 1С без счёта и АВР: договор есть,
+            # деньги ложатся на него, а сумму KORT не придумывает.
+            skipped.append({"key": draft.key, "label": draft.label, "why": "заведён без суммы - в 1С только оплаты, сумму укажет человек"})
     if not ids:
-        return {"done": 0, "waiting": waiting, "moved": moved, "point": None}
+        return {"done": 0, "waiting": waiting, "moved": moved, "skipped": skipped, "point": None}
     title = f"из 1С заведено договоров: {len(ids)}"
     point = restore._point(session, workspace, actor, "contracts_create", title, {"ids": ids})
     history.write(
         session, workspace, kind="core.onec_start", entity="contracts", entity_id=None,
         title=title, after={"count": len(ids), "waiting": len(waiting)}, actor=actor.email,
     )
-    return {"done": len(ids), "waiting": waiting, "moved": moved, "point": restore._point_ref(point)}
+    return {"done": len(ids), "waiting": waiting, "moved": moved, "skipped": skipped, "point": restore._point_ref(point)}
 
 
 def _osv_openings(session: Session, workspace: Workspace, source: Source, osv: Osv) -> dict[str, Any]:
@@ -771,11 +819,65 @@ def start_since(
     elif day != osv.start:
         raise StartError(f"Учёт уже идёт с {day:%d.%m.%Y}, а ОСВ - на {osv.start:%d.%m.%Y}: нужна ОСВ на начало учёта")
     wanted, missing = osv_wanted(session, workspace, base, osv)
+    openings = accrual_openings(session, workspace, base, wanted, day)
     moved = opening_module.apply_wanted(
-        session, workspace, access, actor, {"accruals": wanted}, since=day, source="1c",
+        session, workspace, access, actor, {"accruals": openings, "acts": openings}, since=day, source="1c",
         title=f"входящее сальдо на {day:%d.%m.%Y} из ОСВ 1С",
     )
     return {"since": day.isoformat(), "missing": missing, **moved}
+
+
+def accrual_openings(
+    session: Session, workspace: Workspace, base: OnecBase, by_ledger: dict[uuid.UUID, Decimal], day: date
+) -> dict[uuid.UUID, Decimal]:
+    """Сальдо KORT на начало учёта из остатка 1С по договорам.
+
+    Остаток 1С на день - проводки до него, а KORT ведёт и начисления, и АВР по
+    месяцу начала периода и засчитывает в учёт оплату до начала учёта, если
+    она за месяц учёта. Расходятся три вещи (живая 1С:Fresh BBC, 27.10.2026):
+
+    * АВР за период, начавшийся до начала учёта, проведён после него (акт за
+      20.05-19.06 датирован 30.06): в остатке его нет, а KORT относит месяц к
+      сальдо - плюс к сальдо;
+    * АВР до начала учёта за период после него - минус;
+    * оплата до начала учёта по счёту месяца учёта: в остатке она уже есть
+      (аванс 3510), а KORT засчитает её ещё раз как предоплату - плюс.
+
+    Одно и то же для начислений и для АВР: у KORT оба по месяцу периода.
+    """
+    docs = list(
+        session.scalars(
+            sa.select(OnecDocument).where(
+                OnecDocument.base_id == base.id, OnecDocument.kind.in_(("sale", "payment", "invoice")),
+                OnecDocument.gone.is_(False), OnecDocument.deleted.is_(False), OnecDocument.posted.is_(True),
+            )
+        )
+    )
+    out = dict(by_ledger)
+    invoices = {doc.ref: doc for doc in docs if doc.kind == "invoice"}
+    first = month_key(day)
+    moves: list[tuple[OnecDocument, Decimal]] = []
+    for doc in docs:
+        if doc.amount is None:
+            continue
+        if doc.kind == "sale" and doc.period_from is not None and (doc.period_from < day) != (doc.doc_date < day):
+            moves.append((doc, doc.amount if doc.period_from < day else -doc.amount))
+        elif doc.kind == "payment" and doc.doc_date < day and doc.basis_ref in invoices:
+            invoice = invoices[doc.basis_ref]
+            if month_key(invoice.period_from or invoice.doc_date) >= first:
+                moves.append((doc, doc.amount))
+    if not moves:
+        return out
+    # Оплата наследует договор своего счёта - счета идут в сопоставление вместе с ней.
+    resolved = onec_match.resolve(
+        [*invoices.values(), *(doc for doc, _amount in moves)], {base.id: base}, onec_match.build_index(session, workspace.id)
+    )
+    for doc, amount in moves:
+        found = resolved.matches.get(doc.id)
+        if found is None or found.state != "ok" or found.contract_id is None:
+            continue
+        out[found.contract_id] = out.get(found.contract_id, _ZERO) + amount
+    return {contract_id: amount for contract_id, amount in out.items() if amount}
 
 
 def stored_osv(session: Session, workspace: Workspace, base_id: uuid.UUID) -> Osv | None:
@@ -873,5 +975,5 @@ def use_payments(session: Session, workspace: Workspace, access: Access, actor: 
 
 __all__ = [
     "Act", "Draft", "MAIN", "Party", "Source", "StartError", "add_contracts", "add_entity", "add_participants", "find_moves",
-    "from_files", "keep_osv", "osv_wanted", "plan", "take_balances", "read_source", "resolve_parties", "shape", "start_since", "stored_osv", "use_payments",
+    "accrual_openings", "from_files", "keep_osv", "osv_wanted", "plan", "take_balances", "read_source", "resolve_parties", "shape", "start_since", "stored_osv", "use_payments",
 ]
