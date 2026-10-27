@@ -169,6 +169,20 @@ def onec_odata(world: World, entity_key: str = "ТС") -> dict[str, list[dict[st
             ],
         })
 
+    # Возврат переплаты клиенту - «Платёжное поручение исходящее» (О6): в 1С он
+    # лежит рядом с поступлениями, по договору клиента.
+    refunds = []
+    for payment in (p for p in world.payments if p.src == entity_key and p.kind == "refund"):
+        contract_ref = _onec_contract(world.contracts[payment.alloc[0][0]])[0]
+        refunds.append({
+            "Ref_Key": ref("refund", payment.key), "DataVersion": "AAAAAQAAAAA=", "Number": f"{len(refunds) + 1:011d}",
+            "Date": iso(payment.day, 12), "Posted": True, "DeletionMark": False, "Организация_Key": org,
+            "ВидОперации": "ВозвратДенежныхСредствПокупателю", "Контрагент_Key": party_ref(payment.dst, payment.day),
+            "СуммаДокумента": float(payment.amount), "НазначениеПлатежа": payment.purpose,
+            "РасшифровкаПлатежа": [{"LineNumber": "1", "ДоговорКонтрагента_Key": contract_ref, "СуммаПлатежа": float(payment.amount),
+                                    "СчетНаОплату_Key": "00000000-0000-0000-0000-000000000000"}],
+        })
+
     return {
         "Catalog_Организации": [{"Ref_Key": org, "Description": entity.name, "ИдентификационныйНомер": entity.number, "DeletionMark": False}],
         "Catalog_Контрагенты": parties,
@@ -179,6 +193,7 @@ def onec_odata(world: World, entity_key: str = "ТС") -> dict[str, list[dict[st
         "Document_СчетФактураВыданный": sfs,
         "Document_ЭСФ": esfs,
         "Document_ПлатежноеПоручениеВходящее": incoming,
+        "Document_ПлатежноеПоручениеИсходящее": refunds,
     }
 
 

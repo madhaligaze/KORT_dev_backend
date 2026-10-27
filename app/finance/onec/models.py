@@ -43,7 +43,7 @@ def _uuid() -> uuid.UUID:
 BASE_STATES = ("active", "off")
 #: Виды документов 1С: счёт на оплату, реализация (АВР), счёт-фактура,
 #: электронный счёт-фактура, поступление от покупателя.
-DOCUMENT_KINDS = ("invoice", "sale", "sf", "esf", "payment")
+DOCUMENT_KINDS = ("invoice", "sale", "sf", "esf", "payment", "refund")
 #: Решение человека: `link` - по договору `manual_contract_id`, `none` - не по
 #: договору реестра. Пусто - решает сопоставление.
 MANUAL = ("", "link", "none")

@@ -170,6 +170,34 @@ def apply(session: Session, workspace: Workspace, access: Access, actor: Actor, 
     """Записать сальдо из книги пачкой - с точкой восстановления."""
     _require(access)
     wanted = _from_book(session, workspace, access, book, since)
+    return apply_wanted(
+        session, workspace, access, actor, wanted, since=since, source="book",
+        title=f"входящее сальдо на {since:%d.%m.%Y} из таблицы",
+    )
+
+
+def apply_wanted(
+    session: Session,
+    workspace: Workspace,
+    access: Access,
+    actor: Actor,
+    wanted: dict[str, dict[uuid.UUID, Any]],
+    *,
+    since: date,
+    source: str,
+    title: str,
+) -> dict[str, Any]:
+    """Записать сальдо любого источника пачкой: основание → договор → сумма или (сумма, строка).
+
+    Один путь для сводной таблицы (`book`) и ОСВ 1С (`1c`): сальдо, поставленное
+    человеком, источник не перебивает; снятое раньше возвращается под тем же
+    ключом; пачка - одна точка восстановления `core_opening`.
+    """
+    _require(access)
+    wanted = {
+        basis: {key: (value if isinstance(value, tuple) else (value, 0)) for key, value in (wanted.get(basis) or {}).items()}
+        for basis in BASES
+    }
     stored: list[dict[str, Any]] = []
     touched: set[uuid.UUID] = set()
     for basis in BASES:
@@ -186,7 +214,7 @@ def apply(session: Session, workspace: Workspace, access: Access, actor: Actor, 
                 doc = session.scalar(
                     sa.select(Document).where(
                         Document.workspace_id == workspace.id,
-                        Document.source == "book",
+                        Document.source == source,
                         Document.kind == "opening",
                         Document.source_key == key,
                     )
@@ -197,7 +225,7 @@ def apply(session: Session, workspace: Workspace, access: Access, actor: Actor, 
                 else:
                     doc = Document(
                         workspace_id=workspace.id, contract_id=contract_id, kind="opening", period=since,
-                        source="book", source_key=key, created_by=actor.user_id,
+                        source=source, source_key=key, created_by=actor.user_id,
                     )
                     session.add(doc)
                     session.flush()
@@ -217,7 +245,7 @@ def apply(session: Session, workspace: Workspace, access: Access, actor: Actor, 
     session.flush()
     seq = bump(session, workspace.id, "contracts")
     session.execute(sa.update(Contract).where(Contract.id.in_(list(touched))).values(seq=seq))
-    title = f"входящее сальдо на {since:%d.%m.%Y} из таблицы: {len(touched)} договоров"
+    title = f"{title}: {len(touched)} договоров"
     point = restore._point(session, workspace, actor, "core_opening", title, {"items": stored, "since": since.isoformat()})
     history.write(
         session, workspace, kind="core.opening", entity="documents", entity_id=None,
@@ -301,4 +329,4 @@ def set_one(
     return doc if amount is not None else None
 
 
-__all__ = ["BASES", "BASIS_TITLES", "apply", "basis_of", "current", "plan", "set_one", "undo"]
+__all__ = ["BASES", "BASIS_TITLES", "apply", "apply_wanted", "basis_of", "current", "plan", "set_one", "undo"]

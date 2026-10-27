@@ -52,6 +52,9 @@ class Table:
     merged: tuple[tuple[int, int, int, int], ...] = ()
     widths: dict[int, float] = field(default_factory=dict)
     fills: dict[tuple[int, int], str] = field(default_factory=dict)
+    #: Уровень строки: отступ первой ячейки или уровень группировки строк.
+    #: В ОСВ 1С так стоят уровни «контрагент → договор»; нет записи - уровень 0.
+    levels: dict[int, int] = field(default_factory=dict)
 
     def owner(self, row: int, col: int) -> tuple[int, int] | None:
         """Левая верхняя ячейка объединения, в которое входит ячейка; `None` - не входит."""
@@ -138,6 +141,7 @@ def _sheet(sheet: Any, *, detail: bool, max_rows: int | None) -> Table:
 
     rows = []
     fills: dict[tuple[int, int], str] = {}
+    levels: dict[int, int] = {}
     max_col = min(sheet.max_column or 0, MAX_COLS)
     for r_index, row in enumerate(sheet.iter_rows(max_col=max_col)):
         if max_rows is not None and r_index >= max_rows:
@@ -149,10 +153,18 @@ def _sheet(sheet: Any, *, detail: bool, max_rows: int | None) -> Table:
                 color = _color(cell.fill)
                 if color:
                     fills[(r_index, c_index)] = color
+        if row and row[0].value not in (None, ""):
+            indent = getattr(getattr(row[0], "alignment", None), "indent", 0) or 0
+            if indent:
+                levels[r_index] = int(indent)
         rows.append(values)
     hidden = frozenset(
         number - 1 for number, dimension in sheet.row_dimensions.items() if dimension.hidden and 0 < number <= len(rows)
     )
+    for number, dimension in sheet.row_dimensions.items():
+        outline = getattr(dimension, "outline_level", 0) or 0
+        if outline and 0 < number <= len(rows):
+            levels[number - 1] = max(levels.get(number - 1, 0), int(outline))
     merged = tuple(
         (rng.min_row - 1, rng.min_col - 1, rng.max_row - 1, rng.max_col - 1)
         for rng in sheet.merged_cells.ranges
@@ -166,7 +178,7 @@ def _sheet(sheet: Any, *, detail: bool, max_rows: int | None) -> Table:
             continue
         if dimension.width:
             widths[index] = round(float(dimension.width), 1)
-    return Table(sheet.title, rows, hidden, merged, widths, fills)
+    return Table(sheet.title, rows, hidden, merged, widths, fills, levels)
 
 
 def from_values(name: str, values: Sequence[Sequence[Any]]) -> Table:

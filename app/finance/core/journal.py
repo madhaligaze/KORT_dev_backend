@@ -99,7 +99,7 @@ SEQ, INPUTS, POSTED = "facts", "facts.inputs", "facts.posted"
 #: Вид документа ядра → вид факта: «верно у KORT» - решение человека.
 DOCUMENT_FACTS = {"adjustment": "adjustment", "bill": "bill", "act": "act", "esf": "esf", "opening": "opening", "verified": "decision"}
 #: Документ 1С → вид факта.
-ONEC_FACTS = {"payment": "payment", "invoice": "bill", "sale": "act", "sf": "esf", "esf": "esf"}
+ONEC_FACTS = {"payment": "payment", "refund": "payment", "invoice": "bill", "sale": "act", "sf": "esf", "esf": "esf"}
 
 _PENDING = "finance.journal.pending"
 _FRESH = "finance.journal.fresh"
@@ -365,6 +365,9 @@ def _onec_drafts(session: Session, workspace: Any) -> dict[str, Draft]:
             invoice = by_ref.get((doc.base_id, "invoice", doc.basis_ref)) if doc.basis_ref else None
             paid_for = onec_match.month_key(invoice.period_from or invoice.doc_date) if invoice is not None else ""
             data.update({"direction": "in", "comment": doc.content, "months": [paid_for, paid_for] if paid_for else None})
+        elif doc.kind == "refund":
+            # Возврат покупателю - оплата договора со знаком минус: долг растёт обратно.
+            data.update({"direction": "out", "refund": True, "comment": doc.content, "months": None})
         elif doc.kind == "sale":
             data["signed"] = doc.signed_at
         elif doc.kind in ("sf", "esf"):
@@ -375,7 +378,8 @@ def _onec_drafts(session: Session, workspace: Any) -> dict[str, Draft]:
         key = f"1c:{doc.id}"
         out[key] = Draft(
             key=key, kind=ONEC_FACTS[doc.kind], source="1c", day=doc.doc_date,
-            period=_month_start(month) if month else None, amount=doc.amount,
+            period=_month_start(month) if month else None,
+            amount=-doc.amount if doc.kind == "refund" and doc.amount is not None else doc.amount,
             contract_id=found.contract_id if found.state == "ok" else None, entity_id=base.group_entity_id, data=data,
         )
         if doc.manual:

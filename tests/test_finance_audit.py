@@ -31,6 +31,32 @@ PASSWORD = "pass-12345"
 AGENT = "pytest-agent"
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
+
+def _osv_file() -> bytes:
+    """ОСВ по 1210 в форме отчёта 1С: шапка в две строки, контрагент и его договор отступом."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment
+
+    book = Workbook()
+    sheet = book.active
+    sheet.append(["ТОО BBC"])
+    sheet.append(["Оборотно-сальдовая ведомость по счету 1210 за Сентябрь 2026 г."])
+    sheet.append([])
+    sheet.append(["Счет", "Сальдо на начало периода", None, "Обороты за период", None, "Сальдо на конец периода", None])
+    sheet.append([None, "Дебет", "Кредит", "Дебет", "Кредит", "Дебет", "Кредит"])
+    sheet.merge_cells("B4:C4")
+    sheet.merge_cells("D4:E4")
+    sheet.merge_cells("F4:G4")
+    sheet.append(["1210", 100000, None, None, None, 100000, None])
+    sheet.append(["ТОО Альфа", 100000, None, None, None, 100000, None])
+    sheet.cell(sheet.max_row, 1).alignment = Alignment(indent=1)
+    sheet.append(["Договор № 1 от 01.01.2026", 100000, None, None, None, 100000, None])
+    sheet.cell(sheet.max_row, 1).alignment = Alignment(indent=2)
+    sheet.append(["Итого", 100000, None, None, None, 100000, None])
+    buffer = io.BytesIO()
+    book.save(buffer)
+    return buffer.getvalue()
+
 #: Изменяющие маршруты без события - и почему.
 ALLOWED: dict[tuple[str, str], str] = {
     ("POST", "/auth/phone/start"): "шаг входа: только отвечает, какой экран показать, ничего не меняет",
@@ -299,6 +325,13 @@ def test_kazhdyy_izmenyayushchiy_marshrut_pishet_sobytie(app: FastAPI, monkeypat
     walk.call(owner, "POST", "/onec/bases/{base_id}/sync", base_id=onec_base)
     loose = owner.get(f"{BASE}/onec/month", params={"month": "2026-09"}).json()["unmatched"][0]["id"]
     walk.call(owner, "POST", "/onec/documents/{document_id}/decide", document_id=loose, json={"action": "none"})
+    # Вход из 1С: ОСВ к базе, наше юрлицо базы и оплаты юрлица из 1С.
+    walk.call(
+        owner, "POST", "/core/onec-start/{base_id}/osv", base_id=onec_base,
+        files={"file": ("ОСВ 1210.xlsx", _osv_file(), XLSX)},
+    )
+    assert owner.post(f"{BASE}/core/onec-start/{onec_base}/entity", json={"answers": {}}).status_code == 200
+    walk.call(owner, "POST", "/core/onec-start/{base_id}/{step}", base_id=onec_base, step="payments", json={"answers": {}})
     walk.call(owner, "DELETE", "/onec/bases/{base_id}", base_id=onec_base)
 
     # ── компании ────────────────────────────────────────────────────────

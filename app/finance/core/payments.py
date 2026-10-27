@@ -224,6 +224,20 @@ def allocate_months(
     """Разнести оплаты одного договора по долгам (см. описание модуля). Возвращает «сверх начислений»."""
     ordered = sorted(payments, key=lambda item: (item.paid_at, item.key))
     left = {payment.key: payment.amount for payment in ordered}
+    # Возврат покупателю - оплата со знаком минус: он забирает назад часть
+    # прежних оплат, самых поздних до него. Раньше разнесение отбрасывало минус,
+    # и переплата, которую клиенту вернули, гасила следующие месяцы (полигон, О6).
+    for index, payment in enumerate(ordered):
+        if payment.amount >= 0:
+            continue
+        back = -payment.amount
+        left[payment.key] = _ZERO
+        for earlier in reversed(ordered[:index]):
+            if back <= 0:
+                break
+            cut = min(back, max(left[earlier.key], _ZERO))
+            left[earlier.key] -= cut
+            back -= cut
     keys = sorted(buckets, key=lambda key: "" if key == OPENING else key)
 
     def take(payment: Payment, bucket: Bucket, by: str) -> None:

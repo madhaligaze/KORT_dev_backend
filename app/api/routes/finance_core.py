@@ -1386,3 +1386,69 @@ def intake_describe(file: UploadFile = File(...), member: Member = Depends(edito
     finally:
         content.clear()
         heap.trim()
+
+
+# ── Вход из 1С ───────────────────────────────────────────────────────────────
+
+
+@router.get("/onec-start/{base_id}")
+def onec_start_plan(base_id: UUID, member: Member = Depends(viewer)) -> dict[str, Any]:
+    """Что KORT заведёт из базы 1С - шагами, с числами до записи."""
+    from app.finance.core import onec_start
+
+    def action(session, workspace, access):
+        osv = onec_start.stored_osv(session, workspace, base_id)
+        return onec_start.plan(session, workspace, access, base_id, today=contracts_service.today(), osv=osv)
+
+    return _run(member, action)
+
+
+@router.post("/onec-start/{base_id}/osv")
+def onec_start_osv(base_id: UUID, file: UploadFile = File(...), member: Member = Depends(editor)) -> dict[str, Any]:
+    """ОСВ по 1210 файлом: прочитать и запомнить к базе - из неё ляжет входящее сальдо."""
+    from app.finance.config import finance_settings
+    from app.finance.core import onec_start
+    from app.finance.onec import osv as osv_module
+
+    limit = int(finance_settings.import_max_mb * 1024 * 1024)
+    data = file.file.read(limit + 1)
+    if len(data) > limit:
+        raise HTTPException(status_code=413, detail=f"Файл больше {finance_settings.import_max_mb} МБ")
+    name = file.filename or "ОСВ.xlsx"
+    try:
+        parsed = osv_module.read(data, name)
+    except osv_module.OsvError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _run(member, lambda s, w, a: onec_start.keep_osv(s, w, a, _actor(member), base_id, parsed))
+
+
+class OnecStartIn(BaseModel):
+    answers: dict[str, dict[str, Any]] = Field(default_factory=dict)
+
+
+@router.post("/onec-start/{base_id}/{step}")
+def onec_start_step(base_id: UUID, step: str, body: OnecStartIn | None = None, member: Member = Depends(editor)) -> dict[str, Any]:
+    """Шаг входа из 1С: юрлицо, участники, договоры (с ответами), начало учёта и сальдо, оплаты."""
+    from app.finance.core import onec_start
+
+    today = contracts_service.today()
+    answers = body.answers if body else {}
+
+    def action(session, workspace, access):
+        actor = _actor(member)
+        if step == "entity":
+            return onec_start.add_entity(session, workspace, access, actor, base_id)
+        if step == "participants":
+            return onec_start.add_participants(session, workspace, access, actor, base_id, today=today)
+        if step == "contracts":
+            return onec_start.add_contracts(session, workspace, access, actor, base_id, today=today, answers=answers)
+        if step == "since":
+            osv = onec_start.stored_osv(session, workspace, base_id)
+            if osv is None:
+                raise onec_start.StartError("Сначала загрузите ОСВ по 1210 на первое число - из неё ляжет сальдо")
+            return onec_start.start_since(session, workspace, access, actor, base_id, osv)
+        if step == "payments":
+            return onec_start.use_payments(session, workspace, access, actor, base_id)
+        raise HTTPException(status_code=404, detail="Такого шага нет")
+
+    return _run(member, action)

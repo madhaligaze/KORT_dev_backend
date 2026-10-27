@@ -11,7 +11,11 @@
 * ЭСФ - `Document_ЭСФ` (исходящие): состояние в ИС ЭСФ и регистрационный
   номер, основание - счёт-фактура;
 * поступление - `Document_ПлатежноеПоручениеВходящее` с видом «оплата
-  покупателя»: по строке расшифровки платежа, у каждой свой договор и счёт.
+  покупателя»: по строке расшифровки платежа, у каждой свой договор и счёт;
+* возврат покупателю - `Document_ПлатежноеПоручениеИсходящее` с видом
+  «возврат денежных средств покупателю», так же по строкам: оплата договора со
+  знаком минус (без него долг после возврата переплаты выходил меньше
+  настоящего - полигон, О6).
 
 Чтение - за окно с `sync_from` и только организации базы. Документ из окна,
 которого в 1С больше нет, помечается `gone`, а не стирается: в KORT на нём
@@ -269,24 +273,31 @@ def read(client: Client, *, organization_ref: str, since: date) -> Snapshot:
     optional("ЭСФ", read_esf)
 
     # Поступления от покупателей: по строке расшифровки.
-    for row in client.rows(
-        "Document_ПлатежноеПоручениеВходящее",
-        select=(
-            "Ref_Key,DataVersion,Number,Date,Posted,DeletionMark,ВидОперации,Контрагент_Key,СуммаДокумента,"
-            "НазначениеПлатежа,РасшифровкаПлатежа"
-        ),
-        where=window + " and ВидОперации eq 'ОплатаПокупателя'",
-        order="Date,Ref_Key",
-    ):
-        lines = row.get("РасшифровкаПлатежа") or [{}]
-        for line in lines:
-            ref = row["Ref_Key"] if len(lines) == 1 else f"{row['Ref_Key']}:{line.get('LineNumber')}"
-            item = base_row("payment", {**row, "ДоговорКонтрагента_Key": line.get("ДоговорКонтрагента_Key")}, ref=ref)
-            if len(lines) > 1:
-                item["amount"] = _money(line.get("СуммаПлатежа"))
-            item["basis_ref"] = _ref(line.get("СчетНаОплату_Key"))
-            item["content"] = str(row.get("НазначениеПлатежа") or "").strip()
-            snapshot.documents.append(item)
+    def money_rows(entity: str, kind: str, operation: str) -> None:
+        for row in client.rows(
+            entity,
+            select=(
+                "Ref_Key,DataVersion,Number,Date,Posted,DeletionMark,ВидОперации,Контрагент_Key,СуммаДокумента,"
+                "НазначениеПлатежа,РасшифровкаПлатежа"
+            ),
+            where=window + f" and ВидОперации eq '{operation}'",
+            order="Date,Ref_Key",
+        ):
+            lines = row.get("РасшифровкаПлатежа") or [{}]
+            for line in lines:
+                ref = row["Ref_Key"] if len(lines) == 1 else f"{row['Ref_Key']}:{line.get('LineNumber')}"
+                item = base_row(kind, {**row, "ДоговорКонтрагента_Key": line.get("ДоговорКонтрагента_Key")}, ref=ref)
+                if len(lines) > 1:
+                    item["amount"] = _money(line.get("СуммаПлатежа"))
+                item["basis_ref"] = _ref(line.get("СчетНаОплату_Key"))
+                item["content"] = str(row.get("НазначениеПлатежа") or "").strip()
+                snapshot.documents.append(item)
+
+    money_rows("Document_ПлатежноеПоручениеВходящее", "payment", "ОплатаПокупателя")
+    optional(
+        "Возвраты покупателям",
+        lambda: money_rows("Document_ПлатежноеПоручениеИсходящее", "refund", "ВозвратДенежныхСредствПокупателю"),
+    )
 
     return snapshot
 
