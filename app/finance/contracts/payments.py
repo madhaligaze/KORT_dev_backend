@@ -69,6 +69,13 @@
 оплатой: на копии прода «Оплачено» договора ИП ASTORIA было больше на
 возвращённые 60 000 (27.10.2026). Решение человека сильнее пары.
 
+**Обеспечительный платёж** - не оплата: арендатор при заезде вносит сумму под
+обязательство, и при выезде она возвращается (полигон, Д12). Назначение со
+словами «обеспечительный платёж», «гарантийный взнос», «залог» - деньги
+клиента у нас, а не погашение месяцев: легли бы они оплатой, договор
+показывал бы аванс на всю сумму. «Депозит» признаком не служит: у BBC это
+возврат вклада и проценты банка. Решение человека сильнее.
+
 «Остаток» - только у договора на всю сумму: сумма минус оплачено. У
 абонентских и аренды остаток - это начисления по месяцам; в файле BBC эти
 колонки у них пусты, и выдумывать число здесь не лучше.
@@ -110,6 +117,8 @@ _NAMED = re.compile(r"(?<![а-яё])(?:договор[а-яё]*|дог)\.?\s*(?:
 _REFUND = re.compile(r"(?<![а-яё])возврат(?!н)")
 #: Возвращают не оплату, а деньги, внесённые под обязательство.
 _NOT_REFUND = ("обеспечительн", "депозит", "залог", "гарантийн")
+#: Деньги под обязательство, а не оплата: «Обеспечительный платёж по договору аренды А-01».
+_DEPOSIT = ("обеспечительн", "гарантийный взнос", "гарантийного взноса", "залог")
 #: Сколько дней после поступления его возврат той же суммы ещё делает его возвращённым.
 RETURN_DAYS = 31
 
@@ -159,6 +168,8 @@ class Allocation:
     open: dict[uuid.UUID, list[Any]] = field(default_factory=dict)
     #: Возвращённое поступление → его возврат: не оплата ни одного договора.
     returned: dict[uuid.UUID, uuid.UUID] = field(default_factory=dict)
+    #: Обеспечительные платежи (`is_deposit`): не оплата ни одного договора.
+    deposits: set[uuid.UUID] = field(default_factory=set)
 
 
 def _sides(contracts: Iterable[Contract], registry: Registry, former: dict[uuid.UUID, set[uuid.UUID]] | None = None) -> list[Side]:
@@ -241,6 +252,12 @@ def is_refund(kind: str, comment: str | None) -> bool:
     """
     text = norm(comment or "")
     return kind == "expense" and bool(_REFUND.search(text)) and not any(word in text for word in _NOT_REFUND)
+
+
+def is_deposit(comment: str | None) -> bool:
+    """Назначение говорит, что это деньги под обязательство, а не оплата (см. описание модуля)."""
+    text = norm(comment or "")
+    return any(word in text for word in _DEPOSIT)
 
 
 def returned_pairs(session: Session, workspace_id: uuid.UUID) -> dict[uuid.UUID, uuid.UUID]:
@@ -412,6 +429,9 @@ def allocate(
             continue
         if operation.id in returned:
             result.returned[operation.id] = returned[operation.id]
+            continue
+        if is_deposit(operation.comment):
+            result.deposits.add(operation.id)
             continue
         payer = payers.get(operation.counterparty_id) if operation.counterparty_id else None
         matches: set[uuid.UUID] = set()

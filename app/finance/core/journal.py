@@ -279,6 +279,7 @@ def _journal_drafts(session: Session, workspace: Any, operations: set[uuid.UUID]
     allocation = contract_payments.allocate(session, workspace, registry, contracts, operations=operations)
     paid = {operation.id: (contract_id, how) for contract_id, items in allocation.paid.items() for operation, how in items}
     returned = allocation.returned
+    deposits = allocation.deposits
     disputed: dict[uuid.UUID, set[uuid.UUID]] = defaultdict(set)
     for contract_id, items in allocation.open.items():
         for operation in items:
@@ -321,6 +322,7 @@ def _journal_drafts(session: Session, workspace: Any, operations: set[uuid.UUID]
                 "label": operation.period_label, "comment": operation.comment, "contract_ref": operation.contract_ref,
                 "open": sorted(str(item) for item in candidates) if candidates else None,
                 "returned": str(returned[operation.id]) if operation.id in returned else None,
+                "deposit": True if operation.id in deposits else None,
             },
         )
     for row in session.scalars(decisions):

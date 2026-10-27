@@ -315,8 +315,9 @@ class Money:
         self.journal_paid: dict[uuid.UUID, list[Fact]] = defaultdict(list)
         #: Спорная операция → договоры, между которыми спор.
         self.disputed: dict[uuid.UUID, set[uuid.UUID]] = {}
-        #: Возвращённые поступления (`contracts/payments.returned_pairs`) - не оплаты.
+        #: Возвращённые поступления (`contracts/payments.returned_pairs`) и обеспечительные платежи - не оплаты.
         self.returned: set[uuid.UUID] = set()
+        self.deposits: set[uuid.UUID] = set()
         self.by_contract: dict[uuid.UUID, list[Payment]] = defaultdict(list)
         wanted = {entity for entity, source in self.settings.sources.items() if source == "1c"}
         self._bases: dict[str, str] | None = None
@@ -331,6 +332,8 @@ class Money:
                     self.disputed[journal.ref_of(fact)] = {uuid.UUID(item) for item in data["open"]}
                 if data.get("returned"):
                     self.returned.add(journal.ref_of(fact))
+                if data.get("deposit"):
+                    self.deposits.add(journal.ref_of(fact))
                 if fact.contract_id is None:
                     continue
                 self.journal_paid[fact.contract_id].append(fact)
@@ -514,7 +517,8 @@ class Money:
         """Поступления журнала, не отнесённые ни к одному договору, - с кандидатами.
 
         Не оплаты - и их нет в списке: возвращённые плательщику той же суммой
-        (`contracts/payments.returned_pairs`), переводы со своих юрлиц (плательщик -
+        (`contracts/payments.returned_pairs`), обеспечительные платежи
+        (`is_deposit`), переводы со своих юрлиц (плательщик -
         наше юрлицо или ТОО, на чьё имя наш счёт: «ТОО "Big Business
         Consulting"» на счёт «Kaspi Юр. ТОО "Big Business Consulting"»), статьи
         и плательщики, отмеченные человеком «не оплаты по договорам», решённые
@@ -524,7 +528,7 @@ class Money:
         """
         from app.finance.core.participants import bare_key, legal_tail
 
-        self.hidden = {"own": 0, "ignored": 0, "decided": 0, "returned": 0}
+        self.hidden = {"own": 0, "ignored": 0, "decided": 0, "returned": 0, "deposit": 0}
         ignored_categories = self.settings.ignored("categories")
         ignored_payers = self.settings.ignored("payers")
         own_keys = {legal_tail(name) for account_id, name in self.accounts.items() if self.account_entity.get(account_id)}
@@ -580,6 +584,9 @@ class Money:
                 continue
             if operation.id in self.returned:
                 self.hidden["returned"] += 1
+                continue
+            if operation.id in self.deposits:
+                self.hidden["deposit"] += 1
                 continue
             entity = entity_of_account.get(operation.account_to_id) if operation.account_to_id else None
             if entity is not None and self.settings.source_of(entity) != "journal":

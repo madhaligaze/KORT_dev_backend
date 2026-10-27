@@ -176,6 +176,16 @@ def test_tumar_ofis_iz_faylov_1s_vidit_nam_dolzhny(world_files, finance_db) -> N
         # О5 (номер чужого договора) и оплаты «Береке» без номера при двух договорах на одну сумму (О4).
         asked = _answer_disputes(session, workspace, world, entities)
         assert len(asked) == 4, asked
+        # Д12: обеспечительный платёж Green Office - не оплата А-01 (аванса нет), скрыт своей причиной.
+        from app.finance.core.payments import Money
+
+        money = Money(session, workspace, today=TODAY)
+        money.without_contract()
+        assert money.hidden["deposit"] == 1
+        green = session.scalar(sa.select(Contract).where(Contract.number == "А-01", Contract.executor_id == entities["ТП"]))
+        assert money.contract(green).paid == sum(
+            (a for p in world.payments if p.kind == "contract" for c, _m, a in p.alloc if c == "greenoffice"), Decimal(0)
+        )
         for key in ("ТО", "ТП"):
             got = _owed_by_contract(session, workspace, entities[key])
             truth = {
