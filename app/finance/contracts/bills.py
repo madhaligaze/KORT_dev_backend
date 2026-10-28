@@ -252,7 +252,42 @@ class Bill:
             "signed_at": self.signed_at,
             "source": self.source,
             "contract_id": self.contract_id or None,
+            "key": self.key,
+            "month_no": self.month_no,
+            "post": self.post,
         }
+
+    @classmethod
+    def from_out(cls, item: dict[str, Any]) -> "Bill":
+        """Счёт из ответа - обратно в строку: бот берёт счета вызовом «спросить» (`model/ask.py`)."""
+        amount = item.get("amount")
+        return cls(
+            line=int(item.get("line") or 0),
+            group=str(item.get("group") or ""),
+            text=str(item.get("text") or ""),
+            own=str(item.get("own") or ""),
+            customer=str(item.get("customer") or ""),
+            number=str(item.get("number") or ""),
+            month=str(item.get("month") or ""),
+            month_no=item.get("month_no"),
+            kind=str(item.get("kind") or ""),
+            staff=str(item.get("staff") or ""),
+            department=str(item.get("department") or ""),
+            amount=Decimal(str(amount)) if amount not in (None, "") else None,
+            period_from=date.fromisoformat(item["period_from"]) if item.get("period_from") else None,
+            period_to=date.fromisoformat(item["period_to"]) if item.get("period_to") else None,
+            paid=str(item.get("paid") or ""),
+            status=str(item.get("status") or ""),
+            note=str(item.get("note") or ""),
+            bill_no=str(item.get("bill_no") or ""),
+            bill_date=str(item.get("bill_date") or ""),
+            bill_period=str(item.get("bill_period") or ""),
+            onec_name=str(item.get("onec_name") or ""),
+            signed_at=str(item.get("signed_at") or ""),
+            source=str(item.get("source") or ""),
+            contract_id=str(item.get("contract_id") or ""),
+            post=str(item.get("post") or ""),
+        )
 
 
 def _order(bill: Bill) -> tuple[Any, ...]:
@@ -297,6 +332,26 @@ class Board:
     def find(self, wanted: str) -> Bill | None:
         """Счёт по `bill_id` - среди невыставленных и выставленных."""
         return next((bill for bill in [*self.bills, *self.done] if bill.id == wanted), None)
+
+    @classmethod
+    def from_answer(cls, answer: dict[str, Any]) -> "Board | None":
+        """Книга из ответа «спросить» вида «Не выставлены»; `None` - книга не подключена или не прочиталась."""
+        source = answer.get("board") or None
+        if source is None or not source.get("read_at"):
+            return None
+        return cls(
+            read_at=datetime.fromisoformat(source["read_at"]),
+            title=str(source.get("title") or ""),
+            worksheet=str(source.get("worksheet") or ""),
+            spreadsheet_id="",
+            bills=[Bill.from_out(item) for item in answer.get("rows") or []],
+            rows=len(answer.get("rows") or []),
+            drift=str(source.get("drift") or ""),
+            issued=set(answer.get("issued") or []),
+            done=[Bill.from_out(item) for item in answer.get("done") or []],
+            kort=tuple(source.get("kort") or ()),
+            kort_error=str(source.get("kort_error") or ""),
+        )
 
 
 #: Ключ колонки здесь → ключ ядра в словаре колонок компании, где они разные.

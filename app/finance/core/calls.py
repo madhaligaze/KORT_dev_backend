@@ -180,7 +180,8 @@ def explain(session: Session, workspace: Workspace, access: Access, contract: Co
     соглашения, вступившие к этому дню, и поправка месяца - факты журнала.
     """
     _check_money(access)
-    money = Money(session, workspace, today=day)
+    # Оплаты одного договора: «объяснить» спрашивают на каждое число экрана.
+    money = Money(session, workspace, today=day, only=[contract.id])
     item = money.contract(contract)
     if money.since is None or not item.accrues:
         return {"day": day.isoformat(), "since": money.since.isoformat() if money.since else None, "known": False}

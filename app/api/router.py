@@ -4,6 +4,7 @@ from app.api.routes.finance import router as finance_router
 from app.api.routes.finance_contracts import router as finance_contracts_router
 from app.api.routes.finance_core import router as finance_core_router
 from app.api.routes.finance_looks import router as finance_looks_router
+from app.api.routes.finance_model import router as finance_model_router
 from app.api.routes.finance_onec import router as finance_onec_router
 from app.api.routes.finance_people import router as finance_people_router
 from app.api.routes.finance_support import router as finance_support_router
@@ -22,3 +23,4 @@ api_router.include_router(finance_looks_router)
 api_router.include_router(finance_support_router)
 api_router.include_router(finance_onec_router)
 api_router.include_router(finance_core_router)
+api_router.include_router(finance_model_router)

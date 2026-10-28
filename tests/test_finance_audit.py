@@ -97,6 +97,8 @@ ALLOWED: dict[tuple[str, str], str] = {
     ("POST", "/core/vat/preview"): "считает оборот юрлиц до и после перевода клиентов, в базу не пишет",
     ("POST", "/core/intake"): "приёмник называет форму каждого листа файла, в базу не пишет",
     ("POST", "/core/intake/plan"): "предложение и сверка таблицы по разметке, в базу не пишет",
+    ("POST", "/model/ask"): "«спросить» - вопрос телом, в базу не пишет",
+    ("POST", "/model/propose"): "«предложить» - прогон команд в транзакции, которая откатывается всегда",
     ("POST", "/contracts/imports/{batch_id}/decide"): (
         "решения протокола - черновик разбора; события пишут загрузка файла и заведение"
     ),
@@ -627,6 +629,12 @@ def test_kazhdyy_izmenyayushchiy_marshrut_pishet_sobytie(app: FastAPI, monkeypat
 
     omega = monthly("ТОО Омегаком", "ОБО/8", "25.05.2026")
     sigma = monthly("ТОО Сигмаком", "ОБО/9", "27.05.2026")
+
+    # ── API модели: пачка одной точкой и её возврат ─────────────────────
+    applied = walk.call(owner, "POST", "/model/apply", json={"commands": [
+        {"command": "contract.update", "params": {"id": omega, "values": {"note": "из API модели"}}},
+    ]}).json()
+    walk.call(owner, "POST", "/model/undo", json={"point": applied["point"]["id"]})
     assert owner.get(f"{BASE}/core/contracts/{omega}/months").status_code == 200
     adjustment = walk.call(owner, "POST", "/core/contracts/{contract_id}/adjustments", contract_id=omega,
                            json={"month": "2026-07", "amount": "5000", "reason": "скидка"}).json()["id"]

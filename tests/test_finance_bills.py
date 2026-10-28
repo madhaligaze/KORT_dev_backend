@@ -486,6 +486,24 @@ TITLE_ABON, TITLE_ABON_LATE, TITLE_RENT, TITLE_RENT_LATE = (
 )
 
 
+def test_bot_beryot_scheta_vyzovom_sprosit(app: FastAPI, book) -> None:
+    """Бот - первый клиент API модели (этап 2, шаг 7): счета он спрашивает видом
+    «Не выставлены», а строки, собранные из ответа, - те же, что даёт книга."""
+    from app.finance.db import finance_session
+
+    owner = register(app)
+    connect(owner)
+    workspace_id = bills_bot.target_workspace()
+    with finance_session() as session:
+        direct, _ = bills.current(session, workspace_id)
+    asked = bills_bot.board_of(workspace_id)
+    assert direct is not None and asked is not None
+    assert asked.bills == direct.bills and asked.issued == direct.issued
+    answer = owner.post(f"{BASE}/model/ask", json={"source": "unbilled"}).json()
+    assert [row["key"] for row in answer["rows"]] == [bill.key for bill in direct.bills]
+    assert answer["totals"]["bills"] == len(direct.bills)
+
+
 def test_posty_po_chasu_i_pravka(app: FastAPI, book) -> None:
     owner = register(app)
     connect(owner)

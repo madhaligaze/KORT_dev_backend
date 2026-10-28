@@ -634,6 +634,9 @@ RESTORE_KINDS = (
     "core_transfer",
     # Входящее сальдо договоров из книги пачкой (ядро, `core/opening.py`).
     "core_opening",
+    # Пачка команд «применить» (API модели, `model/apply.py`): шаги - прежние
+    # виды точек и шаги `restore.STEP_KINDS`, обратно - в обратном порядке.
+    "batch",
 )
 
 

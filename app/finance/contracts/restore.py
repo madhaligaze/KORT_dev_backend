@@ -29,6 +29,7 @@
 """
 from __future__ import annotations
 
+import contextvars
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Iterable, Sequence
@@ -78,6 +79,12 @@ class RestoreError(FinanceError):
     """Вернуть или изменить нельзя - с причиной для человека."""
 
 
+#: Пачка «применить» (`model/apply.py`) - одна точка на все свои команды:
+#: точки, которые ставят сами команды (перевод клиентов, удаление договоров),
+#: собираются сюда и вливаются в её шаги.
+COLLECT: contextvars.ContextVar[list | None] = contextvars.ContextVar("restore_collect", default=None)
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -92,6 +99,14 @@ def _plural(count: int, one: str, few: str, many: str) -> str:
     if 2 <= tail <= 4:
         return few
     return many
+
+
+def _numbered(number: str | None) -> str:
+    """«№ 01-08» - номер словами; «№» в номере часто уже есть, и «№ № 01-08» вышло бы в «Восстановлении»."""
+    text = (number or "").strip()
+    if not text:
+        return "договор без номера"
+    return text if text.startswith("№") else f"№ {text}"
 
 
 def _contracts_word(count: int) -> str:
@@ -142,6 +157,9 @@ def _point(
     session.add(point)
     session.flush()
     _trim(session, workspace.id)
+    collected = COLLECT.get()
+    if collected is not None:
+        collected.append(point)
     return point
 
 
@@ -570,7 +588,7 @@ def move_rows(
     for index, contract in enumerate(ordered):
         contract.position = lower + step * (index + 1)
         _finish(session, registry, contract, actor, [])
-    numbers = ", ".join(f"№ {contract.number}" if contract.number else "без номера" for contract in ordered[:3])
+    numbers = ", ".join(_numbered(contract.number) if contract.number else "без номера" for contract in ordered[:3])
     more = f" и ещё {len(ordered) - 3}" if len(ordered) > 3 else ""
     title = f"передвинуты строки: {numbers}{more}"
     history.write(
@@ -685,34 +703,12 @@ def restore_point(
     payload = point.payload or {}
     done: list[str] = []
     skipped: list[str] = []
-    if point.kind == "contracts_delete":
-        _restore_deleted(session, workspace, access, actor, payload, done, skipped)
-    elif point.kind == "contracts_create":
-        _remove_created(session, workspace, access, actor, payload, done, skipped)
-    elif point.kind == "values":
-        _restore_values(session, workspace, access, actor, point, payload, done, skipped)
-    elif point.kind in ("view", "field_add"):
-        _require_setup(access)
-        _restore_views(session, workspace, actor, payload, done, skipped)
-        if point.kind == "field_add":
-            _drop_field(session, workspace, actor, payload, done, skipped)
-    elif point.kind == "order":
-        _restore_order(session, workspace, access, actor, payload, done, skipped)
-    elif point.kind == "party_merge":
-        from app.finance.core import participants
-
-        _require_setup(access)
-        participants.undo_merge(session, workspace, payload, done, skipped)
-    elif point.kind == "core_transfer":
-        from app.finance.core import changes
-
-        _require_setup(access)
-        changes.undo_transfer(session, workspace, access, actor, payload, done, skipped)
-    elif point.kind == "core_opening":
-        from app.finance.core import opening
-
-        _require_setup(access)
-        opening.undo(session, workspace, actor, payload, done, skipped)
+    if point.kind == "batch":
+        # Пачка «применить»: шаги - обратно, в обратном порядке; каждый - как своя точка.
+        for step in reversed(payload.get("steps") or []):
+            _restore_step(session, workspace, access, actor, point, step.get("kind") or "", step.get("payload") or {}, done, skipped)
+    else:
+        _restore_step(session, workspace, access, actor, point, point.kind, payload, done, skipped)
     point.restored_at = _now()
     point.restored_by = actor.user_id
     session.flush()
@@ -724,13 +720,62 @@ def restore_point(
     return {"title": point.title, "done": done, "skipped": skipped, "kind": point.kind}
 
 
+#: Шаги пачки, которых не бывает отдельной точкой: их ставит только «применить».
+STEP_KINDS = ("core_status", "core_adjust", "view_created", "view_state", "view_removed")
+
+
+def _restore_step(session, workspace, access, actor, point, kind, payload, done, skipped) -> None:
+    if kind == "contracts_delete":
+        _restore_deleted(session, workspace, access, actor, payload, done, skipped)
+    elif kind == "contracts_create":
+        _remove_created(session, workspace, access, actor, payload, done, skipped)
+    elif kind == "values":
+        _restore_values(session, workspace, access, actor, point, payload, done, skipped)
+    elif kind in ("view", "field_add"):
+        _require_setup(access)
+        _restore_views(session, workspace, actor, payload, done, skipped)
+        if kind == "field_add":
+            _drop_field(session, workspace, actor, payload, done, skipped)
+    elif kind == "order":
+        _restore_order(session, workspace, access, actor, payload, done, skipped)
+    elif kind == "party_merge":
+        from app.finance.core import participants
+
+        _require_setup(access)
+        participants.undo_merge(session, workspace, payload, done, skipped)
+    elif kind == "core_transfer":
+        from app.finance.core import changes
+
+        _require_setup(access)
+        changes.undo_transfer(session, workspace, access, actor, payload, done, skipped)
+    elif kind == "core_opening":
+        from app.finance.core import opening
+
+        _require_setup(access)
+        opening.undo(session, workspace, actor, payload, done, skipped)
+    elif kind == "core_status":
+        from app.finance.core import changes
+
+        changes.undo_status(session, workspace, access, actor, payload, done, skipped)
+    elif kind == "core_adjust":
+        from app.finance.core import changes
+
+        changes.undo_adjustment(session, workspace, access, actor, payload, done, skipped)
+    elif kind in ("view_created", "view_state", "view_removed"):
+        from app.finance.core import views as views_module
+
+        views_module.undo(session, workspace, actor, kind, payload, done, skipped)
+    else:
+        skipped.append("шаг, который эта версия KORT вернуть не умеет")
+
+
 def _restore_deleted(session, workspace, access, actor, payload, done, skipped) -> None:
     _require_edit(access)
     registry = Registry(session, workspace)
     numbers = payload.get("numbers") or {}
     for raw in payload.get("ids") or []:
         contract = session.get(Contract, uuid.UUID(raw))
-        label = f"№ {numbers.get(raw)}" if numbers.get(raw) else "договор без номера"
+        label = _numbered(numbers.get(raw))
         if contract is None or contract.workspace_id != workspace.id:
             skipped.append(f"{label} удалён насовсем - вернуть нечего")
             continue
@@ -756,7 +801,7 @@ def _remove_created(session, workspace, access, actor, payload, done, skipped) -
         try:
             with session.begin_nested():
                 contract = get_contract(session, workspace, uuid.UUID(raw))
-                label = f"№ {contract.number}" if contract.number else "договор без номера"
+                label = _numbered(contract.number)
                 remove(session, workspace, access, actor, contract.id)
             done.append(label)
         except NotFound:
@@ -780,7 +825,7 @@ def _restore_values(session, workspace, access, actor, point, payload, done, ski
         except NotFound:
             skipped.append("договор удалён - его значения не возвращались")
             continue
-        label = f"№ {contract.number}" if contract.number else "договор без номера"
+        label = _numbered(contract.number)
         people = people_of(session, [contract.id]).get(contract.id, [])
         wanted: dict[str, Any] = {}
         for key, before in values.items():
@@ -869,7 +914,7 @@ def _restore_order(session, workspace, access, actor, payload, done, skipped) ->
             continue
         contract.position = int(position)
         _finish(session, registry, contract, actor, [])
-        done.append(f"№ {contract.number}" if contract.number else "договор без номера")
+        done.append(_numbered(contract.number))
 
 
 # ── Список ───────────────────────────────────────────────────────────────────
@@ -885,7 +930,20 @@ _KIND_WORDS = {
     "party_merge": "участники снова отдельно, договоры - у прежних сторон",
     "core_transfer": "клиенты вернутся к прежним юрлицам",
     "core_opening": "входящее сальдо договоров - как до переноса из таблицы",
+    "core_status": "статус договора - без изменения с даты",
+    "core_adjust": "начисление месяца - без поправки",
+    "view_created": "сохранённый вид уйдёт",
+    "view_state": "вид станет прежним",
+    "view_removed": "вид вернётся",
 }
+
+
+def _returns(point: RestorePoint) -> str:
+    """Что вернётся - словами; у пачки - словами её шагов, без повторов."""
+    if point.kind != "batch":
+        return _KIND_WORDS.get(point.kind, "")
+    words = [_KIND_WORDS.get(step.get("kind") or "", "") for step in (point.payload or {}).get("steps") or []]
+    return "; ".join(dict.fromkeys(word for word in words if word))
 
 
 def listing(session: Session, workspace: Workspace, access: Access, actor: Actor, *, limit: int = 60) -> dict[str, Any]:
@@ -917,7 +975,7 @@ def listing(session: Session, workspace: Workspace, access: Access, actor: Actor
                 "id": str(point.id),
                 "kind": point.kind,
                 "title": point.title,
-                "returns": _KIND_WORDS.get(point.kind, ""),
+                "returns": _returns(point),
                 "book": point.book,
                 "view": views.get(point.view_key, "") if point.view_key else "",
                 "created_at": point.created_at.isoformat() if point.created_at else None,

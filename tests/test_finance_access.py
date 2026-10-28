@@ -157,6 +157,19 @@ READONLY_POSTS = {
     ("POST", "/contracts/setup/views/preview"),
     # Предпросмотр перевода клиентов: оборот юрлиц до и после, ничего не пишет.
     ("POST", "/core/vat/preview"),
+    # API модели (этап 2, шаг 7): «спросить» - вопрос телом, «предложить» -
+    # прогон в транзакции, которая откатывается всегда (`_dry`).
+    ("POST", "/model/ask"),
+    ("POST", "/model/propose"),
+}
+#: API модели: «применить» и «отменить» - пачка команд, у каждой своё право
+#: (`model/commands.check_right`: договоры - правка реестра, виды - владелец
+#: вида; точка - своя или администратор). Право раздела на входе - только
+#: «видит хоть один источник видов»: сохранить себе вид может и тот, кому
+#: реестр открыт на чтение.
+MODEL_WRITES = {
+    ("POST", "/model/apply"),
+    ("POST", "/model/undo"),
 }
 #: Меняет только свой экран, а не данные компании: личный вид листа (ширины,
 #: цвета) настраивает и тот, кому лист открыт только на чтение.
@@ -220,7 +233,7 @@ def test_kazhdyy_marshrut_finansov_obyavlyaet_razdel(app: FastAPI) -> None:
                     _resources, level = value
                     if method == "GET" and level != "view":
                         problems.append(f"{method} {path}: чтение требует «{level}»")
-                    if method != "GET" and level != "edit" and key not in READONLY_POSTS | PERSONAL_WRITES:
+                    if method != "GET" and level != "edit" and key not in READONLY_POSTS | PERSONAL_WRITES | MODEL_WRITES:
                         problems.append(f"{method} {path}: изменение объявлено с «{level}», нужно «edit»")
     assert not problems, "\n".join(problems)
     assert seen_self == SELF, f"в SELF лишнее: {sorted(SELF - seen_self)}"

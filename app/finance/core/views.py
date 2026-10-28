@@ -925,6 +925,84 @@ def remove(session: Session, workspace: Workspace, viewer: Viewer, actor_email: 
     )
 
 
+# ── Обратные шаги пачки «применить» ──────────────────────────────────────────
+
+#: Что вид хранит и что «вернуть» ставит обратно (`state` / шаг `view_state`).
+STATE_FIELDS = (
+    "title", "owner_department_id", "owner_user_id", "filter", "measures", "groups", "forms", "params", "pin", "position",
+)
+
+
+def state(view: View) -> dict[str, Any]:
+    out_state: dict[str, Any] = {}
+    for name in STATE_FIELDS:
+        value = getattr(view, name)
+        out_state[name] = str(value) if isinstance(value, uuid.UUID) else value
+    return out_state
+
+
+def sheets_of(session: Session, workspace_id: uuid.UUID, view: View) -> list[str]:
+    """Действующие листы вида договоров - что уберёт `remove` вместе с видом."""
+    if view.source != "contracts":
+        return []
+    return [
+        str(sheet.id)
+        for sheet in session.scalars(
+            sa.select(EntityView).where(
+                EntityView.workspace_id == workspace_id, EntityView.book == view.key, EntityView.archived_at.is_(None)
+            )
+        )
+    ]
+
+
+def undo(session: Session, workspace: Workspace, actor: Any, kind: str, payload: Mapping[str, Any], done: list[str], skipped: list[str]) -> None:
+    """Вернуть сохранение, правку или удаление вида (шаги `view_created`, `view_state`, `view_removed`)."""
+    from app.finance.contracts.fields import bump
+
+    view = session.get(View, uuid.UUID(str(payload.get("id"))))
+    if view is None or view.workspace_id != workspace.id:
+        skipped.append("вида больше нет")
+        return
+    now = datetime.now(timezone.utc)
+    if kind == "view_created":
+        if view.archived_at is not None:
+            skipped.append(f"вид «{view.title}» уже убран")
+            return
+        view.archived_at = now
+        for sheet_id in sheets_of(session, workspace.id, view):
+            sheet = session.get(EntityView, uuid.UUID(sheet_id))
+            if sheet is not None:
+                sheet.archived_at = now
+        done.append(f"вид «{view.title}» убран")
+    elif kind == "view_state":
+        before = dict(payload.get("before") or {})
+        for name in STATE_FIELDS:
+            if name not in before:
+                continue
+            value = before[name]
+            if name in ("owner_department_id", "owner_user_id"):
+                value = uuid.UUID(value) if value else None
+            setattr(view, name, value)
+        done.append(f"вид «{view.title}» - как был")
+    elif kind == "view_removed":
+        if view.archived_at is None:
+            skipped.append(f"вид «{view.title}» и так на месте")
+            return
+        view.archived_at = None
+        for sheet_id in payload.get("sheets") or []:
+            sheet = session.get(EntityView, uuid.UUID(str(sheet_id)))
+            if sheet is not None and sheet.workspace_id == workspace.id:
+                sheet.archived_at = None
+        done.append(f"вид «{view.title}» вернулся")
+    session.flush()
+    bump(session, workspace.id, "schema")
+    history.write(
+        session, workspace, kind="core.view", entity="view", entity_id=view.id,
+        title=f"Вид «{view.title}»: {done[-1] if done else 'возвращён'}", after=state(view),
+        actor=getattr(actor, "email", "") or "",
+    )
+
+
 # ── Спросить ─────────────────────────────────────────────────────────────────
 
 
@@ -956,8 +1034,12 @@ def ask(
     view: View,
     *,
     day: date | None = None,
+    members: dict[str, list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     """Вид договоров на день: договоры по листам и частям, меры, итоги частей, группировки.
+
+    `members` - сюда «По сотрудникам» складывает слагаемые каждой строки
+    (договор, его сумма и остаток у этого человека): их раскрывает «объяснить».
 
     Числа - те же, что на экране вида: части - «договоров: N · остаток» (у
     частей с колонкой «Остаток»), «По сотрудникам» - как `staff.ts`, сумма -
@@ -991,8 +1073,15 @@ def ask(
     )
     people = people_of(session, [item.id for item in contracts])
     registry.parties_for({pid for item in contracts for pid in (item.executor_id, item.customer_id) if pid})
-    sheets = [sheet for sheet in registry.views if (sheet.book or "") == view.key]
+    # Вопрос без сохранения (`model/ask.py`) листов не имеет: договор в нём -
+    # если подходит под отбор, одной частью.
+    transient = view.id is None
+    sheets = [] if transient else [sheet for sheet in registry.views if (sheet.book or "") == view.key]
     base = view.filter or {}
+    shown = {
+        "client": "customer" not in access.hidden and "executor" not in access.hidden,
+        "status": "status" not in access.hidden,
+    }
     department = share_department(view)
     money_open = "amount" not in access.hidden
     paid_open = "summary_paid" not in access.hidden and money_open
@@ -1007,7 +1096,11 @@ def ask(
             continue
         facts = facts_of(item, registry, mine)
         facts["age_months"] = age_months(item.signed_at, on)
-        places = rules.membership(facts, sheets, {view.key: base})
+        if transient:
+            # Пустой отбор вопроса - все договоры (у листа пустое правило не отбирает ничего).
+            places = [{"view": view.key, "block": 0}] if rules.is_empty(base) or rules.matches(base, facts) else []
+        else:
+            places = rules.membership(facts, sheets, {view.key: base})
         if not places:
             continue
         share = shares_module.book_share(item, department) if department is not None else None
@@ -1040,6 +1133,20 @@ def ask(
             if on != today():
                 measures["now_only"] = True
         row = {"id": str(item.id), "number": item.number or "", "places": places, "measures": measures}
+        if shown["client"]:
+            ours, theirs = item.executor_id, item.customer_id
+            if not registry.is_own(ours) and registry.is_own(theirs):
+                ours, theirs = theirs, ours
+            party = registry.parties_for([theirs]).get(theirs) if theirs else None
+            entity = registry.own.get(ours) if ours else None
+            row["client"] = party.name if party is not None else ""
+            row["entity"] = entity.code if entity is not None else ""
+        if shown["status"]:
+            row["status"] = str(facts.get("status__text") or "")
+            # Фаза статуса - смысл, а не подпись: «По возрасту» считает только договоры в работе.
+            row["phase"] = facts.get("phase") or ""
+        if fraction is not None and fraction != 1:
+            row["fraction"] = format(fraction, "f")
         if share is not None and share.kind != "whole":
             row["share"] = share.kind
         rows.append(row)
@@ -1095,16 +1202,13 @@ def ask(
         # Сводная не прочиталась: «Оплачено» и «Остаток» её юрлиц неизвестны, а не ноль.
         **({"summary": "unread"} if unread else {}),
     }
-    first = sheets[0].key if sheets else None
-    if "people" in (view.groups or []) and first is not None:
-        result["groups"]["people"] = _by_people(
-            [entry for entry in in_view if any(place["view"] == first for place in rules.membership(entry[1], [sheets[0]], {view.key: base}))],
-            registry,
-            people,
-            people_shares,
-            money_open,
-            paid_open,
-        )
+    if "people" in (view.groups or []) and (sheets or transient):
+        # «По сотрудникам» - договоры первого листа, как на экране; у вопроса без сохранения - все его договоры.
+        first = in_view if transient else [
+            entry for entry in in_view
+            if any(place["view"] == sheets[0].key for place in rules.membership(entry[1], [sheets[0]], {view.key: base}))
+        ]
+        result["groups"]["people"] = _by_people(first, registry, people, people_shares, money_open, paid_open, members=members)
     if "age" in (view.groups or []):
         result["groups"]["age"] = _by_age(in_view, money_open, paid_open)
     return result
@@ -1126,6 +1230,8 @@ def _by_people(
     people_shares: Mapping[str, Any],
     money_open: bool,
     paid_open: bool,
+    *,
+    members: dict[str, list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     """«По сотрудникам» - та же арифметика, что у `staff.ts`.
 
@@ -1191,6 +1297,10 @@ def _by_people(
             row["contracts"] += 1
             row["amount"] += mine
             row["remaining"] += own_left
+            if members is not None:
+                members.setdefault(name, []).append(
+                    {"id": str(contract.id), "number": contract.number or "", "amount": mine, "remaining": own_left, "open": open_}
+                )
             if open_:
                 if client_name:
                     row["open_clients"].add(client_name)

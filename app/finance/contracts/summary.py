@@ -140,16 +140,12 @@ class Index:
     rows: int = 0
     drift: str = ""
 
-    def match(
-        self,
-        number: str | None,
-        customer_names: Iterable[str],
-        own_code: str = "",
-    ) -> Match:
+    def _groups(
+        self, number: str | None, customer_names: Iterable[str], own_code: str
+    ) -> tuple[dict[str, list[Row]], list[list[Row]]]:
+        """Строки номера по клиентам и те группы, чей клиент - этот договор."""
         key = number_key(number)
         rows = self.by_number.get(key, []) if key else []
-        if not rows:
-            return Match("missing")
         code = (own_code or "").strip().lower()
         if code and any(row.own.strip().lower() == code for row in rows):
             rows = [row for row in rows if row.own.strip().lower() == code]
@@ -158,6 +154,22 @@ class Index:
             groups.setdefault(row.customer_key, []).append(row)
         names = [name for name in customer_names if name]
         good = [group for group_key, group in groups.items() if any(_same_client(group_key, name) for name in names)]
+        return groups, good
+
+    def rows_of(self, number: str | None, customer_names: Iterable[str], own_code: str = "") -> list[Row]:
+        """Строки, из которых сложилось «Оплачено» договора (`match`), - для «объяснить»."""
+        _groups, good = self._groups(number, customer_names, own_code)
+        return list(good[0]) if len(good) == 1 else []
+
+    def match(
+        self,
+        number: str | None,
+        customer_names: Iterable[str],
+        own_code: str = "",
+    ) -> Match:
+        groups, good = self._groups(number, customer_names, own_code)
+        if not groups:
+            return Match("missing")
         if len(good) == 1:
             chosen = good[0]
             months = tuple(dict.fromkeys(row.month for row in chosen if row.month))

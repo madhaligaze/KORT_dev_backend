@@ -51,6 +51,13 @@
 * Между ними бот **правит текущие посты**: счёт отметили (в книге или в
   KORT) - строка уходит; выставлено всё - пост удаляется.
 
+Откуда счета
+────────────
+С 28.10.2026 бот берёт счета вызовом «спросить» вида «Не выставлены» (API
+модели, `model/ask.py`) - как спросил бы любой чужой фронт, а не чтением
+книги-сводки сам (`board_of`). Числа и строки те же: ответ собирает та же
+книга (`contracts/bills.py`), и посты по нему - те же (тесты постов).
+
 Не дважды
 ─────────
 Час поста (`counters`: `bills.day`, `bills.post`, `bills.hash` - абонентская
@@ -92,6 +99,7 @@ from app.finance.contracts import bills
 from app.finance.contracts.models import BillNotice, Counter, SummarySource
 from app.finance.db import finance_session
 from app.finance.layout import norm
+from app.finance.models import Workspace
 from app.finance.support_bot import TZ, Bot, TelegramError
 
 log = logging.getLogger(__name__)
@@ -939,6 +947,24 @@ def _announce(
     return "new" if result == "posted" else result
 
 
+def board_of(workspace_id: uuid.UUID, *, wait: float | None = None, force: bool = False) -> bills.Board | None:
+    """Счета для постов - вызовом «спросить» вида «Не выставлены» (API модели, этап 2, шаг 7).
+
+    Бот - первый клиент вызовов: он спрашивает ядро так же, как спросил бы
+    чужой фронт, а не читает книгу-сводку сам. Ответ - строки счетов и ключи
+    выставленных; обратно в строки их собирает `Board.from_answer`.
+    """
+    from app.finance.model import ask as model_ask
+    from app.finance.model.context import system
+
+    with finance_session() as session:
+        workspace = session.get(Workspace, workspace_id)
+        if workspace is None:
+            return None
+        answer = model_ask.ask(system(session, workspace), {"source": "unbilled"}, force=force, wait=wait)
+    return bills.Board.from_answer(answer)
+
+
 def tick(api: Bot, chat: str, now: datetime | None = None) -> str:
     """Один проход: посты по часу, новое - сразу, правка текущих.
 
@@ -950,8 +976,7 @@ def tick(api: Bot, chat: str, now: datetime | None = None) -> str:
     workspace_id = target_workspace()
     if workspace_id is None:
         return "no-workspace"
-    with finance_session() as session:
-        board, _ = bills.current(session, workspace_id)
+    board = board_of(workspace_id)
     if board is None:
         return "no-board"
     _ensure(workspace_id)
@@ -1045,8 +1070,7 @@ def pull(api: Bot, chat: str, now: datetime | None = None) -> str:
     with _work:
         if time.monotonic() - _pulled.get(workspace_id, -PULL_GAP) < PULL_GAP:
             return recent
-    with finance_session() as session:
-        board, _ = bills.current(session, workspace_id, wait=PULL_WAIT, force=True)
+    board = board_of(workspace_id, wait=PULL_WAIT, force=True)
     if board is None:
         return "Таблица не прочиталась - попробуйте через минуту."
     _ensure(workspace_id)

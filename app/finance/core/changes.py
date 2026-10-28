@@ -242,6 +242,73 @@ def remove_adjustment(
     )
 
 
+def undo_status(
+    session: Session, workspace: Workspace, access: Access, actor: Actor, payload: dict[str, Any], done: list[str], skipped: list[str]
+) -> None:
+    """Вернуть «статус с даты» (шаг пачки `core_status`): соглашение убрать, применённое - вернуть прежний статус."""
+    _require_edit(access)
+    label = payload.get("label") or "договор"
+    contract = session.get(Contract, uuid.UUID(payload["contract_id"]))
+    if contract is None or contract.deleted_at is not None:
+        skipped.append(f"{label}: договор удалён")
+        return
+    amendment = session.get(ContractAmendment, uuid.UUID(payload["amendment_id"])) if payload.get("amendment_id") else None
+    if amendment is None:
+        skipped.append(f"{label}: изменения статуса уже нет")
+        return
+    moved_to = (amendment.after or {}).get("status")
+    applied = amendment.applied_at is not None
+    registry = Registry(session, workspace)
+    session.delete(amendment)
+    session.flush()
+    changed: list[str] = []
+    before = payload.get("status_before")
+    if applied and moved_to and str(contract.status_id) == moved_to:
+        contract.status_id = uuid.UUID(before) if before else None
+        changed.append("status")
+    _finish(session, registry, contract, actor, changed)
+    history.write(
+        session, workspace, kind="contract.status_from", entity="contract", entity_id=contract.id,
+        title=f"договор {contract.number or ''} · изменение статуса с даты возвращено".replace("  ", " "),
+        before={"status": moved_to}, after={"status": before}, actor=actor.email,
+    )
+    done.append(f"{label}: статус прежний")
+
+
+def undo_adjustment(
+    session: Session, workspace: Workspace, access: Access, actor: Actor, payload: dict[str, Any], done: list[str], skipped: list[str]
+) -> None:
+    """Вернуть поправку месяца (шаг пачки `core_adjust`): новой - убрать, правленой - вернуть прежние сумму и причину."""
+    _require_edit(access)
+    label = payload.get("label") or "договор"
+    contract = session.get(Contract, uuid.UUID(payload["contract_id"]))
+    doc = session.get(Document, uuid.UUID(payload["document_id"])) if payload.get("document_id") else None
+    if contract is None or contract.deleted_at is not None:
+        skipped.append(f"{label}: договор удалён")
+        return
+    if doc is None or doc.contract_id != contract.id:
+        skipped.append(f"{label}: поправки уже нет")
+        return
+    before = payload.get("before") or {}
+    if not before:
+        doc.deleted_at = _now()
+    else:
+        doc.amount = Decimal(before["amount"]) if before.get("amount") is not None else None
+        doc.skip = bool(before.get("skip"))
+        doc.reason = before.get("reason") or ""
+        doc.deleted_at = None
+    doc.updated_by, doc.updated_at = actor.user_id, _now()
+    session.flush()
+    _finish(session, Registry(session, workspace), contract, actor, [])
+    month = payload.get("month") or ""
+    history.write(
+        session, workspace, kind="contract.adjustment", entity="contract", entity_id=contract.id,
+        title=f"договор {contract.number or ''} · поправка {month} возвращена".replace("  ", " "),
+        before={"month": month}, after=before, actor=actor.email,
+    )
+    done.append(f"{label}: поправка {month} - как была" if before else f"{label}: поправка {month} убрана")
+
+
 def history_change(
     session: Session,
     workspace: Workspace,
