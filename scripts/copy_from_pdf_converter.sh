@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Перенос учёта с прода PDF-CONVERTER в базу KORT - схема `finance` целиком.
 #
-#   SOURCE_DATABASE_URL=postgresql://…/railway   # база PDF-CONVERTER
+#
+#   SOURCE_DATABASE_URL=postgresql://…/railway   # база 
 #   TARGET_DATABASE_URL=postgresql://…/railway   # база KORT
 #   bash backend/scripts/copy_from_pdf_converter.sh
 #
@@ -22,7 +22,7 @@ set -euo pipefail
 
 KORT_HEAD="0023"
 
-: "${SOURCE_DATABASE_URL:?задайте SOURCE_DATABASE_URL - база PDF-CONVERTER}"
+: "${SOURCE_DATABASE_URL:?задайте SOURCE_DATABASE_URL - база}"
 : "${TARGET_DATABASE_URL:?задайте TARGET_DATABASE_URL - база KORT}"
 
 # Адреса SQLAlchemy (postgresql+psycopg://) утилитам Postgres непонятны.
@@ -60,7 +60,7 @@ fi
 dump="$(mktemp -t kort-finance-XXXXXX.dump)"
 trap 'rm -f "$dump"' EXIT
 
-echo "→ дамп схемы finance из PDF-CONVERTER"
+echo "→ дамп схемы finance"
 pg_dump "$SRC" --schema=finance --no-owner --no-privileges -Fc -f "$dump"
 
 echo "→ замена схемы finance в KORT"
@@ -73,7 +73,7 @@ q "$DST" "delete from alembic_version"
 q "$DST" "insert into alembic_version (version_num) values ('$KORT_HEAD')"
 
 echo
-echo "таблица            PDF-CONVERTER   KORT"
+echo "таблица            KORT"
 for table in workspaces users employees accounts operations contracts; do
   a="$(q "$SRC" "select count(*) from finance.$table")"
   b="$(q "$DST" "select count(*) from finance.$table")"

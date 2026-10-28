@@ -33,9 +33,6 @@
 **Текст с `CHECK` вместо `ENUM`** и единая схема имён ограничений из
 `finance/db.py` - по тем же причинам, что в ревизии 0010.
 
-Revision ID: 0012
-Revises: -  (корень цепочки KORT; в общей цепочке PDF-CONVERTER шла после 0011)
-Create Date: 2026-09-17 23:32:07.869920
 
 """
 from __future__ import annotations

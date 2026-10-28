@@ -30,8 +30,7 @@ SUPPORT_ROUTES = BACKEND / "app" / "api" / "routes" / "finance_support.py"
 #: Пакеты, на которые модуль имеет право ссылаться.
 #:
 #: `app.services` - разбор банковских выписок (Kaspi, Halyk, OCR, выписки
-#: юрлиц). Код приехал из «Анализа выписок» PDF-CONVERTER при выделении KORT
-#: 28.09.2026 и лежит отдельно от учёта: это разбор файла, а не учёт.
+#: юрлиц). Код приехал из «Анализа выписок» 
 ALLOWED_PREFIXES = (
     "app.core",
     "app.finance",
