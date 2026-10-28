@@ -970,11 +970,22 @@ def ask(
 
     if view.source != "contracts":
         raise FinanceError("Спросить по листам можно вид договоров")
+    from app.finance.contracts import summary as summary_module
+
     on = day or today()
     registry = Registry(session, workspace)
     if on != today():
         # Оплачено KORT - на тот день; сводная таблица знает только сегодняшнее.
         registry.paid_on = on
+    # Сводная подключена, но процесс её ещё не читал (сразу после выкладки):
+    # прочитать, как «Оплачено» экрана, а не отвечать нулями остатков.
+    unread = False
+    if registry.summary is None and registry.summary_connected:
+        slot = summary_module.get(session, workspace.id)
+        if slot is not None and slot.index is not None:
+            registry._summary = slot.index
+        else:
+            unread = True
     contracts = list(
         session.scalars(sa.select(Contract).where(Contract.workspace_id == workspace.id, Contract.deleted_at.is_(None)))
     )
@@ -1081,6 +1092,8 @@ def ask(
         "sheets": sheets_out,
         "rows": rows,
         "groups": {},
+        # Сводная не прочиталась: «Оплачено» и «Остаток» её юрлиц неизвестны, а не ноль.
+        **({"summary": "unread"} if unread else {}),
     }
     first = sheets[0].key if sheets else None
     if "people" in (view.groups or []) and first is not None:
