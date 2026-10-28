@@ -290,26 +290,11 @@ def test_doli_otdelov_tolko_nachalniku_s_polnym_pravom(app: FastAPI) -> None:
     assert cleared.status_code == 200 and cleared.json()["departments"]["rows"] == []
 
 
-def _oneoff_only(owner: TestClient, department_id: str) -> None:
-    """Книга «Разовые» - только договоры отдела, как на проде после 0024:
-    «отдел - …» в каждой группе каждого блока."""
-    for view in owner.get(f"{BASE}/contracts/schema").json()["views"]:
-        if view.get("book") != "oneoff":
-            continue
-        blocks = [
-            {
-                **block,
-                "filter": {
-                    "any": [
-                        {"all": [*group["all"], {"field": "department", "op": "in", "value": [department_id]}]}
-                        for group in block["filter"]["any"]
-                    ]
-                },
-            }
-            for block in view["blocks"]
-        ]
-        response = owner.patch(f"{BASE}/contracts/setup/views/{view['id']}", json={"blocks": blocks})
-        assert response.status_code == 200, response.text
+def _oneoff_view(owner: TestClient, department_id: str) -> dict:
+    """«Разовые ЮО» - вид отдела из шаблона отрасли (этап 2, шаг 6): сумма - доля отдела-владельца."""
+    response = owner.post(f"{BASE}/core/views", json={"template": "oneoff_age", "owner": {"department": department_id}})
+    assert response.status_code == 200, response.text
+    return response.json()
 
 
 def test_dolya_otdela_knigi_vidna_vsem_komu_otkryt_dogovor(app: FastAPI) -> None:
@@ -325,14 +310,15 @@ def test_dolya_otdela_knigi_vidna_vsem_komu_otkryt_dogovor(app: FastAPI) -> None
     def listed(who: TestClient) -> dict[str, dict]:
         return {item["id"]: item for item in who.get(f"{BASE}/contracts").json()["contracts"]}
 
-    # Книга «Разовые» не про один отдел - доли в ответе нет ни у кого.
+    # Вида отдела ещё нет - доли в ответе нет ни у кого.
     assert "department_share" not in listed(owner)[split]
-    _oneoff_only(owner, yuo)
+    view = _oneoff_view(owner, yuo)
+    assert view["title"] == "Разовые ЮО" and view["owner"]["code"] == "ЮО"
     assert _shares(team["first"], split)["departments"] is None
     for who in (owner, team["first"]):
         items = listed(who)
         assert items[split]["department_share"] == {yuo: {"amount": "104400.00", "percent": "30"}}
-        assert any(place["view"] == "oneoff" for place in items[split]["views"])
+        assert any(place["view"] == f"{view['key']}_all" for place in items[split]["views"])
         # Договор одного отдела - у отдела целиком, доли не нужно.
         assert "department_share" not in items[alone]
     # Сумма договора подорожала - доля в процентах следом.

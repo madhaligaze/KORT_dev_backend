@@ -613,6 +613,12 @@ def test_kazhdyy_izmenyayushchiy_marshrut_pishet_sobytie(app: FastAPI, monkeypat
     walk.call(owner, "PUT", "/core/tax-years/{year}", year=2027,
               json={"mrp": "4600", "threshold_mrp": 10000, "vat_rate": "16"})
 
+    # ── виды: шаблон отдела, правка, убрать ─────────────────────────────
+    saved = walk.call(owner, "POST", "/core/views",
+                      json={"template": "oneoff_age", "owner": {"department": department}}).json()
+    walk.call(owner, "PATCH", "/core/views/{view_id}", view_id=saved["id"], json={"pin": "all"})
+    walk.call(owner, "DELETE", "/core/views/{view_id}", view_id=saved["id"])
+
     # ── ядро: поправка месяца, статус с даты, сверка с книгой ───────────
     def monthly(customer: str, number: str, signed: str) -> str:
         created = owner.post(f"{BASE}/contracts", json=contract_values(customer, number, signed_at=signed, billing="month"))

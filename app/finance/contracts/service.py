@@ -248,6 +248,8 @@ class Access:
     #: «В договорах включено всё»: правит, все договоры, без ограничения по
     #: юрлицам. Начальнику с таким правом открыты и доли отделов.
     full_contracts: bool = False
+    #: Учётка вошедшего - чьи личные виды показывать (`core/views.py`).
+    user_id: uuid.UUID | None = None
 
     def can_edit_field(self, key: str) -> bool:
         return self.edit and key not in self.hidden and key not in self.readonly
@@ -264,11 +266,12 @@ def access_of(member: Any) -> Access:
     rights = getattr(member, "rights", None)
     if rights is None:
         return Access()
+    user_id = getattr(member, "user_id", None)
     if rights.is_admin:
-        return Access(view=True, edit=True, setup=True, admin=True, full_contracts=True)
+        return Access(view=True, edit=True, setup=True, admin=True, full_contracts=True, user_id=user_id)
     level = rights.level("contracts")
     if level == "none":
-        return Access()
+        return Access(user_id=user_id)
     head = rights.department_id if rights.people_rows == "department" and rights.can("people") else None
     hidden = frozenset(key for key in rights.fields if rights.field_level(key) == "none")
     # «Оплачено/Остаток по выписке» - суммы из журнала операций: кому журнал
@@ -290,6 +293,7 @@ def access_of(member: Any) -> Access:
         head_department=head,
         head_shares=rights.people_shares,
         full_contracts=level == "edit" and rights.contract_rows == "all" and not rights.contract_entities,
+        user_id=user_id,
     )
 
 
@@ -316,7 +320,13 @@ class Registry:
         self.session = session
         self.workspace = workspace
         self.fields: list[EntityField] = fields_of(session, workspace.id)
-        self.field_by_key = {item.key: item for item in self.fields}
+        self.field_by_key: dict[str, Any] = {item.key: item for item in self.fields}
+        # Меры вида («Оплачено», «Остаток», «Срок, мес») - колонками и условиями
+        # листов, но не полями договора (`core/views.MEASURES`).
+        from app.finance.core.views import measure_fields
+
+        for key, measure in measure_fields().items():
+            self.field_by_key.setdefault(key, measure)
         values = session.scalars(
             sa.select(ListValue).where(ListValue.workspace_id == workspace.id)
         ).all()
@@ -354,6 +364,10 @@ class Registry:
                 .order_by(EntityView.position, EntityView.created_at)
             )
         )
+        # Книги листов - виды договоров (`core/views.py`): отбор вида и отдел доли.
+        from app.finance.core import views as core_views
+
+        self.books = core_views.books(session, workspace.id)
         self.economic = economic_role_values(session, workspace.id)
         self._parties: dict[uuid.UUID, Counterparty] | None = None
         self._party_cache: dict[uuid.UUID, Counterparty] = {}
@@ -367,6 +381,48 @@ class Registry:
         #: Юрлица, чьи оплаты ведёт KORT («Сверка → Переход»), и оплачено по договорам - на запрос.
         self._kort_payments: set[uuid.UUID] | None = None
         self._kort_paid: dict[uuid.UUID, Any] | None = None
+        self._summary_connected: bool | None = None
+        #: День, на который «Оплачено» KORT (`core/views.ask`); `None` - сегодня.
+        self.paid_on: date | None = None
+        self._rule_fields: set[str] | None = None
+
+    # - книги -
+
+    @property
+    def bases(self) -> dict[str, dict[str, Any]]:
+        """Отбор вида каждой книги: договор в листе, если подходит и под него."""
+        return {key: view.filter or {} for key, view in self.books.items()}
+
+    @property
+    def rule_fields(self) -> set[str]:
+        """Поля, по которым отбирают и красят листы и виды, - что считать в фактах договора."""
+        if self._rule_fields is None:
+            found: set[str] = set()
+            for sheet in self.views:
+                for block in sheet.blocks or []:
+                    found |= views_module.fields_used((block or {}).get("filter"))
+                    for paint in (block or {}).get("paint") or []:
+                        found |= views_module.fields_used((paint or {}).get("filter"))
+            for view in self.books.values():
+                found |= views_module.fields_used(view.filter or {})
+            self._rule_fields = found
+        return self._rule_fields
+
+    def share_departments(self) -> list[uuid.UUID]:
+        """Отделы, долей которых виды показывают сумму договора («Разовые ЮО» - доля ЮО)."""
+        from app.finance.core import views as core_views
+
+        found = {
+            department
+            for view in self.books.values()
+            if view.archived_at is None and (department := core_views.share_department(view)) is not None
+        }
+        return sorted(found, key=str)
+
+    def share_department_of(self, book: str) -> uuid.UUID | None:
+        from app.finance.core import views as core_views
+
+        return core_views.share_department(self.books.get(book or ""))
 
     # - сводка оплат -
 
@@ -405,7 +461,26 @@ class Registry:
         """
         index = self.summary
         if index is None:
-            return None
+            # Сводная не подключена вовсе - оплачено по оплатам KORT: у компании
+            # без таблицы «Оплачено» и «Остаток» иначе были бы пусты всегда.
+            # Подключена, но ещё не прочитана - не знаем: подмена KORT молча
+            # сменила бы числа на время чтения.
+            if self.summary_connected:
+                return None
+            hit = self._summary_matches.get(contract.id)
+            if hit is None:
+                from app.finance.contracts.summary import Match
+                from app.finance.core.views import month_label
+
+                start = contract.billing_from or contract.signed_at
+                hit = Match(
+                    state="found",
+                    paid=self.kort_paid().get(contract.id, Decimal("0")),
+                    months=(month_label(start),) if start else (),
+                    source="kort",
+                )
+                self._summary_matches[contract.id] = hit
+            return hit
         hit = self._summary_matches.get(contract.id)
         if hit is None:
             ours, theirs = contract.executor_id, contract.customer_id
@@ -423,6 +498,15 @@ class Registry:
             self._summary_matches[contract.id] = hit
         return hit
 
+    @property
+    def summary_connected(self) -> bool:
+        """Подключена ли сводная таблица компании (прочитана или нет)."""
+        if self._summary_connected is None:
+            from app.finance.contracts import summary as summary_module
+
+            self._summary_connected = summary_module.source_of(self.session, self.workspace.id) is not None
+        return self._summary_connected
+
     def kort_payments(self) -> set[uuid.UUID]:
         if self._kort_payments is None:
             from app.finance.core import switch
@@ -434,7 +518,7 @@ class Registry:
         if self._kort_paid is None:
             from app.finance.core import switch
 
-            self._kort_paid = switch.kort_paid(self.session, self.workspace.id)
+            self._kort_paid = switch.kort_paid(self.session, self.workspace.id, today=self.paid_on)
         return self._kort_paid
 
     # - стороны -
@@ -1034,9 +1118,12 @@ def facts_of(contract: Contract, registry: Registry, people: Sequence[uuid.UUID]
     facts["phase"] = registry.meaning(contract.status_id).get("phase")
     facts["economic"] = registry.meaning(contract.economic_role_id).get("system")
     facts["age_months"] = age_months(contract.signed_at)
-    # «Оплачено/Остаток (сводка)» - для листов вроде «Остатки»; нет сводки
-    # или договор в ней не нашёлся - фактов нет, и условие «> 0» не проходит.
-    match = registry.summary_of(contract)
+    # «Оплачено/Остаток» - для листов вроде «Остатки»; договор в сводной не
+    # нашёлся - фактов нет, и условие «> 0» не проходит. Без сводной это
+    # оплаты KORT из регистра итогов: их считаем, только если по мере правда
+    # отбирает или красит лист (горячий путь сборки реестра).
+    wanted = registry.summary is not None or bool({"summary_paid", "summary_remaining"} & registry.rule_fields)
+    match = registry.summary_of(contract) if wanted else None
     if match is not None and match.state == "found":
         facts["summary_paid"] = match.paid
         if contract.amount is not None:
@@ -1379,9 +1466,7 @@ class Output:
         # открыта сумма договора. Модуль долей импортирует этот, поэтому здесь.
         from app.finance.contracts.shares import book_shares
 
-        book_departments = (
-            [] if "amount" in self.access.hidden else _uuids(views_module.book_departments(registry.views).values())
-        )
+        book_departments = [] if "amount" in self.access.hidden else registry.share_departments()
         out: list[dict[str, Any]] = []
         for item in contracts:
             if not visible_to(item, registry, self.access, people.get(item.id, [])):
@@ -1406,7 +1491,7 @@ class Output:
                         for issue in issues_of(item, registry, numbers, party_names, mine)
                         if issue["field"] not in self.access.hidden
                     ],
-                    "views": views_module.membership(facts_of(item, registry, mine), registry.views),
+                    "views": views_module.membership(facts_of(item, registry, mine), registry.views, registry.bases),
                     **({"roles": roles} if (roles := registry.roles_of(item)) else {}),
                     # Кто вписал отдел: сотрудник убирает только вписанный им
                     # самим (`_check_departments_kept`). Одно на всех зрителей -

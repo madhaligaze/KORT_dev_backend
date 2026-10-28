@@ -471,10 +471,16 @@ def grants_of(
 
 
 def field_keys(session: Session, workspace_id: uuid.UUID) -> list[tuple[str, str]]:
-    """Поля реестра договоров компании: ключ и подпись."""
-    from app.finance.contracts.models import EntityField
+    """Поля реестра договоров компании и меры видов: ключ и подпись.
 
-    return [
+    Меры («Оплачено», «Остаток», «Срок, мес» - `core/views.MEASURES`) не поля
+    договора, но скрыть их у человека можно так же, как поле.
+    """
+    from app.finance.contracts.fields import MEASURE_KEYS
+    from app.finance.contracts.models import EntityField
+    from app.finance.core.views import MEASURES
+
+    fields = [
         (key, title)
         for key, title in session.execute(
             sa.select(EntityField.key, EntityField.title)
@@ -482,10 +488,12 @@ def field_keys(session: Session, workspace_id: uuid.UUID) -> list[tuple[str, str
                 EntityField.workspace_id == workspace_id,
                 EntityField.entity == "contract",
                 EntityField.archived_at.is_(None),
+                EntityField.key.not_in(MEASURE_KEYS),
             )
             .order_by(EntityField.position, EntityField.created_at)
         )
     ]
+    return fields + [(item.key, f"{item.title} (мера вида)") for item in MEASURES if item.key in MEASURE_KEYS]
 
 
 def catalog(session: Session, workspace_id: uuid.UUID) -> dict[str, Any]:

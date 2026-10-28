@@ -135,7 +135,13 @@ def _value_label(session: Session, item: ListValue) -> str:
 
 
 def _view_label(session: Session, item: EntityView) -> str:
-    return f"{item.title}{' (Разовые)' if item.book == 'oneoff' else ''}"
+    """Лист и вид, чей он: «Остатки (Разовые ЮО)»; у листа реестра - только название."""
+    if not item.book:
+        return item.title
+    from app.finance.core.models import View
+
+    book = session.scalar(sa.select(View.title).where(View.workspace_id == item.workspace_id, View.key == item.book))
+    return f"{item.title} ({book or item.book})"
 
 
 def _used_in_contracts(session: Session, workspace_id: uuid.UUID, *conditions: Any) -> int:

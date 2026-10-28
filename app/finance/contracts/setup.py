@@ -16,7 +16,6 @@ from app.finance.layout import norm
 from app.finance.contracts import summary as summary_module
 from app.finance.contracts import views as views_module
 from app.finance.contracts.fields import (
-    BOOKS,
     CHOICES,
     ENTITY,
     FIELD_BY_KEY,
@@ -46,6 +45,7 @@ from app.finance.contracts.models import (
     ListValue,
 )
 from app.finance.contracts.service import Access, Registry, today
+from app.finance.core import views as core_views
 from app.finance.models import POSITION_STEP, Account, Counterparty, Workspace
 from app.finance.service import FinanceError
 
@@ -136,7 +136,14 @@ def schema(session: Session, workspace: Workspace, access: Access) -> dict[str, 
             if item.archived_at is None
         ],
         "views": [view_out(view) for view in registry.views],
-        "books": list(BOOKS),
+        # Виды договоров - книги листов (`core/views.py`): название, владелец,
+        # отбор, меры, группировки, формы; отдел доли - владелец с мерой доли.
+        "books": core_views.schema_books(session, workspace, access.user_id),
+        "measures": [
+            {"key": item.key, "title": item.title, "type": item.type}
+            for item in core_views.MEASURES
+            if item.key in core_views.COLUMN_MEASURES and item.key not in access.hidden
+        ],
         # Откуда «Оплачено (сводка)»: книга, лист, когда прочитана. Без
         # похода в Google - схему перечитывают на каждую настройку.
         "summary": summary_module.status(session, workspace.id),
@@ -880,8 +887,9 @@ def upsert_view(
         if key in taken:
             key = slug_for(key, taken)
         book = str(data.get("book") or "")
-        if book not in BOOKS:
-            raise FinanceError("Такого раздела листов нет")
+        found = registry.books.get(book)
+        if found is None or found.archived_at is not None:
+            raise FinanceError("Такого вида с листами нет")
         view = EntityView(
             workspace_id=workspace.id,
             entity=ENTITY,

@@ -344,7 +344,9 @@ class Debts:
         basis: str = "accruals",
         book: Any | None = None,
         side: str = "receivable",
+        rule: dict[str, Any] | None = None,
     ) -> None:
+        """`rule` - отбор вида «Долги» (`core/views.py`): долги только договоров под ним."""
         if basis not in BASES:
             raise ValueError("основание долга - по начислениям или по АВР")
         if side not in SIDES:
@@ -359,6 +361,12 @@ class Debts:
         self.side = side
         visible = _visible(session, workspace, access)
         self.registry = Registry(session, workspace)
+        if rule and (rule.get("any") or []):
+            from app.finance.contracts import views as rules
+            from app.finance.contracts.service import facts_of, people_of
+
+            people = people_of(session, [item.id for item in visible])
+            visible = [item for item in visible if rules.matches(rule, facts_of(item, self.registry, people.get(item.id, [])))]
         # На сегодня - регистр итогов, на другой день - живой расчёт; вывод один.
         found_totals = totals(session, workspace, visible, day=day)
         self.since = found_totals.since

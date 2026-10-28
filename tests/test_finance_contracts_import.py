@@ -117,8 +117,28 @@ def _section(batch, key):
     return next(section for section in batch.report["sections"] if section["key"] == key)
 
 
+def _bbc_words(session, workspace) -> None:
+    """Написания шапок BBC («Ссылка на Битрикс 24», «Исполнитель BBC») - слой компании:
+    у существующих компаний их дописала миграция 0041, новая их не получает (этап 2, шаг 6)."""
+    import sqlalchemy as sa
+
+    from app.finance.contracts.fields import ensure_registry
+    from app.finance.contracts.models import EntityField
+
+    ensure_registry(session, workspace)
+    words = {
+        "folder_url": ["ссылка на битрикс 24", "ссылка на битрикс", "битрикс"],
+        "executor": ["исполнитель bbc", "арендодатель bbc", "арендадатель bbc"],
+    }
+    for key, names in words.items():
+        row = session.scalar(sa.select(EntityField).where(EntityField.workspace_id == workspace.id, EntityField.key == key))
+        row.names = list(row.names or []) + [name for name in names if name not in (row.names or [])]
+    session.flush()
+
+
 def _start(session):
     workspace = finance_service.ensure_workspace(session)
+    _bbc_words(session, workspace)
     return workspace, importer.start(session, workspace, ACTOR, _registry_file(), "реестр.xlsx")
 
 
@@ -201,7 +221,7 @@ def test_zavedenie_nichego_ne_teryaet(finance_db):
         assert float(first["file_snapshot"]["paid"]) == 250000
         assert first["values"]["folder_url"].startswith("https://bitrix/")
 
-        # Листы реестра; «Разовые» - своя книга, её засевает сам реестр.
+        # Листы реестра; виды договоров («Разовые ЮО») - свои книги.
         views = {view.title: view for view in registry.views if not view.book}
         assert set(views) == {"Сводная", "Заказчик ГК", "Прочие договоры"}
         rent_members = [

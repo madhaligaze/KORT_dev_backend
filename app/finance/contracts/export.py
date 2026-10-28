@@ -216,16 +216,16 @@ def build(session: Session, workspace: Workspace, access: Access, actor: Actor, 
     # начальнику - договоров отдела, сотруднику - только своя.
     shares = shares_module.all_visible(session, workspace, access)["contracts"]
 
-    # Без выбора - листы реестра; «Разовые» выгружаются своей кнопкой.
+    # Без выбора - листы реестра; листы другого вида выгружаются его кнопкой.
     views: list[EntityView] = [
         view for view in registry.views if (view.key in view_keys if view_keys else not view.book)
     ]
-    # Книга одного отдела («Разовые ЮО») - суммы долей этого отдела, как на экране.
-    book_departments = views_module.book_departments(registry.views) if "amount" not in hidden else {}
+    # Вид отдела с мерой доли («Разовые ЮО») - суммы долей этого отдела, как на экране.
+    money_open = "amount" not in hidden
     book = Workbook(write_only=True)
     taken_titles: list[str] = []
     for view in views:
-        department = _uuid(book_departments.get(view.book or ""))
+        department = registry.share_department_of(view.book or "") if money_open else None
         title = _sheet_title(view.title, taken_titles)
         taken_titles.append(title)
         sheet = book.create_sheet(title=title)
@@ -246,7 +246,7 @@ def build(session: Session, workspace: Workspace, access: Access, actor: Actor, 
         # Договор - в одном блоке листа: в первом подходящем (`views.place`).
         members: list[list[Contract]] = [[] for _ in blocks]
         for item in visible:
-            index = views_module.place(view, facts[item.id])
+            index = views_module.place(view, facts[item.id], registry.bases.get(view.book or ""))
             if index is not None and index < len(members):
                 members[index].append(item)
         # Значения - заранее: ширины колонок потоковой книги задаются до
@@ -432,13 +432,6 @@ def _block_title(title: str, columns: Sequence[dict[str, Any]], rows: Sequence[S
     if known:
         out += f" · остаток: {_grouped(round(sum(known), 2))} ₸"
     return out
-
-
-def _uuid(raw: Any) -> uuid.UUID | None:
-    try:
-        return uuid.UUID(str(raw)) if raw else None
-    except ValueError:
-        return None
 
 
 def _kind(registry: Registry, key: str) -> str:

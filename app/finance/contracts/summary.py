@@ -389,15 +389,18 @@ def contracts_out(session: Session, workspace: Any, access: Any, *, force: bool 
             slot = _slots.get(workspace.id)
             if slot is not None and time.monotonic() - slot.at < FORCE_GAP:
                 force = False
-    slot = get(session, workspace.id, force=force)
     source = source_of(session, workspace.id)
+    # Без сводной - оплаты KORT (`Registry.summary_of`): у компании без таблицы
+    # «Оплачено» и «Остаток» видов иначе были бы пусты всегда.
+    slot = get(session, workspace.id, force=force) if source is not None else None
     out: dict[str, Any] = {"source": source_out(source, slot), "contracts": {}}
-    if slot is None or slot.index is None:
+    if source is not None and (slot is None or slot.index is None):
         return out
     if {"summary_paid", "summary_remaining"} <= set(access.hidden):
         return out
     registry = Registry(session, workspace)
-    registry._summary = slot.index  # то, что прочитано сейчас, а не в прошлый раз
+    if slot is not None:
+        registry._summary = slot.index  # то, что прочитано сейчас, а не в прошлый раз
     contracts = list(
         session.scalars(
             sa.select(Contract).where(Contract.workspace_id == workspace.id, Contract.deleted_at.is_(None))

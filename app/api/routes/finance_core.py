@@ -909,21 +909,32 @@ def debts_view(
     group: str = Query(default="client", pattern="^(client|entity|department|person)$"),
     basis: str = Query(default="accruals", pattern="^(accruals|acts)$"),
     side: str = Query(default="receivable", pattern="^(receivable|payable|intra)$"),
+    view: str = Query(default="", max_length=64),
     member: Member = Depends(require_access("reports.debts")),
 ) -> dict[str, Any]:
-    """Долги по договорам на день: нам, наши (покупки), между своими; по начислениям или по АВР; по группам, со старением."""
+    """Долги по договорам на день: нам, наши (покупки), между своими; по начислениям или по АВР; по группам, со старением.
+
+    `view` - вид «Долги» (`core/views.py`): долги только договоров под его отбором.
+    """
     from datetime import date
 
     from app.finance.core import debts as debts_module
+    from app.finance.core import views as views_module
 
     def action(session, workspace, access):
         _debts_access(access)
+        rule = None
+        if view:
+            found = views_module.find(session, workspace, view)
+            if found.source != "debts" or not views_module.can_see(views_module.viewer_of(member), found):
+                raise PermissionError("Этот вид вам не открыт")
+            rule = found.filter or None
         day = date.fromisoformat(as_of) if as_of else contracts_service.today()
         book, error = None, ""
         if basis == "acts":
             # АВР книги - часть долга по АВР у юрлиц без 1С: без книги он был бы меньше молча.
             book, error = book_module.current(session, workspace.id, wait=book_module.FIRST_READ_WAIT)
-        out = debts_module.Debts(session, workspace, access, day=day, basis=basis, book=book, side=side).out(group)
+        out = debts_module.Debts(session, workspace, access, day=day, basis=basis, book=book, side=side, rule=rule).out(group)
         out["book"] = _book_out(book) if book is not None else None
         out["error"] = (
             "" if basis == "accruals" or book is not None
@@ -1251,6 +1262,94 @@ def sections_usage(
     _guard()
     with finance_session() as session:
         return action(session, _workspace(session, member), None)
+
+
+# ── Виды как данные ──────────────────────────────────────────────────────────
+
+#: Виды - «Реестр», «Долги», «Не выставлены» и сохранённые: открыты тому, кому
+#: открыт хоть один их источник; что именно видно - решает `core/views.py`.
+VIEW_RESOURCES = ("contracts", "reports.debts", "invoices")
+
+
+class ViewBody(BaseModel):
+    template: str | None = None
+    title: str | None = Field(default=None, max_length=120)
+    source: str | None = None
+    owner: Any = None
+    filter: dict[str, Any] | None = None
+    measures: list[str] | None = None
+    groups: list[str] | None = None
+    forms: list[str] | None = None
+    params: dict[str, Any] | None = None
+    pin: str | None = None
+    position: int | None = None
+
+
+def _view_data(body: ViewBody) -> dict[str, Any]:
+    return body.model_dump(exclude_unset=True)
+
+
+@router.get("/views")
+def views_list(member: Member = Depends(require_access(VIEW_RESOURCES))) -> dict[str, Any]:
+    """Виды компании, которые человек видит, - с отметкой «в колонке»; шаблоны, меры, источники."""
+    from app.finance.core import views as views_module
+
+    return _run(member, lambda s, w, a: views_module.listing(s, w, views_module.viewer_of(member)))
+
+
+@router.post("/views")
+def views_create(body: ViewBody, member: Member = Depends(require_access(VIEW_RESOURCES))) -> dict[str, Any]:
+    """Сохранить вид - из шаблона или свой. Себе - любой, отделу - начальник, компании - администратор. Пишет журнал."""
+    from app.finance.core import views as views_module
+
+    return _run(
+        member,
+        lambda s, w, a: views_module.create(s, w, views_module.viewer_of(member), member.login, _view_data(body)),
+    )
+
+
+@router.patch("/views/{view_id}")
+def views_update(view_id: UUID, body: ViewBody, member: Member = Depends(require_access(VIEW_RESOURCES))) -> dict[str, Any]:
+    """Название, владелец, отбор, меры, группировки, формы, параметры, колонка. Пишет журнал."""
+    from app.finance.core import views as views_module
+
+    return _run(
+        member,
+        lambda s, w, a: views_module.update(s, w, views_module.viewer_of(member), member.login, view_id, _view_data(body)),
+    )
+
+
+@router.delete("/views/{view_id}")
+def views_remove(view_id: UUID, member: Member = Depends(require_access(VIEW_RESOURCES))) -> dict[str, Any]:
+    """Убрать вид вместе с его листами; договоры остаются в реестре. Пишет журнал."""
+    from app.finance.core import views as views_module
+
+    def action(session, workspace, _access):
+        views_module.remove(session, workspace, views_module.viewer_of(member), member.login, view_id)
+        return {"ok": True}
+
+    return _run(member, action)
+
+
+@router.get("/views/{key}/ask")
+def views_ask(
+    key: str,
+    as_of: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    member: Member = Depends(viewer),
+) -> dict[str, Any]:
+    """«Спросить» вид договоров на день: договоры по листам и частям, меры, итоги, группировки."""
+    from datetime import date as date_type
+
+    from app.finance.core import views as views_module
+
+    def action(session, workspace, access):
+        view = views_module.find(session, workspace, key)
+        if not views_module.can_see(views_module.viewer_of(member), view):
+            raise PermissionError("Этот вид вам не открыт")
+        day = date_type.fromisoformat(as_of) if as_of else None
+        return views_module.ask(session, workspace, access, view, day=day)
+
+    return _run(member, action)
 
 
 # ── «Найти или сделать» ──────────────────────────────────────────────────────

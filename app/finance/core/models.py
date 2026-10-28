@@ -400,6 +400,67 @@ class CoreSettings(FinanceBase):
     )
 
 
+#: Откуда строки вида: договоры листами, «Долги», «Не выставлены» (`core/views.py`).
+VIEW_SOURCES = ("contracts", "debts", "unbilled")
+#: Кому вид стоит в колонке разделов: всем, кто видит его данные; только
+#: владельцу (отдел - его людям, человек - ему); никому - вид открывается из «Ещё».
+VIEW_PINS = ("all", "owner", "")
+
+
+class View(FinanceBase):
+    """Вид - сохранённый вопрос к ядру: отбор, меры, группировки, форма, владелец.
+
+    «Реестр», «Разовые ЮО», «Долги», «Не выставлены» - виды, а не разделы,
+    зашитые в код (этап 2, шаг 6). Колонка разделов собирается из
+    закреплённых видов. Вид договоров - книга листов: `entity_views.book` -
+    ключ вида; реестр - вид с ключом `""`. Владелец - компания (оба поля
+    пусты), отдел или человек; отдел-владелец - ещё и доля: в «Разовых ЮО»
+    сумма договора - доля ЮО.
+
+    Меры - итоги ядра (`core/views.MEASURES`), а не поля договора и не
+    формулы человека: формула вернула бы сверки.
+    """
+
+    __tablename__ = "views"
+    __table_args__ = (
+        sa.UniqueConstraint("workspace_id", "key", name="uq_views_key"),
+        sa.CheckConstraint(_in("source", VIEW_SOURCES), name="view_source"),
+        sa.CheckConstraint(_in("pin", VIEW_PINS), name="view_pin"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(sa.Uuid, primary_key=True, default=_uuid)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        sa.Uuid, sa.ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
+    )
+    key: Mapped[str] = mapped_column(sa.Text)
+    title: Mapped[str] = mapped_column(sa.Text)
+    source: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("'contracts'"))
+    owner_department_id: Mapped[uuid.UUID | None] = mapped_column(
+        sa.Uuid, sa.ForeignKey("departments.id", ondelete="SET NULL")
+    )
+    owner_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        sa.Uuid, sa.ForeignKey("users.id", ondelete="CASCADE")
+    )
+    #: Отбор - правило того же языка, что у листов (`contracts/views.py`); пусто - все.
+    filter: Mapped[dict] = mapped_column(JSONB, server_default=sa.text("'{}'"))
+    measures: Mapped[list] = mapped_column(JSONB, server_default=sa.text("'[]'"))
+    groups: Mapped[list] = mapped_column(JSONB, server_default=sa.text("'[]'"))
+    forms: Mapped[list] = mapped_column(JSONB, server_default=sa.text("'[]'"))
+    #: Своё у источника: у долгов - сторона, основание, группа; у «Не выставлены» - отбор юрлица и отдела.
+    params: Mapped[dict] = mapped_column(JSONB, server_default=sa.text("'{}'"))
+    pin: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("'all'"))
+    position: Mapped[int] = mapped_column(sa.Integer, server_default=sa.text("0"))
+    #: Шаблон, из которого вид сохранён; пусто - свой.
+    template: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("''"))
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        sa.Uuid, sa.ForeignKey("users.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        sa.DateTime(timezone=True), server_default=sa.func.now()
+    )
+    archived_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True))
+
+
 __all__ = [
     "CoreSettings",
     "DOCUMENT_KINDS",
@@ -416,4 +477,7 @@ __all__ = [
     "RegisterState",
     "TAX_REGIMES",
     "TaxYear",
+    "VIEW_PINS",
+    "VIEW_SOURCES",
+    "View",
 ]
