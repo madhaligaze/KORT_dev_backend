@@ -3,13 +3,13 @@
 Своя авторизация, а не общая с дашбордом
 ────────────────────────────────────────
 Раньше здесь стояли `require_block_user("finance")` и `require_admin` из
-`app.bbc.deps`, то есть в раздел пускали учётки BBC Dashboard. Это было неверно
-по существу: в «Финансах» каждая компания регистрируется сама и ведёт свой
-учёт, к BBC отношения не имея, - а BBC однажды может сам переехать сюда, и
-тогда зависимость смотрела бы от общего к частному.
+модуля соседнего дашборда, то есть в раздел пускали его учётки. Это было
+неверно по существу: в «Финансах» каждая компания регистрируется сама и ведёт
+свой учёт, к дашборду отношения не имея, - а компания дашборда однажды может
+сама переехать сюда, и тогда зависимость смотрела бы от общего к частному.
 
-Теперь у раздела свои учётки (`app.finance.auth`), и `app.bbc` этот файл не
-импортирует вовсе. Компания берётся **из сессии**, а не «по умолчанию»: один
+Теперь у раздела свои учётки (`app.finance.auth`), и модуль дашборда этот
+файл не импортирует вовсе. Компания берётся **из сессии**, а не «по умолчанию»: один
 человек ведёт несколько компаний, и переключатель в шапке меняет контекст
 сессии.
 
@@ -2254,7 +2254,7 @@ def _preview_response(
     )
     # Счета, которых нет, заводятся с юрлицом: по нему оплата на счёт - оплата
     # договоров этого юрлица. Юрлицо предлагается, только если оно названо в
-    # счёте целиком («Kaspi ТОО "BBC HR"»); выбирает человек.
+    # счёте целиком («Kaspi ТОО "Тумар Офис"»); выбирает человек.
     entities: list[dict[str, Any]] = []
     suggested: dict[str, str] = {}
     if preview.accounts_missing:
@@ -2402,12 +2402,12 @@ def list_bills(member: Member = Depends(require_access("invoices")), refresh: bo
         workspace_id = _workspace(session, member).id
         out = bills_module.board_out(session, workspace_id, force=refresh)
         source = source_of(session, workspace_id)
-        summary = (source.spreadsheet_id, source.worksheet) if source is not None else None
+        summary = _summary_key(session, workspace_id, source) if source is not None else None
     out["channel"] = bills_bot.channel_out(workspace_id) if out["source"] else None
     # Загрузить шаблон Excel и записать из него - право правки; скачать - чтение.
     out["can_edit"] = member.rights.can("invoices", "edit")
     if summary is not None:
-        # Книги юрлиц - заранее, в фоне: иначе первая карточка ждёт все девять.
+        # Таблицы юрлиц - заранее, в фоне: иначе первая карточка ждёт их все.
         bill_book.warm(bill_book.api(), summary)
     return out
 
@@ -2427,7 +2427,15 @@ class BillBookIn(BaseModel):
     defaults: dict[str, str] = Field(default_factory=dict)
 
 
-def _board_of(session: Any, workspace_id: UUID) -> tuple[Any, tuple[str, str]]:
+def _summary_key(session: Any, workspace_id: UUID, source: Any) -> tuple[Any, ...]:
+    """Сводная для таблиц юрлиц: где она и словарь колонок компании - шапку её таблиц знает компания."""
+    from app.finance.contracts import bill_book
+    from app.finance.core import settings as core_settings
+
+    return (source.spreadsheet_id, source.worksheet, bill_book.words_key(core_settings.book_columns(session, workspace_id)))
+
+
+def _board_of(session: Any, workspace_id: UUID) -> tuple[Any, tuple[Any, ...]]:
     """Прочитанная книга-сводка (с записанным из KORT) - и откуда она."""
     from app.finance.contracts import bills as bills_module
     from app.finance.contracts.summary import source_of
@@ -2438,10 +2446,10 @@ def _board_of(session: Any, workspace_id: UUID) -> tuple[Any, tuple[str, str]]:
     board, error = bills_module.current(session, workspace_id)
     if board is None:
         raise HTTPException(status_code=503, detail=error or "Сводная таблица ещё читается - попробуйте через минуту")
-    return board, (source.spreadsheet_id, source.worksheet)
+    return board, _summary_key(session, workspace_id, source)
 
 
-def _bill_of(session: Any, workspace_id: UUID, bill_id: str) -> tuple[Any, tuple[str, str]]:
+def _bill_of(session: Any, workspace_id: UUID, bill_id: str) -> tuple[Any, tuple[Any, ...]]:
     """Счёт из книги-сводки по адресу карточки - и сама сводка."""
     if not _is_bill_id(bill_id):
         raise HTTPException(status_code=404, detail="Такого счёта нет")
@@ -2493,7 +2501,10 @@ def bills_template(member: Member = Depends(require_access("invoices"))) -> Resp
         if not items:
             raise HTTPException(status_code=409, detail="На сегодня счетов к выставлению нет - в шаблон класть нечего")
         sheets = {bills_bot.RENT: bill_template.RENT_SHEET, bills_bot.ABON: bill_template.ABON_SHEET}
-        data = bill_template.build(items, kind_of=lambda bill: sheets.get(bills_bot.kind_of(bill)))
+        from app.finance.core import settings as core_settings
+
+        words = core_settings.book_columns(session, workspace.id)
+        data = bill_template.build(items, kind_of=lambda bill: sheets.get(bills_bot.kind_of(bill)), words=words)
         history.write(
             session,
             workspace,
@@ -2527,10 +2538,13 @@ def read_bills_template(
     # Не больше потолка и одного байта сверх - как у остальных загрузок.
     data = file.file.read(bill_template.MAX_BYTES + 1)
     with finance_session() as session:
+        from app.finance.core import settings as core_settings
+
         workspace_id = _workspace(session, member).id
         board, _ = _board_of(session, workspace_id)
+        words = core_settings.book_columns(session, workspace_id)
     try:
-        return bill_template.parse(data, board)
+        return bill_template.parse(data, board, words)
     except bill_template.TemplateError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -2604,7 +2618,7 @@ def write_bill(bill_id: str, body: BillBookIn, member: Member = Depends(require_
                 kind="bill.book.fail",
                 title=f"запись в таблицу не удалась: {where}",
                 before={},
-                after={"ошибка": str(exc), "поля": [bill_book.TITLES[name] for name in exc.changed]},
+                after={"ошибка": str(exc), "поля": [exc.place.book.title_of(name) for name in exc.changed]},
             )
         raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
     # Книга такая, какой её перечитали, - и тогда, когда писать было нечего:
@@ -2633,8 +2647,8 @@ def write_bill(bill_id: str, body: BillBookIn, member: Member = Depends(require_
             saved.place,
             kind="bill.book",
             title=title,
-            before={bill_book.TITLES[name]: saved.before[name] for name in saved.changed},
-            after={bill_book.TITLES[name]: saved.after[name] for name in saved.changed},
+            before={saved.place.book.title_of(name): saved.before[name] for name in saved.changed},
+            after={saved.place.book.title_of(name): saved.after[name] for name in saved.changed},
         )
     return {
         "book": {"place": saved.place.out(), "fields": saved.after, "state": saved.state, "blocked": {}},

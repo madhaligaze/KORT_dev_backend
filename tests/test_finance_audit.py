@@ -27,6 +27,15 @@ from app.finance import audit, auth
 from app.finance.db import finance_session
 from app.finance.models import ACTION_CATEGORIES, ActionLog
 
+import company_layer
+
+
+@pytest.fixture(autouse=True)
+def _company_layer(monkeypatch):
+    """Компания теста - с шапкой таблиц копии прода: её знает словарь компании, а не ядро (п.9 «Пакеты»)."""
+    company_layer.everywhere(monkeypatch)
+
+
 BASE = "/api/v1/finance"
 PASSWORD = "pass-12345"
 AGENT = "pytest-agent"

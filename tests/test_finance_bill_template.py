@@ -26,6 +26,15 @@ from openpyxl import Workbook, load_workbook
 from app.finance.contracts import bill_template
 from app.finance.contracts.bills import DONE, Bill, Board
 
+import company_layer
+
+
+@pytest.fixture(autouse=True)
+def _company_layer(monkeypatch):
+    """Компания теста - с шапкой таблиц копии прода: её знает словарь компании, а не ядро (п.9 «Пакеты»)."""
+    company_layer.everywhere(monkeypatch)
+
+
 #: Имена листов - такие, чтобы Excel рисовал ярлыки на одной линии (выбор владельца 23.10.2026).
 REG, ABON = "Общий реестр", "Абонентские услуги"
 
@@ -88,9 +97,11 @@ def test_shablon_kak_u_finansistov() -> None:
     assert sheet.title == REG
     heads = {cell.column_letter: cell.value for cell in sheet[1] if cell.value}
     assert heads == {
-        "B": "Наша\nФирма", "C": "Наш\nСотрудник", "D": "Заказчик\n(Название Фирмы)", "E": "По 1C",
-        "F": "№\nДоговора", "G": "Дата заключения \nДоговора", "I": "Период\nс (нач.)", "J": "Период\nпо (зав.)",
-        "L": "Сумма\nДоговора", "N": "№ \nСчета", "O": "Дата выстав.\nСчета", "Q": "Код KORT",
+        # Подписи - названия колонок компании из её словаря; перенос строки -
+        # шириной колонки (`wrap_text`), а не знаком в тексте.
+        "B": "Наша Фирма", "C": "Наш Сотрудник", "D": "Заказчик (Название Фирмы)", "E": "По 1C",
+        "F": "№ Договора", "G": "Дата заключения Договора", "I": "Период с (нач.)", "J": "Период по (зав.)",
+        "L": "Сумма Договора", "N": "№ Счета", "O": "Дата выстав. Счета", "Q": "Код KORT",
     }
     row = {cell.column_letter: cell.value for cell in sheet[2] if cell.value is not None}
     assert row["B"] == "BBCS" and row["C"] == "Ануар" and row["D"] == "ИП АЙЯ" and row["E"] == "ИП Айя"
@@ -153,7 +164,7 @@ def test_listy_obshchiy_reestr_vid_i_yurlica() -> None:
 def test_pustoy_vid_list_s_odnoy_shapkoy() -> None:
     book = workbook(bill_template.build([AYA], kind_of=kind))
     assert book.sheetnames == [REG, "Аренда", ABON, "BBCS"]
-    assert book["Аренда"].max_row == 1 and book["Аренда"]["N1"].value == "№ \nСчета"
+    assert book["Аренда"].max_row == 1 and book["Аренда"]["N1"].value == "№ Счета"
 
 
 def fill_sheet(data: bytes, title: str, cells: dict[str, object]) -> bytes:
@@ -331,10 +342,10 @@ def test_net_nomera_net_daty_plokhaya_data() -> None:
     rows = bill_template.parse(data, board())["rows"]
     assert [row["status"] for row in rows] == ["error"] * 4
     assert [row["problem"] for row in rows] == [
-        "«Дата выстав. Счета» - пусто",
-        "Не вписан «№ Счета»",
-        "«Дата выстав. Счета» - не дата: «завтра»",
-        "«№ Счета» не может начинаться с =, + или @",
+        "Дата счёта - пусто",
+        "Не вписан номер счёта",
+        "Дата счёта - не дата: «завтра»",
+        "«№ счёта» не может начинаться с =, + или @",
     ]
     assert all(row["values"] == {} for row in rows), "отказанной строке нечего записывать"
 

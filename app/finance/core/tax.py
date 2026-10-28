@@ -1,13 +1,14 @@
 """Налоговые числа года и режим наших юрлиц по датам.
 
-Числа года (МРП, порог постановки на учёт по НДС в МРП, ставка НДС) по
-умолчанию - Республики Казахстан. Компания может поправить год у себя
-(`TaxYear`): закон о бюджете с новым МРП выходит раньше обновления KORT, а
-следующий год до закона - прогноз.
+Числа года (расчётный показатель - у РК МРП, порог постановки на учёт по НДС
+в показателях, ставка НДС) по умолчанию - из пакета страны компании
+(`app/finance/packs`). Компания может поправить год у себя (`TaxYear`): закон
+о бюджете с новым показателем выходит раньше обновления KORT, а следующий год
+до закона - прогноз.
 
-Режим юрлица - с даты (`EntityTaxPeriod`): общеустановленный или упрощённый,
-плательщик НДС или нет. На специальном режиме плательщиком НДС не бывают -
-так с 2026 года по НК РК, и такую запись система не примет.
+Режим юрлица - с даты (`EntityTaxPeriod`): общеустановленный или специальный,
+плательщик НДС или нет. На каких режимах плательщиком НДС бывают, говорит
+страна; запись против этого система не примет.
 
 Расчёт оборота к порогу и НДС документов - в `core/vat.py` (фаза 7 плана).
 """
@@ -22,14 +23,15 @@ from typing import Any
 import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
-from app.finance import history
+from app.finance import history, packs
 from app.finance.contracts.models import GroupEntity
 from app.finance.contracts.service import Access, Actor
 from app.finance.core.models import TAX_REGIMES, EntityTaxPeriod, TaxYear
 from app.finance.models import Counterparty, Workspace
 from app.finance.service import FinanceError
 
-REGIME_TITLES = {"general": "общеустановленный", "simplified": "упрощённая декларация", "other": "другой специальный"}
+#: Подписи режимов страны по умолчанию - для кода без компании.
+REGIME_TITLES = dict(packs.country().regimes)
 
 
 @dataclass(frozen=True)
@@ -41,7 +43,8 @@ class Year:
     threshold_mrp: int
     vat_rate: Decimal
     forecast: bool = False
-    source: str = "РК"
+    #: Откуда числа: код страны («KZ»), «компания» или «прогноз».
+    source: str = ""
 
     @property
     def threshold(self) -> Decimal:
@@ -59,14 +62,12 @@ class Year:
         }
 
 
-#: Числа РК: МРП - законы о республиканском бюджете; порог и ставка - НК РК
-#: (до 2026 года - 20 000 МРП и 12%, с 01.01.2026 - 10 000 МРП и 16%).
-KZ_YEARS: dict[int, Year] = {
-    2023: Year(2023, Decimal("3450"), 20000, Decimal("12")),
-    2024: Year(2024, Decimal("3692"), 20000, Decimal("12")),
-    2025: Year(2025, Decimal("3932"), 20000, Decimal("12")),
-    2026: Year(2026, Decimal("4325"), 10000, Decimal("16")),
-}
+def country_years(country: packs.Country) -> dict[int, Year]:
+    """Годы по закону страны."""
+    return {
+        year: Year(year, item.unit, item.threshold_units, item.vat_rate, source=country.code)
+        for year, item in country.years.items()
+    }
 
 
 class TaxError(FinanceError):
@@ -89,8 +90,8 @@ def _forecast(year: int, known: dict[int, Year]) -> Year:
 
 
 def years(session: Session, workspace_id: uuid.UUID) -> dict[int, Year]:
-    """Известные годы: РК с поправками компании."""
-    out = dict(KZ_YEARS)
+    """Известные годы: страна компании с поправками компании."""
+    out = country_years(packs.country_of(session.get(Workspace, workspace_id)))
     for row in session.scalars(sa.select(TaxYear).where(TaxYear.workspace_id == workspace_id)):
         out[row.year] = Year(
             row.year, row.mrp, row.vat_threshold_mrp, row.vat_rate, forecast=row.forecast, source="компания"
@@ -160,12 +161,16 @@ def regime_on(session: Session, entity_id: uuid.UUID, day: date, cache: dict[uui
     return current
 
 
+def regime_title(regime: str, country: packs.Country | None = None) -> str:
+    return (country or packs.country()).regimes.get(regime, regime)
+
+
 def period_out(item: EntityTaxPeriod) -> dict[str, Any]:
     return {
         "id": str(item.id),
         "valid_from": item.valid_from.isoformat(),
         "regime": item.regime,
-        "regime_title": REGIME_TITLES.get(item.regime, item.regime),
+        "regime_title": regime_title(item.regime),
         "vat_payer": item.vat_payer,
         "note": item.note,
     }
@@ -183,12 +188,13 @@ def add_period(
         valid_from = date.fromisoformat(str(data["valid_from"]))
     except (KeyError, ValueError) as exc:
         raise TaxError("Нужна дата начала режима") from exc
+    country = packs.country_of(workspace)
     regime = str(data.get("regime") or "general")
-    if regime not in TAX_REGIMES:
-        raise TaxError("Режим: общеустановленный, упрощённая декларация или другой специальный")
+    if regime not in TAX_REGIMES or regime not in country.regimes:
+        raise TaxError("Режим: " + ", ".join(country.regimes[key] for key in TAX_REGIMES if key in country.regimes))
     vat_payer = bool(data.get("vat_payer"))
-    if vat_payer and regime != "general":
-        raise TaxError("На специальном режиме плательщиком НДС не бывают - выберите общеустановленный")
+    if vat_payer and regime not in country.vat_regimes:
+        raise TaxError(country.vat_regime_refusal)
     existing = session.scalar(
         sa.select(EntityTaxPeriod).where(EntityTaxPeriod.entity_id == entity_id, EntityTaxPeriod.valid_from == valid_from)
     )
@@ -203,7 +209,7 @@ def add_period(
     history.write(
         session, workspace, kind="tax.period", entity="group_entity", entity_id=entity_id,
         title=(
-            f"{entity.code or name}: с {valid_from:%d.%m.%Y} - {REGIME_TITLES[regime]}"
+            f"{entity.code or name}: с {valid_from:%d.%m.%Y} - {country.regimes[regime]}"
             + (", плательщик НДС" if vat_payer else ", без НДС")
         ),
         before=before or {}, after=period_out(existing), actor=actor.email,
@@ -232,11 +238,12 @@ def remove_period(
 
 
 __all__ = [
-    "KZ_YEARS",
     "REGIME_TITLES",
     "TaxError",
     "Year",
     "add_period",
+    "country_years",
+    "regime_title",
     "period_out",
     "periods",
     "regime_on",

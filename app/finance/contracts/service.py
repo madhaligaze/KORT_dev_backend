@@ -38,6 +38,7 @@ from app.finance.layout import norm
 from app.finance import history
 from app.finance.accounts_model import FinanceUser
 from app.finance.contracts import views as views_module
+from app.finance import packs
 from app.finance.contracts.fields import (
     CHOICES,
     COMPUTED_FIELDS,
@@ -169,7 +170,7 @@ def _pick_closed(
     """Одно из `items` по напечатанному: точное написание, иначе однозначное начало.
 
     Начало - это «Дей» → «Действующий», «Наталья П.» → «Наталья Петровна»,
-    «Omar» → «Omar Development & Consulting». Кандидатов больше одного - отказ со
+    «Тумар» → «Тумар Сервис». Кандидатов больше одного - отказ со
     списком: выбирать между ними за человека нельзя (правило «не угадывать»).
     """
     needle = key(text)
@@ -206,8 +207,8 @@ def _person_key(value: Any) -> str:
 
 
 def _own_key(value: Any) -> str:
-    # «Omar» - начало «Omar Development», в каком бы виде ни была записана
-    # организационная форма: «ТОО «BBC Astana»» и «BBC Astana» - одно имя.
+    # «Тумар» - начало «Тумар Сервис», в каком бы виде ни была записана
+    # организационная форма: «ТОО «Тумар Офис»» и «Тумар Офис» - одно имя.
     return _ORG_PREFIX.sub("", party_key(value))
 
 
@@ -409,7 +410,7 @@ class Registry:
         return self._rule_fields
 
     def share_departments(self) -> list[uuid.UUID]:
-        """Отделы, долей которых виды показывают сумму договора («Разовые ЮО» - доля ЮО)."""
+        """Отделы, долей которых виды показывают сумму договора (вид отдела ЮО - доля ЮО)."""
         from app.finance.core import views as core_views
 
         found = {
@@ -542,7 +543,7 @@ class Registry:
 
         Опрос `changes` идёт раз в две секунды из каждой открытой вкладки, и
         при любой чужой правке каждая вкладка собирает ответ. Читать ради
-        двух сторон всех контрагентов компании (у BBC их тысячи) - значит
+        двух сторон всех контрагентов компании (на копии прода их тысячи) - значит
         умножить одну правку на число открытых вкладок.
         """
         wanted = {item for item in ids if item}
@@ -658,7 +659,7 @@ class Registry:
             return bucket[key]
         if not create:
             return None
-        meaning = subject_meaning(text) if field_key == "subject" else {}
+        meaning = subject_meaning(text, packs.industry_of(self.workspace)) if field_key == "subject" else {}
         top = max((item.position for item in bucket.values()), default=0)
         value = ListValue(
             workspace_id=self.workspace.id,
@@ -1014,7 +1015,7 @@ def read_money(raw: Any, *, field: str) -> tuple[Decimal | None, str]:
 
 
 #: Слова вокруг даты, которые её не меняют: «до 15.07.2026», «15.07.2026 г.».
-#: В реестре BBC «Планируемый срок» так записан в 35 строках из 415.
+#: В реестре юротдела «Планируемый срок» так записан в 35 строках из 415.
 _DATE_QUALIFIERS = re.compile(
     r"^\s*(?:до|по|с|от|срок|не\s+позднее)\s+|\s*(?:г\.?|года?)\s*$", re.IGNORECASE
 )
@@ -1462,7 +1463,7 @@ class Output:
             for item in registry.fields
             if item.key not in self.access.hidden
         ]
-        # Доля отдела книги («Разовые ЮО» - доля ЮО, `shares.py`) - тем, кому
+        # Доля отдела вида (вид отдела ЮО - доля ЮО, `shares.py`) - тем, кому
         # открыта сумма договора. Модуль долей импортирует этот, поэтому здесь.
         from app.finance.contracts.shares import book_shares
 
@@ -2166,7 +2167,7 @@ def _check_departments_kept(
 
 
 def _label(registry: Registry, key: str, value: Any) -> str:
-    """Значение поля словами - для истории: «BBCA», «500 000», «01.02.2024»."""
+    """Значение поля словами - для истории: «ТС», «500 000», «01.02.2024»."""
     if value in (None, "", []):
         return "-"
     try:
@@ -2390,7 +2391,7 @@ def create(
 
 
 #: «Наша сторона - только наши юрлица» относится к той стороне, где стоит
-#: наше юрлицо. В реестре BBC есть и покупки: в листе «Заказчик ГК» наше ТОО -
+#: наше юрлицо. В реестре юротдела есть и покупки: в листе «Заказчик ГК» наше ТОО -
 #: заказчик, а исполнитель - «Халык Актив». Если напротив уже стоит наше
 #: юрлицо, эта сторона может быть чужой: иначе покупку нельзя было бы завести
 #: руками вовсе.
@@ -2411,7 +2412,7 @@ def _other_own(registry: Registry, contract: Contract, key: str, values: dict[st
     if other not in values:
         return registry.is_own(getattr(contract, COLUMN_OF[other]))
     try:
-        # Тем же поиском, что и сама закрытая сторона: «BBCA», «omar».
+        # Тем же поиском, что и сама закрытая сторона: «ТС», «тумар».
         return registry.pick_own(values[other], title=registry.title(other)) is not None
     except NotInList:
         return False
@@ -2543,7 +2544,7 @@ def _probe_changes(
 ) -> list[str]:
     """Какие из присланных полей стороны и суммы правда меняют значение.
 
-    Сравнение без записи: «BBC» в ячейке, где уже стоит BBC, - не изменение,
+    Сравнение без записи: «ТС» в ячейке, где уже стоит ТС, - не изменение,
     и спрашивать «опечатка или с даты» на нём было бы шумом.
     """
     out: list[str] = []

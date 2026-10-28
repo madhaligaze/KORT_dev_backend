@@ -1,7 +1,7 @@
 """HTTP-маршруты реестра договоров «Финансов» (`/finance/contracts/…`).
 
 Вход и компания - те же, что у раздела (`current_member`, `_workspace` из
-`routes/finance.py`); сюда не импортируется ничего из `app.bbc`.
+`routes/finance.py`); сюда не импортируется ничего из модуля соседнего дашборда.
 
 Что фронт получает на отказ
 ───────────────────────────
@@ -50,7 +50,7 @@ router = APIRouter(prefix="/finance/contracts", tags=["finance-contracts"])
 #: или на правку. Временный пароль (`must_change_password`), продиктованный
 #: по телефону и оставшийся в переписке, не открывает договоры: его
 #: отсекает `require_access` в `routes/finance.py` - одна дверь для всего
-#: раздела, а не проверка по месту (урок дашборда BBC, где её забыли в одном
+#: раздела, а не проверка по месту (урок соседнего дашборда, где её забыли в одном
 #: маршруте). Строки и поля договоров режутся дальше, в сервисе, по `Access`.
 contract_member = require_access("contracts", "view")
 contract_editor = require_access("contracts", "edit")
@@ -161,7 +161,7 @@ def list_payments(member: Member = Depends(contract_member)) -> dict[str, Any]:
 
 
 class SyncIn(BaseModel):
-    #: Откуда строки - для журнала: «Google: BBC Реестр ЮО - Разовые, лист Разовые».
+    #: Откуда строки - для журнала: «Google: Реестр юротдела, лист Разовые».
     source: str = ""
     #: Строки: `{"number": "№ЮО/143", "customer": "ТОО …", "values": {"Статус": "Исполнен", …}}`.
     rows: list[dict[str, Any]]

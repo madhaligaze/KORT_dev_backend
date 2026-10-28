@@ -135,7 +135,7 @@ def _value_label(session: Session, item: ListValue) -> str:
 
 
 def _view_label(session: Session, item: EntityView) -> str:
-    """Лист и вид, чей он: «Остатки (Разовые ЮО)»; у листа реестра - только название."""
+    """Лист и вид, чей он: «Остатки (Разовые договоры отдела)»; у листа реестра - только название."""
     if not item.book:
         return item.title
     from app.finance.core.models import View

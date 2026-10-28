@@ -1,25 +1,26 @@
 """Шаблон счетов Excel: скачать в разделе «Счета», заполнить, загрузить обратно.
 
-Финансисты BBC выставляют счета по своему шаблону Excel («Шаблон Ексель.xlsx»,
-22.10.2026): одна строка - один счёт. Колонки и их порядок - как у них: «Наша
-Фирма», «Наш Сотрудник», «Заказчик», «По 1C», «№ Договора», «Дата заключения
-Договора», «Период с/по», «Сумма Договора» - и жёлтые «№ Счета» и «Дата
-выстав. Счета», которые заполняет человек.
+Финансисты выставляют счета по своему шаблону Excel (22.10.2026): одна строка
+- один счёт. Колонки и их порядок - как у них: наше юрлицо, сотрудник,
+заказчик, имя в 1С, № договора, дата договора, период с/по, сумма - и жёлтые
+номер и дата счёта, которые заполняет человек. Подписи колонок - из словаря
+колонок компании (`core/settings.book_columns`): шапка такая же, как в её
+таблицах; без словаря - общие слова ядра.
 
 В файл идут те же счета, что бот прислал в канал, в том же порядке
 (`bills_bot.listed`). Листы (порядок задал владелец 23.10.2026):
 * «Общий реестр» - все счета вперемешку;
 * «Аренда», «Абонентские услуги» (абонентская плата) - те же счета по виду;
-* по листу на каждое юрлицо («Наша Фирма») - здесь счета и выставляют:
-  жёлтые клетки только тут.
-«№ Счета» и дату общие листы берут с листа юрлица формулой - по скрытому коду
-счёта, а не по адресу клетки: отсортированный лист юрлица не подсунет общему
-реестру чужой номер. Одно и то же дважды заполнять не нужно.
+* по листу на каждое юрлицо - здесь счета и выставляют: жёлтые клетки только
+  тут.
+Номер и дату счёта общие листы берут с листа юрлица формулой - по скрытому
+коду счёта, а не по адресу клетки: отсортированный лист юрлица не подсунет
+общему реестру чужой номер. Одно и то же дважды заполнять не нужно.
 
-Загруженный файл в книги сам не пишет: KORT разбирает его в строки, человек
-видит, что из него вышло, и каждую строку в книгу её юрлица записывает та же
-запись, что у карточки счёта (`POST /bills/{id}` → `bill_book.save`), со всеми
-её проверками.
+Загруженный файл в таблицы сам не пишет: KORT разбирает его в строки, человек
+видит, что из него вышло, и каждую строку в таблицу её юрлица записывает та
+же запись, что у карточки счёта (`POST /bills/{id}` → `bill_book.save`), со
+всеми её проверками.
 
 Разбор - по названиям колонок, а не по буквам: шаблон правят и вставляют в
 него колонки. Строка счёта узнаётся по скрытому «Код KORT», а в шаблоне
@@ -44,6 +45,7 @@ from openpyxl.worksheet.datavalidation import DataValidation
 
 from app.finance.contracts.bill_book import BookError, wanted_values
 from app.finance.contracts.bills import DONE, Bill, Board, read_date
+from app.finance.core.columns import column, with_company_names
 from app.finance.layout import Column, LayoutError, norm, resolve_layout
 
 #: Сколько весит загружаемый шаблон: сотня строк - это десятки килобайт.
@@ -77,20 +79,20 @@ SUMMARY_SHEETS = frozenset({SHEET_TITLE, RENT_SHEET, ABON_SHEET, "Счета", "
 #: Ячейки, по которым формула общего листа ищет счёт на листе юрлица.
 LOOKUP_ROWS = 2000
 
-#: Колонки шаблона: буква, заголовок, ширина - как у финансистов; `field` -
-#: что из счёта туда кладётся.
-LAYOUT: tuple[tuple[str, str, float, str], ...] = (
-    ("B", "Наша\nФирма", 9.3, "own"),
-    ("C", "Наш\nСотрудник", 13.0, "staff"),
-    ("D", "Заказчик\n(Название Фирмы)", 24.4, "customer"),
-    ("E", "По 1C", 22.0, "onec_name"),
-    ("F", "№\nДоговора", 10.6, "number"),
-    ("G", "Дата заключения \nДоговора", 17.9, "signed_at"),
-    ("I", "Период\nс (нач.)", 10.6, "period_from"),
-    ("J", "Период\nпо (зав.)", 10.6, "period_to"),
-    ("L", "Сумма\nДоговора", 14.6, "amount"),
-    ("N", "№ \nСчета", 12.0, "bill_no"),
-    ("O", "Дата выстав.\nСчета", 16.3, "bill_date"),
+#: Колонки шаблона: буква, ширина - как у финансистов; `field` - что из
+#: счёта туда кладётся (ключ ядра), подпись - название колонки у компании.
+LAYOUT: tuple[tuple[str, float, str], ...] = (
+    ("B", 9.3, "own"),
+    ("C", 13.0, "staff"),
+    ("D", 24.4, "customer"),
+    ("E", 22.0, "onec_name"),
+    ("F", 10.6, "number"),
+    ("G", 17.9, "signed_at"),
+    ("I", 10.6, "period_from"),
+    ("J", 10.6, "period_to"),
+    ("L", 14.6, "amount"),
+    ("N", 12.0, "bill_no"),
+    ("O", 16.3, "bill_date"),
 )
 #: Узкие колонки-просветы между блоками - как в шаблоне финансистов.
 GAPS = {"A": 2.7, "H": 4.0, "K": 3.0, "M": 2.9}
@@ -98,18 +100,31 @@ GAPS = {"A": 2.7, "H": 4.0, "K": 3.0, "M": 2.9}
 KORT_COLUMN = "Q"
 KORT_TITLE = "Код KORT"
 
-#: Колонки загружаемого шаблона - только точные названия: из него пишут в книги.
+#: Колонки загружаемого шаблона - ключи ядра, только точные названия: из
+#: него пишут в таблицы.
 COLUMNS: tuple[Column, ...] = (
-    Column("own", "Наша Фирма", ("наша фирма",), strict=True),
-    Column("customer", "Заказчик (Название Фирмы)", ("заказчик (название фирмы)", "заказчик"), strict=True),
-    Column("number", "№ Договора", ("№ договора",), strict=True),
-    Column("period_from", "Период с (нач.)", ("период с (нач.)", "период с"), required=False, strict=True),
-    Column("bill_no", "№ Счета", ("№ счета",), strict=True),
-    Column("bill_date", "Дата выстав. Счета", ("дата выстав. счета", "дата выставления счета"), strict=True),
-    Column("bill_period", "Счет за Период (Коммент)", ("счет за период (коммент)",), required=False, strict=True),
-    Column("note", "Доп. Коммент.", ("доп. коммент.",), required=False, strict=True),
+    column("own", required=True),
+    column("customer", required=True),
+    column("number", required=True),
+    column("period_from"),
+    column("bill_no", required=True),
+    column("bill_date", required=True),
+    column("bill_period"),
+    column("note"),
     Column("kort", KORT_TITLE, ("код kort",), required=False, strict=True),
 )
+
+
+def columns_for(words: dict[str, list[str]] | None = None) -> tuple[Column, ...]:
+    """Колонки шаблона с названиями компании - тот же словарь, что у её таблиц."""
+    return with_company_names(COLUMNS, words) if words else COLUMNS
+
+
+def _titles(words: dict[str, list[str]] | None) -> dict[str, str]:
+    """Подписи колонок шапки: название у компании, иначе общие слова ядра."""
+    keys = [name for _, _, name in LAYOUT]
+    return {item.key: item.title for item in with_company_names([column(key) for key in keys], words or {})}
+
 
 #: Что со строкой файла: записать, уже в книге, не заполнена, отказ.
 READY = "ready"
@@ -141,7 +156,7 @@ def _cell_value(bill: Bill, name: str) -> Any:
 
 
 def _quoted(title: str) -> str:
-    """Имя листа в формуле: «'BBC Omar'»."""
+    """Имя листа в формуле: «'ТМС Плюс'»."""
     return "'" + title.replace("'", "''") + "'"
 
 
@@ -172,13 +187,13 @@ def _firm_titles(items: Sequence[Bill]) -> dict[str, str]:
     return out
 
 
-def _fill(sheet: Any, items: Sequence[Bill], sources: dict[str, str] | None) -> None:
+def _fill(sheet: Any, items: Sequence[Bill], sources: dict[str, str] | None, titles: dict[str, str]) -> None:
     """Лист шаблона. `sources` - юрлицо → лист, откуда тянуть № и дату; `None` - их вписывают здесь."""
     bold = Font(bold=True)
     head = Alignment(wrap_text=True, vertical="center")
-    for letter, title, width, _ in LAYOUT:
+    for letter, width, name in LAYOUT:
         top = sheet[f"{letter}1"]
-        top.value, top.font, top.alignment = title, bold, head
+        top.value, top.font, top.alignment = titles[name], bold, head
         sheet.column_dimensions[letter].width = width
     for letter, width in GAPS.items():
         sheet.column_dimensions[letter].width = width
@@ -196,7 +211,7 @@ def _fill(sheet: Any, items: Sequence[Bill], sources: dict[str, str] | None) -> 
     last = 1
     for last, bill in enumerate(items, start=2):
         sheet[f"{KORT_COLUMN}{last}"].value = bill.id
-        for letter, _, _, name in LAYOUT:
+        for letter, _, name in LAYOUT:
             cell = sheet[f"{letter}{last}"]
             if name in ("bill_no", "bill_date"):
                 if sources is None:
@@ -216,31 +231,37 @@ def _fill(sheet: Any, items: Sequence[Bill], sources: dict[str, str] | None) -> 
             operator="greaterThan",
             formula1="DATE(2020,1,1)",
             showErrorMessage=True,
-            errorTitle="Дата выстав. Счета",
+            errorTitle=titles["bill_date"],
             error="Впишите дату счёта: 22.10.2026",
         )
         rule.add(f"O2:O{last}")
         sheet.add_data_validation(rule)
 
 
-def build(items: Sequence[Bill], kind_of: Callable[[Bill], str | None] = lambda bill: None) -> bytes:
+def build(
+    items: Sequence[Bill],
+    kind_of: Callable[[Bill], str | None] = lambda bill: None,
+    words: dict[str, list[str]] | None = None,
+) -> bytes:
     """Шаблон: «Общий реестр», «Аренда», «Абонентские услуги» и лист на каждое юрлицо.
 
     `kind_of` - лист вида счёта (`RENT_SHEET`, `ABON_SHEET`) или `None`: «без
     вида услуги» есть только в общем реестре и на листе своего юрлица.
+    `words` - словарь колонок компании: подписи шапки.
     """
+    titles = _titles(words)
     book = Workbook()
     # Формулы общих листов посчитать при открытии: своих значений у них в файле нет.
     book.calculation.fullCalcOnLoad = True
     firms = _firm_titles(items)
     summary = book.active
     summary.title = SHEET_TITLE
-    _fill(summary, items, firms)
+    _fill(summary, items, firms, titles)
     # Порядок листов один и тот же каждый день: аренды нет - лист с одной шапкой.
     for title in (RENT_SHEET, ABON_SHEET):
-        _fill(book.create_sheet(title), [bill for bill in items if kind_of(bill) == title], firms)
+        _fill(book.create_sheet(title), [bill for bill in items if kind_of(bill) == title], firms, titles)
     for own, title in firms.items():
-        _fill(book.create_sheet(title), [bill for bill in items if bill.own == own], None)
+        _fill(book.create_sheet(title), [bill for bill in items if bill.own == own], None, titles)
     out = io.BytesIO()
     book.save(out)
     return out.getvalue()
@@ -319,22 +340,23 @@ def _date(value: Any) -> date | None:
         return None
 
 
-def _find(sheet: Any) -> tuple[int, dict[str, int], list[tuple[Any, ...]]]:
-    """Строка шапки, колонки по названиям и строки под шапкой."""
+def _find(sheet: Any, columns: Sequence[Column] = COLUMNS) -> tuple[int, dict[str, int], list[tuple[Any, ...]]]:
+    """Строка шапки, колонки по названиям и строки под шапкой. Шапка - строка с колонкой номера счёта."""
+    bill_no = next(item for item in columns if item.key == "bill_no")
     rows = []
     for row in sheet.iter_rows(values_only=True, max_row=HEADER_SEARCH + MAX_ROWS):
         rows.append(tuple(row))
     for number, row in enumerate(rows[:HEADER_SEARCH]):
         header = [_text(cell) for cell in row]
-        if not any(norm(cell) in ("№ счета",) for cell in header):
+        if not any(bill_no.matches_exact(cell) for cell in header):
             continue
         try:
-            layout = resolve_layout(sheet.title, COLUMNS, header)
+            layout = resolve_layout(sheet.title, columns, header)
         except LayoutError as exc:
             raise TemplateError(f"Шапку шаблона не разобрать: {exc}") from exc
         columns = {key: placement.index for key, placement in layout.placements.items() if placement.index is not None}
         return number, columns, rows[number + 1 :]
-    raise TemplateError("В файле нет шапки шаблона - колонки «№ Счета» не нашлось")
+    raise TemplateError(f"В файле нет шапки шаблона - колонки «{bill_no.title}» не нашлось")
 
 
 @dataclass
@@ -448,11 +470,11 @@ def _read_row(
         return row
     issued = _date(raw_date)
     if not bill_no:
-        row.fail("Не вписан «№ Счета»")
+        row.fail("Не вписан номер счёта")
         return row
     if issued is None:
         raw = _text(raw_date)
-        row.fail("«Дата выстав. Счета» - " + (f"не дата: «{raw}»" if raw else "пусто"))
+        row.fail("Дата счёта - " + (f"не дата: «{raw}»" if raw else "пусто"))
         return row
     values = {"bill_no": bill_no, "bill_date": issued.isoformat()}
     for key in ("bill_period", "note"):
@@ -536,8 +558,10 @@ def _merge(rows: list[Row]) -> list[Row]:
     return out
 
 
-def parse(data: bytes, board: Board) -> dict[str, Any]:
-    """Строки заполненного шаблона - с тем, что делать с каждой. В книги не пишет.
+def parse(data: bytes, board: Board, words: dict[str, list[str]] | None = None) -> dict[str, Any]:
+    """Строки заполненного шаблона - с тем, что делать с каждой. В таблицы не пишет.
+
+    `words` - словарь колонок компании: шапку её шаблона знает компания.
 
     `rows` - счета файла по порядку: счёт с нескольких листов - одной строкой
     (`_merge`), пустые строки листа пропущены. `counts` - сколько их в каждом
@@ -549,7 +573,7 @@ def parse(data: bytes, board: Board) -> dict[str, Any]:
         reasons: list[tuple[str, str]] = []
         for sheet in book.worksheets:
             try:
-                header_row, columns, lines = _find(sheet)
+                header_row, columns, lines = _find(sheet, columns_for(words))
             except TemplateError as exc:
                 reasons.append((sheet.title, str(exc)))
                 continue

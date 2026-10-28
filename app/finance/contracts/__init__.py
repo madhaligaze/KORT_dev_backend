@@ -5,5 +5,5 @@
 модели - в `models.py`. План работ - `~/.claude/plans/…axolotl.md`.
 
 Пакет живёт внутри `app.finance` и подчиняется тем же правилам изоляции:
-`app.bbc` не импортируется (проверяет `tests/test_finance_isolated.py`).
+модуль соседнего дашборда не импортируется (проверяет `tests/test_finance_isolated.py`).
 """

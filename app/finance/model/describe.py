@@ -1,6 +1,7 @@
 """Описать - схема компании для фронта: что есть и что из этого можно.
 
-Фронт рисует по этому ответу, а не по зашитому коду: поля договора с типами,
+Фронт рисует по этому ответу, а не по зашитому коду: пакеты компании (страна
+- номер участника и валюта, отрасль), поля договора с типами,
 смыслами значений и правом правки; меры и источники видов с их
 группировками и параметрами; виды, которые человек видит, - какие в колонке,
 какие он может править; наши юрлица и отделы; команды «применить» и
@@ -10,6 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.finance import packs
 from app.finance.core import views as views_module
 from app.finance.model import VERSION
 from app.finance.model.commands import COMMANDS, VIEW_COMMANDS
@@ -53,6 +55,7 @@ def describe(ctx: Ctx) -> dict[str, Any]:
     return {
         "version": VERSION,
         "company": {"id": str(ctx.workspace.id), "title": ctx.workspace.title or ""},
+        "packs": packs.out(ctx.workspace),
         "today": _today(),
         "me": {
             "user_id": str(ctx.viewer.user_id) if ctx.viewer.user_id else None,

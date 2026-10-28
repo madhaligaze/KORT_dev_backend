@@ -3,7 +3,7 @@
 Акт выполненных работ (АВР) и электронный счёт-фактура (ЭСФ) - события месяца
 договора, как счёт и оплата. Где они сейчас: в 1С юрлица (реализация с датой
 подписания покупателем, счёт-фактура, ЭСФ со статусом ИС ЭСФ), в книге-сводке
-(«АВР (наша)», «Сумма (наша)», №, дата, «АВР (клиент принял)», «ЭСФ (отпр.)»),
+(АВР выписан, сумма, №, дата, АВР принят клиентом, ЭСФ отправлен),
 а позже - в самом KORT (документы `act` и `esf`, источник KORT).
 
 Один АВР на договор и месяц - по приоритету источника: KORT, потом 1С, потом
@@ -18,7 +18,7 @@
 при запросе: таблица в журнал пока не проводится.
 
 Из того же - три списка работы: АВР не подписан клиентом; АВР без ЭСФ дольше
-срока выписки ЭСФ (`ESF_DAYS` календарных дней после оборота - срок НК РК);
+срока выписки ЭСФ (календарных дней после оборота - срок страны компании, `packs`);
 месяц начислен, а АВР нет ни в одном источнике.
 """
 from __future__ import annotations
@@ -38,14 +38,16 @@ from app.finance.contracts.service import Access
 from app.finance.core import journal
 from app.finance.core.accruals import month_key, month_start
 from app.finance.core.models import Fact
+from app.finance import packs
 from app.finance.models import Workspace
 from app.finance.onec.models import OnecBase
 
 #: Порядок источников АВР: первый найденный - правда месяца.
 SOURCES = ("kort", "1c", "book")
 SOURCE_TITLES = {"kort": "KORT", "1c": "1С", "book": "таблица"}
-#: Срок выписки ЭСФ после даты оборота, календарных дней (НК РК).
-ESF_DAYS = 15
+#: Срок выписки ЭСФ после даты оборота, календарных дней - страны по умолчанию.
+#: У компании - срок её страны (`Acts.esf_days`).
+ESF_DAYS = packs.country().esf_days
 #: Чем АВР 1С и книги расходятся.
 CODES = ("act_no_book", "act_no_1c", "act_amount", "act_signed", "esf")
 CODE_TITLES = {
@@ -152,6 +154,7 @@ class Acts:
         self.session = session
         self.workspace = workspace
         self.today = today
+        self.esf_days = packs.country_of(workspace).esf_days
         self.months: dict[uuid.UUID, dict[str, MonthActs]] = defaultdict(dict)
         #: Наши юрлица, у которых подключена база 1С: у них 1С сверяется с книгой.
         self.onec_entities: set[uuid.UUID] = set()
@@ -277,7 +280,7 @@ class Acts:
     ) -> dict[str, Any]:
         """1С против таблицы по договору и месяцу - у юрлиц с подключённой 1С.
 
-        Юрлицо месяца - «Наша Фирма» строки таблицы, иначе исполнитель договора:
+        Юрлицо месяца - код нашего юрлица в строке таблицы, иначе исполнитель договора:
         месяцы до перевода клиента сверяются с 1С прежнего ТОО. `entity` -
         только месяцы этого юрлица (как считает «Переход»).
         """
@@ -327,7 +330,7 @@ class Acts:
         unsigned: list[dict[str, Any]] = []
         no_esf: list[dict[str, Any]] = []
         missing: list[dict[str, Any]] = []
-        esf_due = self.today - timedelta(days=ESF_DAYS)
+        esf_due = self.today - timedelta(days=self.esf_days)
         for contract_id, months in self.months.items():
             if contract_id not in contracts:
                 continue
@@ -338,7 +341,7 @@ class Acts:
                 if not act.is_signed and act.day is not None and act.day <= self.today:
                     unsigned.append({"contract_id": str(contract_id), "act": act.out(), "days": (self.today - act.day).days})
                 if not act.has_esf and act.day is not None and act.day < esf_due:
-                    no_esf.append({"contract_id": str(contract_id), "act": act.out(), "days": (self.today - act.day).days - ESF_DAYS})
+                    no_esf.append({"contract_id": str(contract_id), "act": act.out(), "days": (self.today - act.day).days - self.esf_days})
         for contract_id, months in accrued.items():
             have = self.months.get(contract_id, {})
             for month in sorted(months):

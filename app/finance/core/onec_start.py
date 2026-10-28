@@ -31,7 +31,7 @@
    (`onec/balances.py`, `take_balances`): та же ведомость, без выгрузки.
 5. **Оплаты** - поступления 1С становятся источником оплат юрлица.
 
-Слов BBC модуль не знает: всё - из документов 1С и стандартного отчёта.
+Слов одной компании модуль не знает: всё - из документов 1С и стандартного отчёта.
 """
 from __future__ import annotations
 
@@ -51,7 +51,7 @@ from app.finance.contracts import setup as contracts_setup
 from app.finance.contracts.fields import number_key, party_key
 from app.finance.contracts.models import Contract, GroupEntity
 from app.finance.contracts.service import Access, Actor, Registry
-from app.finance.core import bin as bins
+from app.finance import packs
 from app.finance.core import opening as opening_module
 from app.finance.core import settings as core_settings
 from app.finance.core.accruals import month_key, month_start, periods
@@ -145,7 +145,7 @@ class Act:
 
     @property
     def monthly(self) -> bool:
-        """Период ровно в месяц - с любого числа: у BBC «с 20.05 по 19.06», у аренды «с 01.06 по 30.06»."""
+        """Период ровно в месяц - с любого числа: у услуг на копии прода «с 20.05 по 19.06», у аренды «с 01.06 по 30.06»."""
         if not self.start or not self.end:
             return False
         return next(periods(self.start, self.start.day)) == (self.start, self.end)
@@ -251,7 +251,7 @@ def shape(draft: Draft, today: date) -> None:
     """Условия договора по его актам: как начислять, сумма, смены суммы, паузы, конец.
 
     Ряд - по месяцам начала периодов: АВР за период ровно в месяц (с любого
-    числа - у BBC периоды «с 20.05 по 19.06»), а где АВР ещё нет - счёт на
+    числа - на копии прода периоды «с 20.05 по 19.06»), а где АВР ещё нет - счёт на
     оплату за такой период. Аренда с 01.09 к 25.10 знает один АВР (сентябрь) и
     счёт за октябрь - это уже ряд «в месяц». Начало начислений, смены суммы и
     конец - настоящие даты периодов, а не первые числа. Договор без АВР -
@@ -306,7 +306,7 @@ def shape(draft: Draft, today: date) -> None:
         # Акт периода выписывают после его конца: за период, кончившийся в
         # прошлом месяце, акта ещё может не быть. Последний период кончился
         # раньше прошлого месяца - ряд кончился, и KORT спросит, закончился ли
-        # договор. По концу периода, а не по началу: у BBC период 20.08-19.09
+        # договор. По концу периода, а не по началу: на копии прода период 20.08-19.09
         # к 27.10 - живой ряд, а по началу (август) выглядел оборванным.
         due = month_start(month_key(today))
         due = date(due.year - (due.month == 1), (due.month - 2) % 12 + 1, 1)
@@ -336,9 +336,9 @@ class Source:
     matched: dict[str, uuid.UUID]
 
 
-def _party_key_of(doc: OnecDocument) -> str:
-    number = bins.digits(doc.party_bin)
-    return f"bin:{number}" if bins.checksum_ok(number) else f"ref:{doc.party_ref or party_key(doc.party_name)}"
+def _party_key_of(doc: OnecDocument, ids: packs.Ids) -> str:
+    number = packs.digits(doc.party_bin)
+    return f"bin:{number}" if ids.checksum_ok(number) else f"ref:{doc.party_ref or party_key(doc.party_name)}"
 
 
 def read_source(session: Session, workspace: Workspace, base: OnecBase, *, today: date) -> Source:
@@ -351,12 +351,13 @@ def read_source(session: Session, workspace: Workspace, base: OnecBase, *, today
     )
     entity_id = base.group_entity_id
     index = onec_match.build_index(session, workspace.id)
+    ids = packs.country_of(workspace).ids
     parties: dict[str, Party] = {}
     by_ref: dict[str, str] = {}
     for doc in docs:
         if not doc.party_ref and not doc.party_name:
             continue
-        key = _party_key_of(doc)
+        key = _party_key_of(doc, ids)
         party = parties.setdefault(key, Party(key=key, bin=key[4:] if key.startswith("bin:") else ""))
         if doc.party_name:
             party.names[doc.party_name.strip()] += 1
@@ -366,7 +367,7 @@ def read_source(session: Session, workspace: Workspace, base: OnecBase, *, today
             party.refs.add(doc.party_ref)
             by_ref[doc.party_ref] = key
     # Написание, общее для нескольких карточек 1С, сторону не называет: в живой
-    # 1С:Fresh BBC у пяти клиентов полное имя - «Филиал "Южная столица" АО
+    # В живой 1С:Fresh у пяти клиентов полное имя - «Филиал "Южная столица" АО
     # "Kaspi Bank"» (банк-посредник Kaspi Pay). Записанное каждому, оно делало
     # их всех спорными, и их договоры не заводились (27.10.2026).
     holders: dict[str, set[str]] = {}
@@ -390,7 +391,7 @@ def read_source(session: Session, workspace: Workspace, base: OnecBase, *, today
         if doc.kind not in ("sale", "invoice", "payment", *PURCHASE_KINDS):
             continue
         side = "purchase" if doc.kind in PURCHASE_KINDS else "sale"
-        key_party = _party_key_of(doc)
+        key_party = _party_key_of(doc, ids)
         # «Основной договор» продажи и покупки у одного контрагента - разные договоры.
         main = f"main:{key_party}" if side == "sale" else f"main:buy:{key_party}"
         contract_key = doc.contract_ref if doc.contract_ref and doc.contract_number else main
@@ -572,8 +573,9 @@ def add_entity(session: Session, workspace: Workspace, access: Access, actor: Ac
     base = _base(session, workspace, base_id)
     if base.group_entity_id:
         return {"done": 0, "id": str(base.group_entity_id)}
-    number = bins.digits(base.organization_bin)
-    owner = _owner_of_bin(session, workspace, number) if bins.checksum_ok(number) else None
+    ids = packs.country_of(workspace).ids
+    number = packs.digits(base.organization_bin)
+    owner = _owner_of_bin(session, workspace, number) if ids.checksum_ok(number) else None
     if owner is not None and session.get(GroupEntity, owner.id) is not None:
         base.group_entity_id = owner.id
         session.flush()
@@ -581,7 +583,7 @@ def add_entity(session: Session, workspace: Workspace, access: Access, actor: Ac
     name = (base.organization_name or "").strip()
     if not name:
         raise StartError("В базе 1С у организации нет названия - заведите юрлицо в «Участниках»")
-    entity = contracts_setup.add_entity(session, workspace, name=name, bin=number if bins.checksum_ok(number) else "")
+    entity = contracts_setup.add_entity(session, workspace, name=name, bin=number if ids.checksum_ok(number) else "")
     base.group_entity_id = entity.counterparty_id
     session.flush()
     history.write(
@@ -612,13 +614,13 @@ def add_participants(session: Session, workspace: Workspace, access: Access, act
                 counts["dispute"] += 1
                 continue
             if party.bin and not target.bin:
-                target.bin, target.kind = party.bin, bins.kind_of(party.bin, target.name)
+                target.bin, target.kind = party.bin, packs.country_of(workspace).ids.kind_of(party.bin, target.name)
             if party.full_name and not getattr(target, "full_name", ""):
                 target.full_name = party.full_name
             party.party_id = target.id
         elif party.action == "bin":
             target = registry.parties[party.party_id]
-            target.bin, target.kind = party.bin, bins.kind_of(party.bin, target.name)
+            target.bin, target.kind = party.bin, packs.country_of(workspace).ids.kind_of(party.bin, target.name)
         assert party.party_id is not None
         for name in list(party.names) + list(party.full_names):
             participants.remember(session, workspace, party.party_id, name, source="1c")
@@ -834,7 +836,7 @@ def accrual_openings(
 
     Остаток 1С на день - проводки до него, а KORT ведёт и начисления, и АВР по
     месяцу начала периода и засчитывает в учёт оплату до начала учёта, если
-    она за месяц учёта. Расходятся три вещи (живая 1С:Fresh BBC, 27.10.2026):
+    она за месяц учёта. Расходятся три вещи (живая 1С:Fresh, 27.10.2026):
 
     * АВР за период, начавшийся до начала учёта, проведён после него (акт за
       20.05-19.06 датирован 30.06): в остатке его нет, а KORT относит месяц к

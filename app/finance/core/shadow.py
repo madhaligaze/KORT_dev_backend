@@ -188,7 +188,7 @@ class EntityTally:
 
 
 def month_owner(contract: Contract, kort: Any = None, book: BookMonth | None = None) -> uuid.UUID | None:
-    """Наше юрлицо месяца договора: исполнитель начисления, иначе «Наша Фирма» строки таблицы, иначе договора."""
+    """Наше юрлицо месяца договора: исполнитель начисления, иначе код юрлица в строке таблицы, иначе договора."""
     executor = getattr(kort, "executor_id", None) or getattr(kort, "executor", None)
     if executor:
         return executor
@@ -1039,7 +1039,7 @@ class Reconciler:
     # ── Выдача ───────────────────────────────────────────────────────────────
 
     def party_label(self, party_id: uuid.UUID | None) -> str:
-        """Наше юрлицо - кодом («BBCL»), остальные - именем."""
+        """Наше юрлицо - кодом («ТС»), остальные - именем."""
         if party_id is None:
             return ""
         return self.codes.get(party_id) or self.names.get(party_id, "")

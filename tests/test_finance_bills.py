@@ -44,6 +44,15 @@ from app.finance.contracts.models import BillNotice
 from app.finance.db import finance_session
 from app.finance.support_bot import TelegramError
 
+import company_layer
+
+
+@pytest.fixture(autouse=True)
+def _company_layer(monkeypatch):
+    """Компания теста - с шапкой таблиц копии прода: её знает словарь компании, а не ядро (п.9 «Пакеты»)."""
+    company_layer.everywhere(monkeypatch)
+
+
 BASE = "/api/v1/finance"
 PASSWORD = "pass-12345"
 CHAT = "@bbc_bills"
@@ -182,11 +191,12 @@ def test_kniga_razbiraetsya_po_nazvaniyam() -> None:
     assert {bill.text for bill in board.of(bills.UNDATED)} == {"", "FALSE"}
     assert board.find(adk.id) is adk and board.find(done.id) is done and len(adk.id) == 12
 
-    # В книгу вставили колонку перед «Счет»: читается то же самое.
+    # В книгу вставили колонку перед «Счет»: читается то же самое. Позиций у
+    # колонок нет (п.9 «Пакеты»: позиции - таблица компании, а не ядро) -
+    # колонка находится по названию, и строки «колонка переехала» больше нет.
     shifted = [line[:5] + ["вставили"] + line[5:] for line in SHEET]
     again = bills.build_board(shifted, title="", worksheet="Сводка все ЮР лица")
     assert [bill.out()["text"] for bill in again.bills] == [bill.out()["text"] for bill in board.bills]
-    assert "«Счет»" in again.drift
 
 
 def test_bez_kolonok_scheta_list_chitaetsya() -> None:
@@ -467,7 +477,7 @@ def fresh() -> None:
     with bills._guard:
         slots = list(bills._slots.values())
     for slot in slots:
-        board = bills._read(*slot.source[:2])
+        board = bills._read(*slot.source[:2], extra=slot.extra)
         with bills._guard:
             slot.board, slot.at = board, time.monotonic()
 
@@ -1130,7 +1140,7 @@ def test_shablon_scheta_razdela(app: FastAPI, book, books, monkeypatch) -> None:
     assert parsed.status_code == 200, parsed.text
     by_name = {row["customer"]: row for row in parsed.json()["rows"]}
     assert parsed.json()["counts"] == {"ready": 2, "same": 0, "empty": 4, "error": 1}
-    assert by_name["ИП АЙЯ"]["problem"] == "«Дата выстав. Счета» - пусто"
+    assert by_name["ИП АЙЯ"]["problem"] == "Дата счёта - пусто"
     kenesary, trade = by_name["ТОО KENESARY AGRO"], by_name["ТОО Custom Trade"]
     assert kenesary["values"] == {"bill_no": "312", "bill_date": "2026-10-22"}
     assert kenesary["defaults"] == {"bill_period": "с 22.10.2026 года по 21.11.2026 года"}

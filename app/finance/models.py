@@ -153,6 +153,10 @@ class Workspace(FinanceBase):
     #: Валюта, в которой сходятся отчёты. Меняется только пересчётом всех
     #: операций, поэтому пишется один раз при создании пространства.
     base_currency: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("'KZT'"))
+    #: Пакеты компании (`app/finance/packs`): страна - номер участника, налоговые
+    #: числа, срок ЭСФ; отрасль - поля реестра, статусы, виды.
+    country: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("'KZ'"))
+    industry: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("'services'"))
     created_at: Mapped[datetime] = mapped_column(
         sa.DateTime(timezone=True), server_default=sa.func.now()
     )

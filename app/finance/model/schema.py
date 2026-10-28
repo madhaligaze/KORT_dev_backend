@@ -136,6 +136,8 @@ class ChangesOut(_Out):
 class DescribeOut(_Out):
     version: str
     company: dict[str, Any]
+    #: Пакеты компании: страна (код, номер участника, валюта) и отрасль - с 1.1.
+    packs: dict[str, Any]
     me: dict[str, Any]
     views: list[dict[str, Any]]
     sources: dict[str, Any]

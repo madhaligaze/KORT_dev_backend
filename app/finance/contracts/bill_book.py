@@ -1,34 +1,36 @@
-"""Карточка счёта: строка книги юрлица, где счёт отмечают, - чтение и запись.
+"""Карточка счёта: строка таблицы юрлица, где счёт отмечают, - чтение и запись.
 
 Где живёт отметка
 ─────────────────
-Сводку («Сводка все ЮР лица») собирает формула из книг девяти юрлиц. В каждой
-книге вкладка «… Сводка все» - тоже формула: она складывает помесячные вкладки
-(«Старые…», «Июнь» … «Октябрь»), данные с 4-й строки, шапка - во 2-й. Руками
-вводят только в помесячные вкладки - туда KORT и пишет. Какие книги и вкладки,
-KORT берёт из самих формул (`IMPORTRANGE` сводки и `{'Июнь'!$A4:$BF; …}`
-книги), а не из списка в коде: добавят «Ноябрь» в формулу - KORT увидит его сам.
+Сводную таблицу компании собирает формула из таблиц её юрлиц (`IMPORTRANGE`).
+В каждой таблице юрлица своя вкладка-сводка - тоже формула: она складывает
+помесячные вкладки, данные с 4-й строки, шапка - во 2-й. Руками вводят только
+в помесячные вкладки - туда KORT и пишет. Какие таблицы и вкладки, KORT берёт
+из самих формул (`IMPORTRANGE` сводной и `{'Июнь'!$A4:$BF; …}` таблицы
+юрлица), а не из списка в коде: добавят «Ноябрь» в формулу - KORT увидит его
+сам. Колонки - ключи ядра (`core/columns.py`) под названиями из словаря
+колонок компании: шапку её таблиц знает компания, а не код.
 
 Что пишется
 ───────────
-Галочку «Счет» книга считает сама: `ARRAYFORMULA` в 3-й строке ставит TRUE
-каждой строке, где заполнен «№ Счета» (так во всех книгах на 22.10.2026).
-Записать TRUE в «Счет» - значит сломать эту формулу на всю колонку. Поэтому
-KORT пишет туда же, куда человек: «№ Счета», «Дата выстав. Счета», «Счет за
-Период (Коммент)», «Доп. Коммент.». Снять отметку - стереть «№ Счета».
+Отметку «счёт выставлен» таблица считает сама: `ARRAYFORMULA` в 3-й строке
+ставит TRUE каждой строке, где заполнен номер счёта (так во всех таблицах на
+22.10.2026). Записать TRUE в отметку - значит сломать эту формулу на всю
+колонку. Поэтому KORT пишет туда же, куда человек: номер счёта, дата счёта,
+«счёт за период», комментарий. Снять отметку - стереть номер счёта.
 
 Почему так осторожно
 ────────────────────
-Книги ведут руками, и это деньги. Правила записи:
+Таблицы ведут руками, и это деньги. Правила записи:
 * Строка - по ключу (юрлицо, клиент, № договора, месяц), а не по номеру:
   строки вставляют и сортируют. Совпадение должно быть ровно одно, иначе отказ.
 * Колонки - по точным названиям шапки. Над ними в шапке не должно быть формулы
   (`ARRAYFORMULA` залила бы колонку), а в самой ячейке - ни формулы, ни
   разлива чужого массива.
-* Пишется только изменённое поле и только если в книге оно всё ещё такое, каким
-  его показала карточка: иначе книгу правили параллельно, и KORT не затирает
-  чужую правку, а отказывает.
-* Запись - одним `batchUpdate`: в книге либо всё, либо ничего.
+* Пишется только изменённое поле и только если в таблице оно всё ещё такое,
+  каким его показала карточка: иначе таблицу правили параллельно, и KORT не
+  затирает чужую правку, а отказывает.
+* Запись - одним `batchUpdate`: в таблице либо всё, либо ничего.
 * После записи строка читается заново: ключ на месте, значения записались,
   формулы 3-й строки целы. Не так - KORT возвращает прежние значения и говорит,
   что случилось.
@@ -46,6 +48,7 @@ from typing import Any, Protocol, Sequence
 
 from app.finance import google
 from app.finance.contracts.bills import bill_key
+from app.finance.core.columns import column, with_company_names
 from app.finance.layout import Column, LayoutError, norm, resolve_layout
 
 log = logging.getLogger(__name__)
@@ -66,25 +69,34 @@ EPOCH = date(1899, 12, 30)
 #: Поля карточки, которые KORT пишет в книгу.
 FIELDS = ("bill_no", "bill_date", "bill_period", "note")
 
-#: Колонки помесячной вкладки. `hint` - где стояли 22.10.2026 (A=0).
+#: Колонки помесячной вкладки - ключи ядра, только точные названия: сюда пишут.
+#: «bill» - отметка «счёт выставлен» (в ядре `bill_state`).
 TAB_COLUMNS: tuple[Column, ...] = (
-    Column("own", "Наша Фирма", ("наша фирма",), hint=4, strict=True),
-    Column("customer", "Заказчик (Название Фирмы)", ("заказчик (название фирмы)",), hint=7, strict=True),
-    Column("number", "№ Договора", ("№ договора",), hint=15, strict=True),
-    Column("month", "Техн. 1", ("техн. 1",), hint=2, strict=True),
-    Column("bill", "Счет", ("счет",), hint=23, strict=True),
-    Column("bill_period", "Счет за Период (Коммент)", ("счет за период (коммент)",), hint=24, strict=True),
-    Column("bill_no", "№ Счета", ("№ счета",), hint=25, strict=True),
-    Column("bill_date", "Дата выстав. Счета", ("дата выстав. счета",), hint=26, strict=True),
-    Column("note", "Доп. Коммент.", ("доп. коммент.",), hint=19, strict=True),
+    column("own", required=True),
+    column("customer", required=True),
+    column("number", required=True),
+    column("month", required=True),
+    column("bill", core="bill_state", required=True),
+    column("bill_period", required=True),
+    column("bill_no", required=True),
+    column("bill_date", required=True),
+    column("note", required=True),
 )
+#: Ключ колонки здесь → ключ ядра в словаре колонок компании, где они разные.
+CORE_KEYS = {"bill": "bill_state"}
 KEY_FIELDS = ("own", "customer", "number", "month")
-TITLES = {
-    "bill_no": "№ Счета",
-    "bill_date": "Дата выстав. Счета",
-    "bill_period": "Счет за Период (Коммент)",
-    "note": "Доп. Коммент.",
-}
+#: Подписи полей карточки общими словами; у компании - её названия (`Book.titles`).
+TITLES = {column.key: column.title for column in TAB_COLUMNS if column.key in ("bill_no", "bill_date", "bill_period", "note")}
+
+
+def words_key(extra: dict[str, list[str]] | None) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """Словарь колонок компании - частью ключа сводной: другой словарь - таблицы читаются заново."""
+    return tuple(sorted((key, tuple(names)) for key, names in (extra or {}).items()))
+
+
+def tab_columns(words: Sequence[tuple[str, Sequence[str]]] = ()) -> tuple[Column, ...]:
+    return with_company_names(TAB_COLUMNS, {key: list(names) for key, names in words}, CORE_KEYS)
+
 
 #: Сколько знаков принимает поле: номер - короткий, комментарии - строкой.
 LIMITS = {"bill_no": 40, "bill_period": 300, "note": 300}
@@ -300,6 +312,11 @@ class Book:
     spreadsheet_id: str
     title: str
     tabs: tuple[Tab, ...]
+    #: Колонки вкладок с названиями компании.
+    columns: tuple[Column, ...] = TAB_COLUMNS
+
+    def title_of(self, name: str) -> str:
+        return next((item.title for item in self.columns if item.key == name), TITLES.get(name, name))
 
 
 @dataclass
@@ -312,15 +329,15 @@ class _Sources:
     missing: set[str] = field(default_factory=set)
 
 
-_sources: dict[tuple[str, str], _Sources] = {}
+_sources: dict[tuple[Any, ...], _Sources] = {}
 _sources_guard = threading.Lock()
 _row_locks: dict[str, threading.Lock] = {}
 
 
-def _layout(tab: str, header: Sequence[str]) -> tuple[dict[str, int], str]:
+def _layout(tab: str, header: Sequence[str], columns: Sequence[Column] = TAB_COLUMNS) -> tuple[dict[str, int], str]:
     """Колонки вкладки по шапке - только точные названия: здесь пишут, а не читают."""
     try:
-        layout = resolve_layout(tab, TAB_COLUMNS, list(header))
+        layout = resolve_layout(tab, columns, list(header))
     except LayoutError as exc:
         return {}, str(exc)
     loose = [placement.title for placement in layout.placements.values() if placement.how not in ("exact", "squashed")]
@@ -329,7 +346,7 @@ def _layout(tab: str, header: Sequence[str]) -> tuple[dict[str, int], str]:
     return {key: placement.index for key, placement in layout.placements.items() if placement.index is not None}, ""
 
 
-def _discover_book(api: Api, spreadsheet_id: str, summary_of_book: str) -> Book:
+def _discover_book(api: Api, spreadsheet_id: str, summary_of_book: str, columns: tuple[Column, ...] = TAB_COLUMNS) -> Book:
     cells = api.formulas(spreadsheet_id, f"{quote(summary_of_book)}!A1")
     formula = cells[0][0] if cells and cells[0] else ""
     titles = [name.replace("''", "'") for name in dict.fromkeys(MONTH_TABS.findall(formula))]
@@ -342,20 +359,26 @@ def _discover_book(api: Api, spreadsheet_id: str, summary_of_book: str) -> Book:
     headers = api.values(spreadsheet_id, [f"{quote(title)}!A{HEADER_ROW}:{LAST_COL}{HEADER_ROW}" for title in titles])
     tabs = []
     for title, rows in zip(titles, headers):
-        columns, problem = _layout(title, rows[0] if rows else [])
-        tabs.append(Tab(title=title, sheet_id=meta["tabs"][title], columns=columns, problem=problem))
-    return Book(spreadsheet_id=spreadsheet_id, title=meta["title"], tabs=tuple(tabs))
+        found, problem = _layout(title, rows[0] if rows else [], columns)
+        tabs.append(Tab(title=title, sheet_id=meta["tabs"][title], columns=found, problem=problem))
+    return Book(spreadsheet_id=spreadsheet_id, title=meta["title"], tabs=tuple(tabs), columns=columns)
 
 
-def discover(api: Api, summary_id: str, summary_tab: str) -> list[Book]:
-    """Книги юрлиц и их помесячные вкладки - по формулам сводки и книг; книги - параллельно."""
+def discover(
+    api: Api, summary_id: str, summary_tab: str, words: Sequence[tuple[str, Sequence[str]]] = ()
+) -> list[Book]:
+    """Таблицы юрлиц и их помесячные вкладки - по формулам сводной и таблиц; таблицы - параллельно.
+
+    `words` - словарь колонок компании (`words_key`): шапку вкладок знает компания.
+    """
+    columns = tab_columns(words)
     row = api.formulas(summary_id, f"{quote(summary_tab)}!A1:{LAST_COL}1")
     text = "\n".join(cell for line in row for cell in line)
     pairs = list(dict.fromkeys(IMPORTRANGE.findall(text)))
     if not pairs:
         raise BookError(f"В первой строке «{summary_tab}» нет IMPORTRANGE - откуда собрана сводка, не видно")
     with ThreadPoolExecutor(max_workers=min(len(pairs), 9)) as pool:
-        return list(pool.map(lambda pair: _discover_book(api, *pair), pairs))
+        return list(pool.map(lambda pair: _discover_book(api, *pair, columns), pairs))
 
 
 def _key_ranges(tab: Tab) -> list[str]:
@@ -393,7 +416,7 @@ def _read_keys(api: Api, book: Book) -> list[tuple[str, int, str]]:
 _build_lock = threading.Lock()
 
 
-def _sources_of(api: Api, summary: tuple[str, str], *, fresh: bool = False) -> _Sources:
+def _sources_of(api: Api, summary: tuple[Any, ...], *, fresh: bool = False) -> _Sources:
     asked = time.monotonic()
     with _sources_guard:
         known = _sources.get(summary)
@@ -429,7 +452,7 @@ def _build_index(api: Api, sources: _Sources, *, asked: float | None = None) -> 
         sources.index, sources.index_at = index, time.monotonic()
 
 
-def _book_of(api: Api, summary: tuple[str, str], key: str, *, fresh: bool = False) -> Book:
+def _book_of(api: Api, summary: tuple[Any, ...], key: str, *, fresh: bool = False) -> Book:
     """Книга, где живёт строка: по указателю, а нет в нём - перечитав книги.
 
     Указатель только подсказывает книгу: саму строку `locate` ищет в книге
@@ -473,7 +496,7 @@ class Place:
         return {"book": self.book.title, "tab": self.tab.title, "row": self.row, "url": self.url}
 
 
-def locate(api: Api, summary: tuple[str, str], key: str, *, fresh: bool = False) -> Place:
+def locate(api: Api, summary: tuple[Any, ...], key: str, *, fresh: bool = False) -> Place:
     """Где строка счёта сейчас - читая книгу заново: строки вставляют и сортируют."""
     book = _book_of(api, summary, key, fresh=fresh)
     found = [(tab, row) for tab, row, row_key in _read_keys(api, book) if row_key == key]
@@ -523,7 +546,7 @@ def _snapshot(api: Api, place: Place) -> Snapshot:
 
 def _check_place(place: Place, snap: Snapshot, key: str) -> None:
     """Шапка та же, строка - та самая. Иначе книгу правят прямо сейчас."""
-    columns, problem = _layout(place.tab.title, snap.header())
+    columns, problem = _layout(place.tab.title, snap.header(), place.book.columns)
     if problem:
         raise BookError(problem)
     if columns != place.tab.columns:
@@ -543,18 +566,18 @@ def _blocked(place: Place, snap: Snapshot, name: str) -> str:
     """Почему в поле нельзя писать; `""` - можно."""
     index = place.tab.columns.get(name)
     if index is None:
-        return f"На вкладке «{place.tab.title}» нет колонки «{TITLES[name]}»"
+        return f"На вкладке «{place.tab.title}» нет колонки «{place.book.title_of(name)}»"
     for line in snap.top:
         cell = line[index] if index < len(line) else {}
         entered = cell.get("userEnteredValue") or {}
         if "formulaValue" in entered or (not entered and cell.get("effectiveValue")):
-            return f"Над колонкой «{TITLES[name]}» стоит формула - её значения считает таблица"
+            return f"Над колонкой «{place.book.title_of(name)}» стоит формула - её значения считает таблица"
     cell = snap.cell(index)
     entered = cell.get("userEnteredValue") or {}
     if "formulaValue" in entered:
-        return f"В «{TITLES[name]}» стоит формула - KORT её не затирает"
+        return f"В «{place.book.title_of(name)}» стоит формула - KORT её не затирает"
     if not entered and cell.get("effectiveValue"):
-        return f"«{TITLES[name]}» заполняет формула соседней ячейки - KORT туда не пишет"
+        return f"«{place.book.title_of(name)}» заполняет формула соседней ячейки - KORT туда не пишет"
     return ""
 
 
@@ -582,7 +605,7 @@ def _spilling_above(api: Api, place: Place) -> dict[str, str]:
             cell = line[index - lo] if index - lo < len(line) else ""
             if name not in out and cell.startswith("=") and SPILLING.search(cell):
                 out[name] = (
-                    f"В «{TITLES[name]}» выше, в строке {FIRST_ROW + offset}, стоит формула-массив - "
+                    f"В «{place.book.title_of(name)}» выше, в строке {FIRST_ROW + offset}, стоит формула-массив - "
                     "запись сюда её сломала бы"
                 )
     return out
@@ -595,7 +618,7 @@ def fields_of(place: Place, snap: Snapshot) -> dict[str, str]:
 # ── Карточка ─────────────────────────────────────────────────────────────────
 
 
-def card(api: Api, summary: tuple[str, str], key: str) -> dict[str, Any]:
+def card(api: Api, summary: tuple[Any, ...], key: str) -> dict[str, Any]:
     """Строка счёта в книге юрлица: где она, что в полях и куда можно писать."""
     place = locate(api, summary, key)
     snap = _snapshot(api, place)
@@ -654,12 +677,12 @@ class Value:
 
 
 def wanted_values(values: dict[str, Any]) -> dict[str, Value]:
-    """Значения карточки - в ячейки книги. Только присланные поля."""
+    """Значения карточки - в ячейки таблицы. Только присланные поля."""
     out: dict[str, Value] = {}
     if "bill_no" in values:
         text = _clean_text("bill_no", values["bill_no"])
         if text[:1] in ("=", "+", "@"):
-            raise BookError("«№ Счета» не может начинаться с =, + или @", status=422)
+            raise BookError(f"«{TITLES['bill_no']}» не может начинаться с =, + или @", status=422)
         # Целое без ведущих нулей - числом, как его вводит человек; «007»,
         # «248/1» - строкой: иначе Google съест нули или прочтёт дату.
         out["bill_no"] = Value(number=int(text)) if re.fullmatch(r"[1-9]\d{0,14}", text) else Value(text=text or None)
@@ -726,7 +749,7 @@ def _lock_of(key: str) -> threading.Lock:
 
 def save(
     api: Api,
-    summary: tuple[str, str],
+    summary: tuple[Any, ...],
     key: str,
     expect: dict[str, Any],
     values: dict[str, Any],
@@ -764,7 +787,7 @@ def save(
                 if _holds(before.cell(place.tab.columns[name]), wanted[name]):
                     continue
                 raise BookError(
-                    f"«{TITLES[name]}» в таблице за это время поменяли: было «{expect[name] or ''}», "
+                    f"«{place.book.title_of(name)}» в таблице за это время поменяли: было «{expect[name] or ''}», "
                     f"стало «{shown[name]}». Откройте карточку заново",
                     status=409,
                 )
@@ -839,7 +862,7 @@ def save(
                       place.book.title, place.tab.title, place.row, exc)
             raise BookError(
                 f"Пока KORT писал, строки на вкладке «{place.tab.title}» таблицы «{place.book.title}» сдвинули. "
-                f"Проверьте строку {place.row}: в «{', '.join(TITLES[name] for name in changed)}» могло лечь значение "
+                f"Проверьте строку {place.row}: в «{', '.join(place.book.title_of(name) for name in changed)}» могло лечь значение "
                 f"этого счёта. Строка счёта: {place.url}",
                 status=409,
                 place=place,
@@ -847,7 +870,7 @@ def save(
             ) from exc
 
         problems = [
-            TITLES[name] for name in changed if not _holds(after.cell(place.tab.columns[name]), wanted[name])
+            place.book.title_of(name) for name in changed if not _holds(after.cell(place.tab.columns[name]), wanted[name])
         ]
         broken = sorted(after.errors() - broken_before)
         if problems or broken:
@@ -897,7 +920,7 @@ def api() -> Api:
 _warming: set[tuple[str, str]] = set()
 
 
-def warm(api: Api, summary: tuple[str, str]) -> None:
+def warm(api: Api, summary: tuple[Any, ...]) -> None:
     """Найти книги и строки заранее, в фоне: иначе первая карточка ждёт девять книг."""
     if isinstance(api, GoogleApi) and not google.is_configured():
         return

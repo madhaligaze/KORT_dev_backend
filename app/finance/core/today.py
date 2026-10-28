@@ -20,6 +20,7 @@ from typing import Any, Callable
 from sqlalchemy.orm import Session
 
 from app.finance.contracts.service import Access
+from app.finance import packs
 from app.finance.core import book as book_module
 from app.finance.core.accruals import month_key, month_start
 from app.finance.models import Workspace
@@ -117,7 +118,7 @@ def acts_card(session: Session, workspace: Workspace, access: Access, *, today: 
     card["lines"] = [
         {"label": "месяц начислен - АВР нет", "count": len(work["missing"]), "go": {"core.shadow.acts.view": "missing"}},
         {"label": "АВР не подписан клиентом", "count": len(work["unsigned"]), "go": {"core.shadow.acts.view": "unsigned"}},
-        {"label": f"ЭСФ не выписан дольше {acts_module.ESF_DAYS} дней", "count": len(work["no_esf"]), "go": {"core.shadow.acts.view": "no_esf"}},
+        {"label": f"ЭСФ не выписан дольше {packs.country_of(workspace).esf_days} дней", "count": len(work["no_esf"]), "go": {"core.shadow.acts.view": "no_esf"}},
     ]
     return card
 

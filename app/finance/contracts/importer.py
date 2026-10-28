@@ -43,7 +43,7 @@ from app.finance import history
 from app.finance.intake import header as intake_header
 from app.finance.intake import tables as intake_tables
 from app.finance.contracts import setup
-from app.finance.core import bin as bins
+from app.finance import packs
 from app.finance.contracts.fields import (
     ENTITY,
     COMPUTED_FIELDS,
@@ -899,7 +899,7 @@ def plan(session: Session, workspace: Workspace, batch: ContractImport, registry
     # Совпадения строк листов со строками главного. Строго - номер и обе
     # стороны на своих местах. Нестрого, и такое показывается отдельно:
     # * те же две стороны, переставленные местами (в «Заказчик ГК» и «ФИН.
-    #   ПОМОЩЬ» реестра BBC все шесть нестрогих совпадений - такие);
+    #   ПОМОЩЬ» реестра юротдела все шесть нестрогих совпадений - такие);
     # * номер, однозначный с обеих сторон, и хотя бы одна общая сторона, не
     #   наше юрлицо (другое написание второй стороны или её замена). Наше
     #   юрлицо стоит почти в каждом договоре - общим оно доводом не считается.
@@ -1099,7 +1099,7 @@ def _report_and_plan(
         _section_end_dates(current_plan, registry, decisions),
         _section_numbers(current_plan),
         _section_hidden(current_plan, decisions),
-        _section_bins(current_plan),
+        _section_bins(current_plan, packs.country_of(workspace).ids),
         _section_amounts(current_plan),
         _section_orphans(current_plan, decisions),
         _section_diffs(current_plan, registry, decisions),
@@ -1252,7 +1252,7 @@ def _section_statuses(current: Plan, registry: Registry, decisions: dict[str, An
             items.append(
                 {"field": field_key, "value": value, "count": count, "known": known, "meaning": meaning, "odd": odd}
             )
-    # Предметы в пункт не выносятся (смысл им назначать не нужно, а их у BBC
+    # Предметы в пункт не выносятся (смысл им назначать не нужно, а их у компании на копии прода
     # под сорок), но правке правила листа нужен их полный список: правило
     # «агентский - по предмету» пишется написаниями из файла.
     subjects = [{"value": value, "count": count} for value, count in _values_of(rows, "subject").most_common()]
@@ -1374,7 +1374,7 @@ def _section_hidden(current: Plan, decisions: dict[str, Any]) -> dict[str, Any]:
     )
 
 
-def _party_bins(current: Plan) -> dict[str, dict[str, Any]]:
+def _party_bins(current: Plan, ids: packs.Ids) -> dict[str, dict[str, Any]]:
     """БИН второй стороны из колонки «БИН/ИИН»: ключ стороны → номер, отказы и споры.
 
     Вторая сторона - та, что не наше юрлицо. Номер принимается только с верной
@@ -1395,7 +1395,7 @@ def _party_bins(current: Plan) -> dict[str, dict[str, Any]]:
         else:
             continue
         key = party_key(name)
-        checked = bins.check(raw, str(name))
+        checked = ids.check(raw, str(name))
         entry = out.setdefault(key, {"key": key, "name": str(name).strip(), "numbers": set(), "refused": []})
         if checked.ok:
             entry["numbers"].add(checked.number)
@@ -1408,8 +1408,8 @@ def _party_bins(current: Plan) -> dict[str, dict[str, Any]]:
     return out
 
 
-def _section_bins(current: Plan) -> dict[str, Any]:
-    entries = list(_party_bins(current).values())
+def _section_bins(current: Plan, ids: packs.Ids) -> dict[str, Any]:
+    entries = list(_party_bins(current, ids).values())
     taken = [entry for entry in entries if entry["bin"]]
     refused = [entry for entry in entries if entry["refused"] or entry["conflict"]]
     if not entries:
@@ -1749,7 +1749,7 @@ def _universe(current: Plan, decisions: dict[str, Any]) -> list[dict[str, Any]]:
 #: десяти лишних и до двадцати недостающих). Десятая часть - граница, за
 #: которой лист уже не «тот же, что в Excel»: маленький лист упирается в неё
 #: раньше (один лишний на восемь строк), большой - в пять строк. На реестре
-#: BBC правило пропускается без вопроса у «Исполнитель ГК» (5 лишних на 341)
+#: копии прода правило пропускается без вопроса у «Исполнитель ГК» (5 лишних на 341)
 #: и «ФИН. ПОМОЩЬ» (2 на 21), а у «Заказчик ГК» (47 лишних на 16) - нет:
 #: там лист после загрузки был бы вчетверо больше, чем в файле.
 RULE_STRAY_ROWS = 5
@@ -2087,7 +2087,7 @@ def _write_bins(session: Session, workspace: Workspace, registry: Registry, curr
     from app.finance.models import Counterparty
 
     written: list[str] = []
-    for entry in _party_bins(current).values():
+    for entry in _party_bins(current, packs.country_of(workspace).ids).values():
         if not entry["bin"]:
             continue
         party = registry.resolve_party(entry["name"], slot="customer", create=False).party
@@ -2105,7 +2105,7 @@ def _write_bins(session: Session, workspace: Workspace, registry: Registry, curr
             # Номер уже у другого участника - это, похоже, один участник; свести -
             # решение человека («Участники → Двойники»), не загрузки.
             continue
-        party.bin, party.kind = entry["bin"], bins.kind_of(entry["bin"], party.name)
+        party.bin, party.kind = entry["bin"], packs.country_of(workspace).ids.kind_of(entry["bin"], party.name)
         written.append(f"{party.name}: {party.bin}")
     if written:
         session.flush()

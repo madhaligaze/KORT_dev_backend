@@ -13,7 +13,8 @@ from polygon import sources
 from polygon.cases import ASK, CASES, OFFER, REFUSE, SAM
 from polygon.world import SINCE, TODAY, build, case_index
 
-from app.finance.core import bin as bin_module
+from app.finance import packs
+from app.finance.packs import kz
 
 
 def test_mir_postroen_odinakovo() -> None:
@@ -35,14 +36,14 @@ def test_kazhdyi_sluchai_kataloga_est_v_dannyh() -> None:
 def test_nomera_godnye_krome_opechatki() -> None:
     world = build()
     for entity in world.entities.values():
-        assert bin_module.check(entity.number, entity.name).ok, entity.name
+        assert kz.IDS.check(entity.number, entity.name).ok, entity.name
     for party in world.parties.values():
-        assert bin_module.check(party.number, party.name).ok, party.name
+        assert kz.IDS.check(party.number, party.name).ok, party.name
         if party.registry_number and party.key != "samal":
             assert party.registry_number == party.number
     samal = world.parties["samal"]
-    assert not bin_module.check(samal.registry_number).ok
-    assert bin_module.kind_of(world.entities["ИП"].number, world.entities["ИП"].name) == bin_module.IP
+    assert not kz.IDS.check(samal.registry_number).ok
+    assert kz.IDS.kind_of(world.entities["ИП"].number, world.entities["ИП"].name) == packs.IP
 
 
 def test_dolgi_skladyvayutsya() -> None:

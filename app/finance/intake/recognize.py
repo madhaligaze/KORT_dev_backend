@@ -101,7 +101,7 @@ class Matcher:
         if patterned:
             return Match(tuple(patterned), "core")
         if self.repeats and _REPEAT_TAIL.search(full):
-            # Номер повтора отбрасывается только для колонок-повторов: «Техн. 1» - своё имя.
+            # Номер повтора отбрасывается только для колонок-повторов: «Колонка 1» - своё имя.
             base = _REPEAT_TAIL.sub("", full)
             keys = [key for key in self.by_name.get(base, []) + self.by_name.get(core(base), []) if key in self.repeats]
             if keys:

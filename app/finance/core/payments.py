@@ -675,7 +675,7 @@ def reconcile_paid(
     session: Session, workspace: Workspace, access: Access, book: Any, *, today: date, money: Money | None = None,
     entity: uuid.UUID | None = None,
 ) -> dict[str, Any]:
-    """Оплаты KORT против «Сумма Факт Поступ.» книги-сводки - по договору и месяцу.
+    """Оплаты KORT против колонки «поступило за месяц» сводной таблицы - по договору и месяцу.
 
     Месяц оплат у KORT - куда платёж лёг разнесением (см. описание модуля), у
     книги - строка месяца. Сравнивается и договор целиком за окно книги: месяц

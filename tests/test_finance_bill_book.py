@@ -20,6 +20,15 @@ from app.finance.contracts import bill_book
 from app.finance.contracts.bills import bill_key
 from bill_book_fake import AA, EPOCH, T, X, Y, Z, fake_api, month_tab
 
+import company_layer
+
+
+@pytest.fixture(autouse=True)
+def _company_layer(monkeypatch):
+    """Компания теста - с шапкой таблиц копии прода: её знает словарь компании, а не ядро (п.9 «Пакеты»)."""
+    company_layer.everywhere(monkeypatch)
+
+
 SUMMARY = ("summary-id", "Сводка все ЮР лица")
 KENESARY = bill_key("BBCL", "ТОО KENESARY AGRO", "№ЮО/44", "ОКТЯБРЬ 2026")
 SHOWN = {"bill_no": "", "bill_date": "", "bill_period": "", "note": "звонить Асель"}

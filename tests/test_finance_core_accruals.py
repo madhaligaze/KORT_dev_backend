@@ -23,6 +23,15 @@ from app.finance.core import changes, shadow
 from app.finance.core.accruals import Ledger, periods
 from app.finance.db import finance_session
 
+import company_layer
+
+
+@pytest.fixture(autouse=True)
+def _company_layer(monkeypatch):
+    """Компания теста - с шапкой таблиц копии прода: её знает словарь компании, а не ядро (п.9 «Пакеты»)."""
+    company_layer.everywhere(monkeypatch)
+
+
 FULL = service.Access(view=True, edit=True, setup=True, admin=True)
 EDITOR = service.Access(view=True, edit=True)
 OWNER = service.Actor(uuid.uuid4(), "owner@test")

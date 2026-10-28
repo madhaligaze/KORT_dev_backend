@@ -51,7 +51,7 @@ from app.finance.contracts import restore
 from app.finance.contracts.fields import number_key, party_key
 from app.finance.contracts.models import Contract
 from app.finance.contracts.service import Access, Actor, Registry, read_money
-from app.finance.core import bin as bins
+from app.finance import packs
 from app.finance.core import opening as opening_module
 from app.finance.core import settings as core_settings
 from app.finance.core.accruals import Ledger, month_key, month_start
@@ -424,8 +424,8 @@ def _plan_contracts(read: Read, layout: Layout | None, ctx: Context, answers: di
         name = _text(row.values.get("customer"))
         if not name:
             continue
-        number_raw = bins.digits(row.values.get("party_bin"))
-        number = number_raw if number_raw and bins.checksum_ok(number_raw) else ""
+        number_raw = packs.digits(row.values.get("party_bin"))
+        number = number_raw if number_raw and packs.country_of(ctx.workspace).ids.checksum_ok(number_raw) else ""
         if number_raw and not number:
             proposal.refusals.append({
                 "kind": "bin", "line": row.line,
@@ -992,7 +992,7 @@ def _ensure_party(
     known = registry.parties.get(uuid.UUID(party_id)) if party_id else None
     if known is not None:
         if number and not known.bin:
-            known.bin, known.kind = number, bins.kind_of(number, known.name)
+            known.bin, known.kind = number, packs.country_of(workspace).ids.kind_of(number, known.name)
         return known
     if number:
         owner = session.scalar(
@@ -1007,7 +1007,7 @@ def _ensure_party(
         raise ExcelError(f"«{name}»: подходит несколько участников - выберите в вопросах")
     party = resolved.party
     if number and not party.bin:
-        party.bin, party.kind = number, bins.kind_of(number, party.name)
+        party.bin, party.kind = number, packs.country_of(workspace).ids.kind_of(number, party.name)
     return party
 
 

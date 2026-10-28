@@ -38,7 +38,7 @@ import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
 from app.finance.contracts.fields import party_key
-from app.finance.core import bin as bins
+from app.finance import packs
 from app.finance.intake import forms, recognize, tables
 from app.finance.intake.header import text as cell_text
 from app.finance.intake.rows import has_value, is_empty, is_total
@@ -186,7 +186,7 @@ def _journal(table: tables.Table, reading: recognize.Reading, file_name: str) ->
     return out
 
 
-def _parties(table: tables.Table, reading: recognize.Reading, into: dict[str, dict[str, str]]) -> int:
+def _parties(table: tables.Table, reading: recognize.Reading, into: dict[str, dict[str, str]], ids: packs.Ids) -> int:
     at = reading.at
     found = 0
     for cells in table.rows[reading.body_start:]:
@@ -197,17 +197,21 @@ def _parties(table: tables.Table, reading: recognize.Reading, into: dict[str, di
         name = cell("name")
         if not name or is_total(cells):
             continue
-        number = bins.digits(cell("bin"))
+        number = packs.digits(cell("bin"))
         into[name] = {
             "name": name, "full_name": cell("full_name") or name,
-            "bin": number if bins.checksum_ok(number) else "", "kind": cell("kind"),
+            "bin": number if ids.checksum_ok(number) else "", "kind": cell("kind"),
         }
         found += 1
     return found
 
 
-def read(files: Iterable[tuple[str, bytes]]) -> Upload:
-    """Файлы выгрузки 1С → журналы, контрагенты, ОСВ. Ничего не пишет."""
+def read(files: Iterable[tuple[str, bytes]], ids: packs.Ids | None = None) -> Upload:
+    """Файлы выгрузки 1С → журналы, контрагенты, ОСВ. Ничего не пишет.
+
+    `ids` - номер участника страны компании; без него - страна по умолчанию.
+    """
+    ids = ids or packs.country().ids
     out = Upload()
     catalog = forms.forms()
     for file_name, data in files:
@@ -234,7 +238,7 @@ def read(files: Iterable[tuple[str, bytes]]) -> Upload:
                 out.osv = osv
                 continue
             if form == forms.PARTICIPANT and reading is not None:
-                if _parties(table, reading, out.parties):
+                if _parties(table, reading, out.parties, ids):
                     continue
             if form == forms.DOCUMENT and reading is not None:
                 journal = _journal(table, reading, file_name)

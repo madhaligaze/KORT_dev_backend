@@ -1,27 +1,30 @@
-"""Книга-сводка компании целиком: строка - договор за месяц со всей цепочкой.
+"""Сводная таблица компании целиком: строка - договор за месяц со всей цепочкой.
 
 Откуда
 ──────
-Та же книга, что дают «Оплачено (сводка)» и «Счета → Не выставлены»
-(`SummarySource`): у BBC - «Осн.Общая сводка BBC 2026», лист «Сводка все ЮР
-лица». В строке - всё, что книги юрлиц знают о договоре за месяц: условия
-(юрлицо, вид услуги, сумма, период), счёт, оплаты из журнала, АВР с датой
-подписания клиентом, ЭСФ, сальдо по актам и по начислениям, статус.
+Та же таблица, что дают «Оплачено (сводка)» и «Счета → Не выставлены»
+(`SummarySource`): лист, куда сходятся таблицы всех юрлиц компании. В строке -
+всё, что таблицы юрлиц знают о договоре за месяц: условия (юрлицо, вид
+услуги, сумма, период), счёт, оплаты из журнала, АВР с датой подписания
+клиентом, ЭСФ, сальдо по актам и по начислениям, статус.
 
 Зачем ядру
 ──────────
-Пока учёт живёт в книгах, ядро считает то же самое из своих событий и
+Пока учёт живёт в таблицах, ядро считает то же самое из своих событий и
 сверяет с этой строкой - «тень» (`core/shadow.py`). Отсюда же берутся
-написания клиентов («Заказчик», «По Выписке Банка», «По 1C») и коды наших
-юрлиц («Наша Фирма»). Книгу ядро не правит: пишет в книги юрлиц только
-карточка счёта (`contracts/bill_book.py`).
+написания клиентов (заказчик, имя в банке, имя в 1С) и коды наших юрлиц.
+Таблицу ядро не правит: пишет в таблицы юрлиц только карточка счёта
+(`contracts/bill_book.py`).
 
 Как читается
 ────────────
-* Колонки - по названиям (`app.finance.layout`); `hint` - где стояли 24.10.2026.
-* Пустые и служебные ячейки книги («#N/A», «-», «FALSE») - отсутствие
-  значения, а не ноль.
-* Месяц строки - из «Техн. 1» («ИЮЛЬ 2026»; у разового на исполнении -
+* Колонки - по названиям (`app.finance.layout`): ключи ядра с общими словами
+  отрасли и словарём компании - её шапкой (`with_company_names`). Без
+  словаря таблица чужой формы не читается молча, а показывает, какие колонки
+  не нашлись («Колонки для ядра», `layout_of`).
+* Пустые и служебные ячейки («#N/A», «-», «FALSE») - отсутствие значения, а
+  не ноль.
+* Месяц строки - из колонки месяца («ИЮЛЬ 2026»; у разового на исполнении -
   «на исп. (начало ОКТЯБРЬ 2026)»), иначе из «Периода с». «Старые (до
   Май/Июня 2026)» - строки до начала помесячных листов: у них месяца нет.
 * Строка → договор - тем же правилом, что «Оплачено (сводка)»: номер, потом
@@ -35,7 +38,7 @@ import re
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Sequence
@@ -47,6 +50,7 @@ from app.finance import google
 from app.finance.contracts.fields import number_key, party_key
 from app.finance.contracts.models import Contract, CounterpartyName, GroupEntity
 from app.finance.contracts.summary import source_of
+from app.finance.core.columns import COLUMNS, signature, with_company_names
 from app.finance.layout import Column, LayoutError, norm, resolve_layout
 from app.finance.models import Counterparty
 from app.finance.onec.match import number_loose
@@ -59,60 +63,6 @@ ERROR_RETRY = 60.0
 FIRST_READ_WAIT = 25.0
 #: Короче - не ищем одно имя внутри другого: «ТОО А» нашлось бы везде.
 MIN_CONTAINED = 5
-
-#: Колонки сводки (24.10.2026, A=0). Денежные и датные - только по точному
-#: названию: «Сумма (наша)», «Сумма (часть 1)» и «Сумма Договора» начинаются
-#: одинаково, и «похожее» прочитало бы соседнюю.
-COLUMNS: tuple[Column, ...] = (
-    Column("month_no", "Мес", ("мес",), hint=2, required=False, strict=True),
-    Column("month", "Месяц строки (Техн. 1)", ("техн. 1",), hint=3, required=False, strict=True),
-    Column("own", "Наша Фирма", ("наша фирма",), hint=5),
-    Column("kind", "Вид Услуги", ("вид услуги",), hint=6, required=False, strict=True),
-    Column("staff", "Наш Сотрудник", ("наш сотрудник",), hint=7, required=False, strict=True),
-    Column("customer", "Заказчик", ("заказчик (название фирмы)", "заказчик"), hint=8),
-    Column("bank_name", "По Выписке Банка", ("по выписке банка",), hint=9, required=False, strict=True),
-    Column("onec_name", "По 1C", ("по 1c", "по 1с"), hint=10, required=False, strict=True),
-    Column("bill_day", "Число Выставления Счета", ("число выставления счета",), hint=11, required=False, strict=True),
-    Column("amount", "Сумма Договора", ("сумма договора",), hint=12, required=False, strict=True),
-    Column("department", "Отдел", ("отдел",), hint=13, required=False, strict=True),
-    Column("subject", "Предмет договора", ("предмет договра", "предмет договора"), hint=14, required=False, strict=True),
-    Column("signed_at", "Дата заключения Договора", ("дата заключения договора",), hint=15, required=False, strict=True),
-    Column("number", "№ Договора", ("№ договора", "номер договора"), hint=16),
-    Column("amendments", "Доп Соглашения", ("доп соглашения",), hint=17, required=False, strict=True),
-    Column("period_from", "Период с (нач.)", ("период с (нач.)",), hint=18, required=False, strict=True),
-    Column("period_to", "Период по (зав.)", ("период по (зав.)",), hint=19, required=False, strict=True),
-    Column("note", "Доп. Коммент.", ("доп. коммент.",), hint=20, required=False, strict=True),
-    Column("opening_acts", "Сальдо Начало (АВР)", ("сальдо начало (авр)",), hint=22, required=False, strict=True),
-    Column("bill_state", "Счет", ("счет",), hint=24, required=False, strict=True),
-    Column("bill_period", "Счет за Период (Коммент)", ("счет за период (коммент)",), hint=25, required=False, strict=True),
-    Column("bill_no", "№ Счета", ("№ счета",), hint=26, required=False, strict=True),
-    Column("bill_date", "Дата выстав. Счета", ("дата выстав. счета",), hint=27, required=False, strict=True),
-    Column("paid_state", "Факт Оплата", ("факт оплата",), hint=28, required=False, strict=True),
-    Column("paid", "Сумма Факт Поступ.", ("сумма факт поступ.",), hint=29, required=False, strict=True),
-    Column("pay1_date", "Дата (часть 1)", ("дата (часть 1)",), hint=30, required=False, strict=True),
-    Column("pay1_sum", "Сумма (часть 1)", ("сумма (часть 1)",), hint=31, required=False, strict=True),
-    Column("pay2_date", "Дата (часть 2)", ("дата (часть 2)",), hint=32, required=False, strict=True),
-    Column("pay2_sum", "Сумма (часть 2)", ("сумма (часть 2)",), hint=33, required=False, strict=True),
-    Column("pay3_date", "Дата (часть 3)", ("дата (часть 3)",), hint=34, required=False, strict=True),
-    Column("pay3_sum", "Сумма (часть 3)", ("сумма (часть 3)",), hint=35, required=False, strict=True),
-    Column("act_state", "АВР (наша)", ("авр (наша)",), hint=36, required=False, strict=True),
-    Column("act_sum", "Сумма (наша)", ("сумма (наша)",), hint=37, required=False, strict=True),
-    Column("act_no", "№ АВР (наша)", ("№ авр (наша)",), hint=38, required=False, strict=True),
-    Column("act_date", "Дата (наша)", ("дата (наша)",), hint=39, required=False, strict=True),
-    Column("accepted_state", "АВР (клиент принял)", ("авр (клиент принял)",), hint=40, required=False, strict=True),
-    Column("accepted_date", "Дата АВР (клиент принял)", ("дата авр (клиент принял)",), hint=41, required=False, strict=True),
-    Column("esf_state", "ЭСФ (отпр.)", ("эсф (отпр.)",), hint=42, required=False, strict=True),
-    Column("esf_date", "Дата ЭСФ (отпр.)", ("дата эсф (отпр.)",), hint=43, required=False, strict=True),
-    Column("comment", "Коммент", ("коммент",), hint=44, required=False, strict=True),
-    Column("closing_acts", "Сальдо Конец (АВР)", ("сальдо конец (авр)",), hint=46, required=False, strict=True),
-    Column(
-        "status", "Статус", ("статус (продл./приостн./разв./на исп.)", "статус"), hint=48, required=False, strict=True
-    ),
-    Column("opening_accruals", "Сальдо Начало (без АВР)", ("сальдо начало (без авр)",), hint=53, required=False, strict=True),
-    Column("closing_accruals", "Сальдо Конец (без АВР)", ("сальдо конец (без авр)",), hint=54, required=False, strict=True),
-    Column("refund_sum", "Сумма Возврата", ("сумма возврата",), hint=55, required=False, strict=True),
-    Column("refund_date", "Дата Возврата", ("дата возврата",), hint=56, required=False, strict=True),
-)
 
 #: Значения-заглушки книги: ошибка формулы, прочерк, пустая галочка. Прочерк
 #: в книгах пишут и длинным тире - разбор обязан его узнавать, поэтому он
@@ -139,35 +89,9 @@ class LayoutBroken(BookError):
         self.header = header
 
 
-def with_company_names(
-    columns: Sequence[Column], extra: dict[str, list[str]] | None, keys: dict[str, str] | None = None
-) -> tuple[Column, ...]:
-    """Колонки любого читателя сводной таблицы с написаниями компании (словарь `core/settings.book_columns`).
-
-    Словарь один на компанию и ведётся ключами ядра; `keys` - ключ читателя →
-    ключ ядра, где они разные (у «Счетов» «bill» - это «Счет», в ядре `bill_state`).
-    Так своё название колонки, записанное раз, понимают ядро, «Счета» и сводка оплат.
-    """
-    if not extra:
-        return tuple(columns)
-    keys = keys or {}
-    return tuple(
-        replace(
-            column,
-            names=column.names + tuple(name for name in extra.get(keys.get(column.key, column.key), ()) if name not in column.names),
-        )
-        for column in columns
-    )
-
-
 def columns_for(extra: dict[str, list[str]] | None) -> tuple[Column, ...]:
     """Колонки ядра с написаниями компании (словарь `core/settings.book_columns`)."""
     return with_company_names(COLUMNS, extra) if extra else COLUMNS
-
-
-def signature(extra: dict[str, list[str]] | None) -> str:
-    """Подпись словаря колонок: другая - читать таблицу заново."""
-    return "|".join(f"{key}={','.join(sorted(names))}" for key, names in sorted((extra or {}).items()))
 
 
 def blank(value: Any) -> bool:
@@ -208,7 +132,7 @@ def date_of(value: Any) -> date | None:
             continue
     serial = text.replace("\xa0", "").replace(" ", "")
     if serial.isdigit() and 30000 < int(serial) < 80000:
-        # «Дата АВР (клиент принял)» в части листов - число без формата даты.
+        # Дата принятия АВР в части листов - число без формата даты.
         return date.fromordinal(date(1899, 12, 30).toordinal() + int(serial))
     return None
 
@@ -461,7 +385,7 @@ class Matcher:
                 )
             ):
                 self.keys.setdefault(party_id, set()).add(normalized)
-        #: Код юрлица в книге («BBCL») → юрлицо KORT, если код записан у юрлица.
+        #: Код юрлица в таблице («ТМС») → юрлицо KORT, если код записан у юрлица.
         self.entity_by_code: dict[str, uuid.UUID] = {
             norm(code): entity_id
             for entity_id, code in session.execute(
@@ -629,8 +553,10 @@ def layout_of(session: Session, workspace_id: uuid.UUID, *, wait: float = FIRST_
         header = list(book.header if book is not None and book.header else (slot.header if slot is not None else []))
     extra = core_settings.book_columns(session, workspace_id)
     base = {column.key: column for column in COLUMNS}
+    # Подпись - смысл ядра («Наше юрлицо»), а не название компании: экран
+    # сопоставляет колонку ядра с колонкой таблицы, названия компании - справа.
     columns = [
-        {**item, "names": list(base[item["key"]].names), "extra": extra.get(item["key"], [])}
+        {**item, "title": base[item["key"]].title, "names": list(base[item["key"]].names), "extra": extra.get(item["key"], [])}
         for item in inspect_layout(columns_for(extra), header)
     ] if header else []
     return {"connected": True, "header": [cell.strip() for cell in header], "columns": columns, "error": error}

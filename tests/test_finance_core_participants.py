@@ -17,12 +17,22 @@ import sqlalchemy as sa
 from app.finance import service as finance_service
 from app.finance.contracts import restore, service, setup
 from app.finance.contracts.models import Contract, CounterpartyName, GroupEntity, RestorePoint
-from app.finance.core import bin as bins
+from app.finance import packs
+from app.finance.packs import kz
 from app.finance.core import book as book_module
 from app.finance.core import participants, tax
 from app.finance.core.models import EntityTaxPeriod
 from app.finance.db import finance_session
 from app.finance.models import Account, Counterparty, Operation
+
+import company_layer
+
+
+@pytest.fixture(autouse=True)
+def _company_layer(monkeypatch):
+    """Компания теста - с шапкой таблиц копии прода: её знает словарь компании, а не ядро (п.9 «Пакеты»)."""
+    company_layer.everywhere(monkeypatch)
+
 
 FULL = service.Access(view=True, edit=True, setup=True, admin=True)
 EDITOR = service.Access(view=True, edit=True)
@@ -34,7 +44,7 @@ def make_bin(prefix: str) -> str:
     for serial in range(10 ** (11 - len(prefix))):
         body = prefix + str(serial).zfill(11 - len(prefix))
         for tail in range(10):
-            if bins.checksum_ok(body + str(tail)):
+            if kz.IDS.checksum_ok(body + str(tail)):
                 return body + str(tail)
     raise AssertionError(f"к {prefix} контрольной цифры нет")
 
@@ -85,12 +95,12 @@ def _party(session, space_id, name: str) -> Counterparty:
 
 
 def test_bin_kontrolnaya_cifra_i_vid():
-    assert bins.check("0905 4000 2228").ok and bins.check(BBC_BIN).kind == bins.ORG
-    assert not bins.check("090540002229").ok
-    assert "12 цифр" in bins.check("12345").error
+    assert kz.IDS.check("0905 4000 2228").ok and kz.IDS.check(BBC_BIN).kind == packs.ORG
+    assert not kz.IDS.check("090540002229").ok
+    assert "12 цифр" in kz.IDS.check("12345").error
     person = make_bin("8501153")
-    assert bins.kind_of(person, "ИП Ахметова") == bins.IP and bins.kind_of(person, "Ахметова А.") == bins.PERSON
-    assert bins.found_in("ТОО Алатау Пауэр БИН 260540028486 и счёт 123456789012") == [CLIENT_BIN]
+    assert kz.IDS.kind_of(person, "ИП Ахметова") == packs.IP and kz.IDS.kind_of(person, "Ахметова А.") == packs.PERSON
+    assert kz.IDS.found_in("ТОО Алатау Пауэр БИН 260540028486 и счёт 123456789012") == [CLIENT_BIN]
 
 
 def test_bin_odin_na_uchastnika_i_chuzhoy_otkaz(space):

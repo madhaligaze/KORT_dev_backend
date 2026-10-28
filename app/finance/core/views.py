@@ -1,6 +1,6 @@
 """Виды - сохранённые вопросы к ядру (этап 2, шаг 6).
 
-Вид = отбор + меры + группировки + форма + владелец. «Реестр», «Разовые ЮО»,
+Вид = отбор + меры + группировки + форма + владелец. «Реестр», вид отдела,
 «Долги», «Не выставлены» - виды, а не разделы, зашитые в код, и колонка
 разделов собирается из закреплённых видов. Новая компания начинает с
 «Реестра» и «Долгов»; всё остальное - сохранённый вид: свой или из шаблона
@@ -62,6 +62,8 @@ from app.finance.contracts import views as rules
 from app.finance.contracts.models import Department, EntityView, ListValue
 from app.finance.core.models import VIEW_PINS, VIEW_SOURCES, View
 from app.finance.models import Workspace
+from app.finance import packs
+from app.finance.packs import Template
 from app.finance.service import FinanceError
 
 REGISTRY_KEY = ""
@@ -139,43 +141,26 @@ def measure_fields() -> dict[str, MeasureField]:
 # ── Шаблоны ──────────────────────────────────────────────────────────────────
 
 
-@dataclass(frozen=True)
-class Template:
-    key: str
-    title: str
-    source: str
-    note: str
-    forms: tuple[str, ...] = ()
-    groups: tuple[str, ...] = ()
-    measures: tuple[str, ...] = ()
-    params: Mapping[str, Any] = field(default_factory=dict)
-    #: Нужен отдел-владелец: вид отдела, а не компании.
-    department: bool = False
-
-
-TEMPLATES: dict[str, Template] = {
+#: Шаблоны ядра: у каждого источника свой вид. Шаблоны сверх них («Разовые
+#: договоры по возрасту долга») приносит пакет отрасли (`templates_of`).
+CORE_TEMPLATES: dict[str, Template] = {
     "registry": Template("registry", "Реестр", "contracts", "все договоры компании", forms=("cards", "table")),
     "debts": Template(
         "debts", "Долги", "debts", "кто сколько должен по договорам на любой день",
         forms=("list",), params={"side": "receivable", "basis": "accruals", "group": "client"},
     ),
     "unbilled": Template("unbilled", "Не выставлены", "unbilled", "счета, которые пора выставить", forms=("list",)),
-    # Шаблон отрасли «услуги по договорам»: разовые договоры отдела по возрасту
-    # долга. У разового договора начисление одно, в месяце начала, поэтому
-    # возраст договора почти равен возрасту долга.
-    "oneoff_age": Template(
-        "oneoff_age",
-        "Разовые договоры по возрасту долга",
-        "contracts",
-        "договоры «вся сумма» отдела в работе и исполненные; листы по сроку, остатки, итог по сотрудникам",
-        forms=("cards", "table"),
-        groups=("people",),
-        measures=("share", "summary_paid", "summary_remaining", "age_months"),
-        department=True,
-    ),
 }
-#: Что получает новая компания.
-DEFAULT_TEMPLATES = ("registry", "debts")
+
+
+def templates_of(workspace: Workspace | None) -> dict[str, Template]:
+    """Шаблоны ядра и отрасли компании."""
+    industry = packs.industry_of(workspace)
+    return {**CORE_TEMPLATES, **{item.key: item for item in industry.templates}}
+
+
+#: Шаблоны отрасли по умолчанию - для кода без компании.
+TEMPLATES: dict[str, Template] = templates_of(None)
 
 
 # ── Кто смотрит ──────────────────────────────────────────────────────────────
@@ -263,9 +248,10 @@ def ensure(session: Session, workspace: Workspace) -> None:
         return
     try:
         with session.begin_nested():
-            wanted = DEFAULT_TEMPLATES if not keys else ("registry",)
+            templates = templates_of(workspace)
+            wanted = packs.industry_of(workspace).default_views if not keys else ("registry",)
             for index, key in enumerate(wanted):
-                template = TEMPLATES[key]
+                template = templates[key]
                 session.add(
                     View(
                         workspace_id=workspace.id,
@@ -397,7 +383,7 @@ def listing(session: Session, workspace: Workspace, viewer: Viewer) -> dict[str,
                 "note": item.note,
                 "department": item.department,
             }
-            for item in TEMPLATES.values()
+            for item in templates_of(workspace).values()
             if viewer.sees(SOURCES[item.source].resource)
         ],
         "measures": [{"key": item.key, "title": item.title, "type": item.type, "note": item.note} for item in MEASURES],
@@ -684,7 +670,7 @@ def create(
     _check_owner(viewer, owner_department, owner_user)
     template_key = str(data.get("template") or "")
     if template_key:
-        template = TEMPLATES.get(template_key)
+        template = templates_of(workspace).get(template_key)
         if template is None:
             raise FinanceError("Такого шаблона нет")
         if template_key == "registry":
@@ -763,7 +749,7 @@ def create(
         kind="core.view",
         entity="view",
         entity_id=view.id,
-        title=f"Вид «{view.title}» сохранён" + (f" из шаблона «{TEMPLATES[draft.template].title}»" if draft.template else ""),
+        title=f"Вид «{view.title}» сохранён" + (f" из шаблона «{templates_of(workspace)[draft.template].title}»" if draft.template else ""),
         after=out(view, None, departments),
         actor=actor_email,
     )
@@ -1372,7 +1358,7 @@ def _by_age(entries: list[tuple[Any, dict[str, Any], dict[str, Any]]], money_ope
 
 
 __all__ = [
-    "COLUMN_MEASURES", "DEFAULT_TEMPLATES", "MEASURES", "MEASURE_BY_KEY", "REGISTRY_KEY", "SOURCES", "TEMPLATES",
+    "COLUMN_MEASURES", "CORE_TEMPLATES", "MEASURES", "MEASURE_BY_KEY", "REGISTRY_KEY", "SOURCES", "TEMPLATES", "templates_of",
     "Viewer", "ask", "book_out", "books", "can_edit", "can_see", "create", "ensure", "find", "listing", "month_label",
     "out", "pinned_for", "remove", "schema_books", "share_department", "update", "viewer_of",
 ]

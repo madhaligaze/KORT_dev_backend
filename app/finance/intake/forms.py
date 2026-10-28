@@ -124,8 +124,12 @@ def contract_fields(extra: Sequence[Any] = ()) -> tuple[Field, ...]:
 
 
 def contract_month_fields() -> tuple[Field, ...]:
-    """Колонки сводной таблицы (`core/book.COLUMNS`) и общие написания помесячных таблиц."""
-    from app.finance.core.book import COLUMNS
+    """Колонки ядра «договор за месяц» (`core/columns.COLUMNS`) и общие написания помесячных таблиц.
+
+    Шапку таблиц конкретной компании сюда добавляет её словарь колонок
+    (`core/settings.intake_words` подмешивает `book_columns`).
+    """
+    from app.finance.core.columns import COLUMNS
 
     money = {
         "amount", "opening_acts", "paid", "pay1_sum", "pay2_sum", "pay3_sum", "act_sum", "closing_acts",
@@ -135,14 +139,14 @@ def contract_month_fields() -> tuple[Field, ...]:
     generic = (
         _f("customer", "Заказчик", "клиент", "арендатор", "контрагент", "покупатель"),
         _f("number", "№ Договора", "договор", "договор №", "номер договора"),
-        _f("own", "Наше юрлицо", "наша фирма", "наше тоо", "исполнитель", "арендодатель"),
+        _f("own", "Наше юрлицо", "наше тоо", "исполнитель", "арендодатель"),
         _f("accrued", "Начислено", "к оплате", "итого к оплате", "сумма к оплате", "начисление", "сумма начисления", money=True),
         _f("fixed", "Аренда", "абонентская плата", "сумма в месяц", money=True),
         _f("utilities", "Коммунальные", "коммунальные услуги", "возмещение коммунальных", money=True),
-        _f("paid", "Оплачено", "оплата", "сумма оплаты", "поступило", "сумма факт поступ.", money=True),
+        _f("paid", "Оплачено", "оплата", "сумма оплаты", "поступило", money=True),
         _f("debt", "Долг", "задолженность", "остаток долга", money=True),
-        _f("month", "Месяц", "период", "месяц начисления", "техн. 1"),
-        _f("note", "Примечание", "комментарий", "доп. коммент."),
+        _f("month", "Месяц", "период", "месяц начисления"),
+        _f("note", "Примечание", "комментарий"),
         # «Долг на 01.06» в листе первого месяца - входящее сальдо договора на этот день.
         _f("opening", "Долг на начало", "долг на начало", "сальдо на начало", money=True, patterns=(OPENING_ON,)),
         # Колонка денег без слов, чьи они: «Сумма». Одна - сумма месяца; две
@@ -151,8 +155,8 @@ def contract_month_fields() -> tuple[Field, ...]:
         _f("sum", "Сумма", money=True),
     )
     for item in generic:
-        # Подпись - общими словами, а не шапкой сводной BBC («Наша Фирма»,
-        # «Сумма Факт Поступ.»): её видит любая компания (R14).
+        # Подпись - общими словами, а не шапкой таблиц одной компании: её
+        # видит любая компания (R14).
         known = base.get(item.key)
         names = (*(known.names if known else ()), *item.names)
         base[item.key] = Field(item.key, item.title, tuple(dict.fromkeys(names)), item.money or bool(known and known.money),

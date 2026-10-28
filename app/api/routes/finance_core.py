@@ -22,6 +22,7 @@ from app.api.routes.finance import _guard, _workspace, require_access
 from app.api.routes.finance_contracts import _access, _actor, _raise
 from app.finance.auth import Member
 from app.finance.contracts import service as contracts_service
+from app.finance import packs
 from app.finance.core import book as book_module
 from app.finance.core import changes, participants, tax
 from app.finance.core import shadow as shadow_module
@@ -780,7 +781,7 @@ def acts_view(entity: UUID | None = Query(default=None), member: Member = Depend
                 if UUID(key) in contracts
             },
             "codes": acts_module.CODE_TITLES,
-            "esf_days": acts_module.ESF_DAYS,
+            "esf_days": packs.country_of(workspace).esf_days,
         }
 
     return _run(member, action)

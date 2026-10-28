@@ -2,11 +2,10 @@
 
 Откуда
 ──────
-Та же книга-сводка, что даёт «Оплачено (сводка)» (`summary.py`, запись
-`SummarySource`): у BBC - «Осн.Общая сводка BBC 2026», лист «Сводка все ЮР
-лица», строка - договор за месяц. Лист собирает формула (`IMPORTRANGE`) из книг
-девяти юрлиц, а колонку «Счет» каждая книга считает сама: заполнен «№ Счета» -
-`TRUE`, нет - состояние словами: «Просрочка более 5 дней», «3 дня до
+Та же сводная таблица, что даёт «Оплачено (сводка)» (`summary.py`, запись
+`SummarySource`), строка - договор за месяц. Лист собирает формула
+(`IMPORTRANGE`) из таблиц юрлиц, а отметку счёта каждая таблица считает сама:
+заполнен номер счёта - `TRUE`, нет - состояние словами: «Просрочка более 5 дней», «3 дня до
 выставления», «Еще рано» (разобрано 22.10.2026).
 
 Что здесь по-другому и почему
@@ -53,6 +52,7 @@ from sqlalchemy.orm import Session
 
 from app.finance import google
 from app.finance.contracts.summary import read_money, source_of
+from app.finance.core.columns import column, with_company_names
 from app.finance.layout import Column, LayoutError, norm, resolve_layout
 
 log = logging.getLogger(__name__)
@@ -84,39 +84,34 @@ DONE = "issued"
 ISSUED = frozenset({"true", "истина"})
 PAID = frozenset({"true", "истина"})
 
-#: Колонки сводки. `hint` - где стояли 22.10.2026 (A=0): подсказка для
-#: одинаковых заголовков и строки «книгу поправили», а не адрес.
+#: Колонки сводки - ключи ядра (`core/columns.py`); шапка компании - её
+#: словарь колонок. «bill» - колонка «Счет» (в ядре `bill_state`), «paid» -
+#: отметка «оплачено» (в ядре `paid_state`).
 COLUMNS: tuple[Column, ...] = (
-    Column("bill", "Счет", ("счет",), hint=24),
-    Column("customer", "Заказчик", ("заказчик (название фирмы)", "заказчик", "клиент"), hint=8),
-    Column("number", "№ Договора", ("№ договора", "номер договора"), hint=16),
-    Column("own", "Наша Фирма", ("наша фирма",), hint=5),
-    Column("month", "Месяц строки (Техн. 1)", ("техн. 1",), hint=3, required=False),
-    Column("month_no", "Мес", ("мес",), hint=2, required=False),
-    Column("kind", "Вид Услуги", ("вид услуги",), hint=6, required=False),
-    Column("staff", "Наш Сотрудник", ("наш сотрудник",), hint=7, required=False),
-    Column("amount", "Сумма Договора", ("сумма договора",), hint=12, required=False),
-    Column("department", "Отдел", ("отдел",), hint=13, required=False),
-    Column("period_from", "Период с (нач.)", ("период с (нач.)", "период с"), hint=18, required=False),
-    Column("period_to", "Период по (зав.)", ("период по (зав.)", "период по"), hint=19, required=False),
-    Column("note", "Доп. Коммент.", ("доп. коммент.", "доп. комментарий"), hint=20, required=False),
-    # Для карточки и шаблона финансистов: как клиент назван в 1С (по нему
+    column("bill", core="bill_state", required=True, strict=False),
+    column("customer", required=True, strict=False),
+    column("number", required=True, strict=False),
+    column("own", required=True, strict=False),
+    column("month", strict=False),
+    column("month_no", strict=False),
+    column("kind", strict=False),
+    column("staff", strict=False),
+    column("amount", strict=False),
+    column("department", strict=False),
+    column("period_from", strict=False),
+    column("period_to", strict=False),
+    column("note", strict=False),
+    # Для карточки и шаблона счетов: как клиент назван в 1С (по нему
     # выставляют счёт) и когда заключён договор.
-    Column("onec_name", "По 1C", ("по 1c", "по 1с"), hint=10, required=False, strict=True),
-    Column("signed_at", "Дата заключения Договора", ("дата заключения договора",), hint=15, required=False, strict=True),
-    # Поля счёта - только по точному названию: «Счет за Период» иначе нашлась бы
-    # «похожей» на «Счет», и лист без неё не читался бы вовсе.
-    Column("bill_period", "Счет за Период (Коммент)", ("счет за период (коммент)",), hint=25, required=False, strict=True),
-    Column("bill_no", "№ Счета", ("№ счета",), hint=26, required=False, strict=True),
-    Column("bill_date", "Дата выстав. Счета", ("дата выстав. счета",), hint=27, required=False, strict=True),
-    Column("paid", "Факт Оплата", ("факт оплата",), hint=28, required=False),
-    Column(
-        "status",
-        "Статус договора",
-        ("статус (продл./приостн./разв./на исп.)", "статус"),
-        hint=48,
-        required=False,
-    ),
+    column("onec_name"),
+    column("signed_at"),
+    # Поля счёта - только по точному названию: «Счёт за период» иначе нашлась
+    # бы «похожей» на «Счёт», и лист без неё не читался бы вовсе.
+    column("bill_period"),
+    column("bill_no"),
+    column("bill_date"),
+    column("paid", core="paid_state", strict=False),
+    column("status", strict=False),
 )
 
 
@@ -128,7 +123,7 @@ def state_of(value: Any, words: dict[str, str] | None = None) -> str | None:
     """Группа строки по значению «Счет»; `None` - счёт выставлен.
 
     `words` - слова компании (`core/settings.table_words`, колонка «Счет»):
-    смысл, который им дал человек, главнее слов BBC ниже.
+    смысл, который им дал человек, главнее обычных слов ниже.
     """
     text = norm(value)
     meaning = (words or {}).get(text)
@@ -360,11 +355,7 @@ _CORE_KEYS = {"bill": "bill_state", "paid": "paid_state"}
 
 def columns_for(extra: dict[str, list[str]] | None) -> tuple[Column, ...]:
     """Колонки «Счетов» со своими названиями компании - тот же словарь, что у ядра («Колонки для ядра»)."""
-    if not extra:
-        return COLUMNS
-    from app.finance.core.book import with_company_names
-
-    return with_company_names(COLUMNS, extra, _CORE_KEYS)
+    return with_company_names(COLUMNS, extra, _CORE_KEYS) if extra else COLUMNS
 
 
 def build_board(

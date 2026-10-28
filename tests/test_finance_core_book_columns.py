@@ -1,9 +1,9 @@
-"""Словарь колонок сводной таблицы (фаза 9, R14): названия компании к названиям ядра.
+"""Словарь колонок сводной таблицы (фаза 9, R14; этап 2, п.9): названия компании к словам ядра.
 
-Ядро читает сводную таблицу по названиям колонок BBC. Другая компания
-называет колонки по-своему - и лист не читается. Словарь добавляет её
-названия (не номера) к названиям ядра; шапка листа, который не разобрался,
-остаётся, чтобы её можно было сопоставить.
+У ядра для колонки - ключ и общие слова отрасли. Компания называет колонки
+по-своему - и лист без словаря не читается. Словарь добавляет её названия
+(не номера) к словам ядра; шапка листа, который не разобрался, остаётся,
+чтобы её можно было сопоставить.
 """
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ def test_nazvaniya_kompanii_chitayutsya_vmeste_s_nazvaniyami_yadra():
     assert seen["number"]["problem"] == "нет в таблице" and seen["customer"]["header"] == "Заказчик"
     assert seen["amount"]["index"] is None and seen["amount"]["problem"] == "", "необязательная - не отказ"
 
-    columns = book_module.columns_for({"number": ["Контракт"], "amount": ["Сумма по договору"]})
+    columns = book_module.columns_for({"own": ["Наша Фирма"], "number": ["Контракт"], "amount": ["Сумма по договору"]})
     book = book_module.build_book(rows, title="Сводка", worksheet="Сводка", columns=columns)
     assert (book.rows[0].number, book.rows[0].amount) == ("№ОКР/1", Decimal("100000"))
     assert book.header == header
@@ -66,7 +66,7 @@ def test_slovar_v_nastroykah_s_istoriey_i_pravami(finance_db):
             core_settings.set_book_column(session, workspace, FULL, OWNER, key="amount", name="сумма ПО договору", on=False, known=KNOWN)
             assert core_settings.book_columns(session, workspace.id) == {}, "снимается без учёта регистра"
             titles = session.scalars(sa.select(ActionLog.title).where(ActionLog.kind == "core.settings")).all()
-            assert any("Сумма Договора" in title and "читается и как" in title for title in titles)
+            assert any("Сумма договора" in title and "читается и как" in title for title in titles)
             with pytest.raises(PermissionError):
                 core_settings.set_book_column(
                     session, workspace, service.Access(view=True, edit=True), OWNER, key="amount", name="Х", on=True, known=KNOWN
@@ -99,8 +99,11 @@ def test_odin_slovar_dlya_vseh_chitateley_tablicy(finance_db, monkeypatch):
             source, index, problem = summary_module.connect(
                 session, workspace.id, link="https://docs.google.com/spreadsheets/d/abc123/edit", worksheet="Сводка", user_id=None
             )
-            assert index is None and "№ Договора" in problem and source.worksheet == "Сводка", "подключена, с объяснением"
-            for key, name in (("number", "Контракт"), ("paid", "Оплачено"), ("bill_state", "Состояние счёта")):
+            assert index is None and "№ договора" in problem and source.worksheet == "Сводка", "подключена, с объяснением"
+            for key, name in (
+                ("own", "Наша Фирма"), ("customer", "Клиент"), ("number", "Контракт"), ("paid", "Оплачено"),
+                ("bill_state", "Состояние счёта"),
+            ):
                 core_settings.set_book_column(session, workspace, FULL, OWNER, key=key, name=name, on=True, known=KNOWN)
             extra = core_settings.book_columns(session, workspace.id)
             summary_module.forget(workspace.id)

@@ -16,7 +16,7 @@
 НДС («в сумме», по умолчанию) или НДС начисляется сверху («сверху»), или
 договор без НДС. Не плательщику НДС не начисляется.
 
-Юрлица группы - не все к порогу (владелец, 25.10.2026: часть ТОО BBC уже на
+Юрлица группы - не все к порогу (владелец, 25.10.2026: часть ТОО группы уже на
 НДС). Статус юрлица в году (`STATUSES`): плательщик с начала года - порога
 для него нет, считается НДС; станет плательщиком с даты в году - порог только
 до неё; не плательщик - оборот к порогу; режим не записан - тоже к порогу, но
@@ -47,6 +47,7 @@ from app.finance.core import tax
 from app.finance.core.accruals import month_key, month_start
 from app.finance.core.models import EntityTaxPeriod
 from app.finance.core.registers import ledger_on
+from app.finance import packs
 from app.finance.models import Account, Counterparty, Operation, Workspace
 
 _ZERO = Decimal("0")
@@ -260,7 +261,7 @@ class Turnover:
         for entity_id, item in out.items():
             period = tax.regime_on(self.session, entity_id, self.today, self.periods)
             item.payer_now = bool(period and period.vat_payer)
-            item.regime = tax.REGIME_TITLES.get(period.regime, "") if period else ""
+            item.regime = tax.regime_title(period.regime, packs.country_of(self.workspace)) if period else ""
             item.payer_since = next(
                 (row.valid_from for row in reversed(self.periods.get(entity_id, [])) if row.vat_payer and row.valid_from <= self.today),
                 None,

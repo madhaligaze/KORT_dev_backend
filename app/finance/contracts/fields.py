@@ -1,13 +1,13 @@
 """Поля реестра, значения списков со смыслом и засев новой компании.
 
-Засев общий, не под BBC
-───────────────────────
+Засев - из пакета отрасли
+─────────────────────────
 Новая компания получает системные поля, статусы с фазами, виды договоров со
 способом начисления и подписями сторон, хозяйственные смыслы и главный лист
-«Все договоры». Всё, чем компания отличается (колонка «Ссылка на Битрикс 24»,
-статус «нужно закрыть по бух», лист «Исполнитель ГК»), приходит из её
-собственного Excel при загрузке или заводится в настройке. Под одну компанию
-здесь не пишется ни строки.
+«Все договоры» - из пакета своей отрасли (`app/finance/packs`, «услуги по
+договорам»). Всё, чем компания отличается (своя колонка, свой статус, свой
+лист), приходит из её собственного Excel при загрузке или заводится в
+настройке. Под одну компанию здесь не пишется ни строки.
 
 Засев повторяемый: системное поле, добавленное в следующей версии, появится у
 всех компаний при первом обращении к реестру, а не останется только у новых.
@@ -33,100 +33,15 @@ from app.finance.contracts.models import (
     ListValue,
 )
 from app.finance.models import POSITION_STEP, Workspace
+from app.finance import packs
+from app.finance.packs import FieldDef
 
 ENTITY = "contract"
 
 
-@dataclass(frozen=True)
-class FieldDef:
-    """Системное поле: ключ, тип, подпись по умолчанию и написания шапки."""
-
-    key: str
-    type: str
-    title: str
-    names: tuple[str, ...] = ()
-    #: Поле только для чтения везде: «как было в файле».
-    readonly: bool = False
-    #: Спрятано по умолчанию (есть, но в листе и карточке не показывается).
-    hidden: bool = False
-    #: Способ заполнения по умолчанию (`FILLS`); пусто - у типа его нет.
-    fill: str = ""
-
-
-#: Системные поля в порядке «Сводной». Написания - это то, как колонку
-#: подписывают в реестрах; разбор сравнивает по шапке блока, а не по номеру.
-#:
-#: Способ заполнения по умолчанию - из «Настроек реестра» BBC (26.09.2026):
-#: статус, ответственный, исполнитель и отдел - выпадающим списком, вид и
-#: предмет - свой текст с подсказкой справочника. Ячейка листа заводила молча
-#: значение из любого напечатанного: на проде 26.09 в статусах висело «им», в
-#: видах - «Взыскание», оба ни в одном договоре - следы правки ячейки.
-SYSTEM_FIELDS: tuple[FieldDef, ...] = (
-    FieldDef("status", "list", "Текущее состояние",
-             ("текущее состояние", "статус", "состояние", "статус договора"), fill="list"),
-    # Написания шапок одной компании («ссылка на битрикс 24», «исполнитель …» с
-    # её именем) - в её полях, а не здесь: новая компания не получает чужих слов.
-    FieldDef("folder_url", "url", "Папка договора", ("папка договора", "ссылка")),
-    FieldDef("planned_end_at", "date", "Планируемый срок завершения",
-             ("планируемый срок завершения", "план дата завершения", "срок завершения")),
-    FieldDef("people", "person", "Ответственное лицо",
-             ("ответственное лицо (ф.и.о)", "ответственное лицо", "ответственный",
-              "наш сотрудник", "ответ лицо"), fill="list"),
-    FieldDef("executor", "party", "Исполнитель",
-             ("исполнитель", "продавец", "арендодатель", "арендадатель", "займодавец", "наша фирма",
-              "поставщик", "подрядчик"), fill="own"),
-    FieldDef("customer", "party", "Заказчик",
-             ("заказчик (клиент)", "заказчик", "покупатель", "арендатор (клиент)", "арендатор",
-              "займополучатель", "заказчик (название фирмы)", "клиент"), fill="hint"),
-    FieldDef("number", "text", "№ Договора",
-             ("№ договора", "номер договора", "договор №")),
-    FieldDef("signed_at", "date", "Дата заключения Договора",
-             ("дата заключения договора", "дата договора", "дата заключения")),
-    FieldDef("department", "department", "Отдел", ("отдел",), fill="list"),
-    FieldDef("type", "list", "Вид услуги", ("вид услуги", "вид договора", "вид"), fill="hint"),
-    FieldDef("subject", "list", "Предмет Договора",
-             ("предмет договора", "предмет", "предмет исполнения"), fill="hint"),
-    # «Сумма в месяц, тг» и «Стоимость, тг» реестра офиса: единицу в хвосте
-    # шапки разбор отбрасывает сам (`intake.header.core`).
-    FieldDef("amount", "money", "Сумма Договора",
-             ("сумма договора", "сумма", "сумма в месяц", "сумма за месяц", "аренда в месяц", "стоимость",
-              "стоимость услуг", "абонентская плата", "ежемесячная плата")),
-    FieldDef("paid_snapshot", "money", "Оплачено (в файле)",
-             ("оплачено на текущую дату", "оплачено"), readonly=True),
-    FieldDef("remaining_snapshot", "money", "Остаток (в файле)",
-             ("остаток оплаты", "остаток", "сумма остаток"), readonly=True),
-    # Считаются из журнала операций (`payments.py`), в договоре не хранятся.
-    # Написаний шапки нет намеренно: колонку файла «Оплачено» разбор кладёт в
-    # «как было в файле», а не сюда.
-    FieldDef("paid", "money", "Оплачено по выписке", readonly=True),
-    FieldDef("remaining", "money", "Остаток по выписке", readonly=True),
-    # «Оплачено», «Остаток» и «Срок, мес» видов - не поля договора, а меры вида
-    # (`core/views.MEASURES`, этап 2, шаг 6).
-    FieldDef("amendments_text", "text", "№ Доп. соглашения / дата",
-             ("№ дополнительное соглашение/дата", "№ дополнительное соглашение",
-              "дополнительное соглашение", "доп соглашения", "доп. соглашения")),
-    FieldDef("amendments_summary_text", "text", "Предмет доп. соглашения",
-             ("предмет доп.соглашения", "предмет доп. соглашения", "предмет доп соглашения")),
-    FieldDef("end_date", "date", "Дата расторжения / исполнения",
-             ("дата расторжения договора/дата исполения разового договора",
-              "дата расторжения договора/дата исполнения разового договора",
-              "дата расторжения договора", "дата расторжения", "дата исполнения",
-              "факт дата завершения")),
-    FieldDef("note", "text", "Примечания", ("*примечания", "примечания", "примечание", "комментарий")),
-    # Ниже - поля, которых в файле BBC нет колонкой: они выводятся или
-    # задаются в карточке.
-    FieldDef("billing", "choice", "Начисление"),
-    # Ядро, фаза 2: период начисления - «Период с» книги-сводки. Пусто - от
-    # даты договора (`core/accruals.py`).
-    FieldDef("period_day", "number", "День периода"),
-    FieldDef("billing_from", "date", "Начислять с"),
-    # Ядро, фаза 7: НДС договора, когда исполнитель - плательщик НДС.
-    FieldDef("vat_mode", "choice", "НДС"),
-    FieldDef("economic_role", "list", "Хозяйственный смысл", fill="list"),
-    FieldDef("amount_terms", "text", "Условие суммы"),
-    FieldDef("end_kind", "choice", "Смысл даты окончания"),
-    FieldDef("currency", "text", "Валюта", hidden=True),
-)
+#: Системные поля отрасли по умолчанию. Ключи - смыслы ядра; подписи и
+#: написания - пакет отрасли. Засев компании берёт поля её отрасли (`_seed`).
+SYSTEM_FIELDS: tuple[FieldDef, ...] = packs.industry().fields
 SYSTEM_KEYS = frozenset(item.key for item in SYSTEM_FIELDS)
 FIELD_BY_KEY = {item.key: item for item in SYSTEM_FIELDS}
 #: Поля-списки с собственными значениями в `list_values`.
@@ -183,55 +98,17 @@ def fill_of(item: Any) -> str:
 
 # ── Засев ────────────────────────────────────────────────────────────────────
 
-#: Статусы. Фаза - системный смысл; подпись компания меняет как хочет.
-SEED_STATUSES: tuple[tuple[str, dict[str, Any]], ...] = (
-    ("Действующий", {"phase": "active"}),
-    ("На исполнении", {"phase": "in_progress"}),
-    ("Приостановлен", {"phase": "suspended"}),
-    ("Исполнен", {"phase": "fulfilled"}),
-    ("Недействующий", {"phase": "terminated"}),
-    ("Не состоялся", {"phase": "failed"}),
-)
-#: Виды договоров: как начислять, какой смысл по умолчанию, как подписаны
-#: стороны. «Иное» - вид без начисления, но со смыслом «вид известен».
-SEED_TYPES: tuple[tuple[str, dict[str, Any]], ...] = (
-    ("Абонентское обслуживание", {"billing": "month", "economic_role": "revenue"}),
-    ("Разовая услуга", {"billing": "total", "economic_role": "revenue"}),
-    ("Аренда", {"billing": "month", "economic_role": "revenue",
-                "roles": {"executor": "Арендодатель", "customer": "Арендатор"}}),
-    ("Агентский", {"billing": "terms"}),
-    ("Заём", {"billing": "total", "economic_role": "financing",
-              "roles": {"executor": "Займодавец", "customer": "Займополучатель"}}),
-    ("Купля-продажа", {"billing": "total",
-                       "roles": {"executor": "Продавец", "customer": "Покупатель"}}),
-    ("Иное", {"kind": "other"}),
-)
-SEED_ECONOMIC_ROLES: tuple[tuple[str, str], ...] = (
-    ("Выручка", "revenue"),
-    ("Расход", "expense"),
-    ("Финансирование", "financing"),
-    ("Внутри группы", "intra_group"),
-)
-
-#: Смысл предмета по словам в названии. Это не угадывание, а подстановка с
-#: пометкой `{ по предмету }`: её видно в карточке, и человек её правит. Без
-#: неё «Финансовая помощь» при виде «Иное» считалась бы выручкой и попала бы в
-#: порог НДС.
-SUBJECT_HINTS: tuple[tuple[re.Pattern[str], dict[str, Any]], ...] = (
-    (re.compile(r"финанс\w*\s+помощ|за[её]м|займ", re.IGNORECASE),
-     {"billing": "total", "economic_role": "financing",
-      "roles": {"executor": "Займодавец", "customer": "Займополучатель"}}),
-    (re.compile(r"агент", re.IGNORECASE), {"billing": "terms"}),
-    (re.compile(r"аренд", re.IGNORECASE),
-     {"billing": "month", "roles": {"executor": "Арендодатель", "customer": "Арендатор"}}),
-    (re.compile(r"купл\w*[-\s]*продаж", re.IGNORECASE),
-     {"billing": "total", "roles": {"executor": "Продавец", "customer": "Покупатель"}}),
-)
+#: Статусы, виды договоров, смыслы и подсказки предмета отрасли по умолчанию -
+#: пакет отрасли (`packs/services.py`).
+SEED_STATUSES = packs.industry().statuses
+SEED_TYPES = packs.industry().types
+SEED_ECONOMIC_ROLES = packs.industry().economic_roles
+SUBJECT_HINTS = packs.industry().subject_hints
 
 
-def subject_meaning(value: str) -> dict[str, Any]:
+def subject_meaning(value: str, industry: packs.Industry | None = None) -> dict[str, Any]:
     """Смысл нового предмета по словам в названии; пусто - смысла нет."""
-    for pattern, meaning in SUBJECT_HINTS:
+    for pattern, meaning in (industry or packs.industry()).subject_hints:
         if pattern.search(value or ""):
             return dict(meaning)
     return {}
@@ -240,7 +117,7 @@ def subject_meaning(value: str) -> dict[str, Any]:
 # ── Похожие значения ─────────────────────────────────────────────────────────
 #
 # В «списке или своём» (вид, предмет) новое значение заводится из напечатанного
-# - так задумано «Настройками реестра»: услуги у BBC появляются постоянно. Цена
+# - так задумано «Настройками реестра»: новые услуги появляются постоянно. Цена
 # - двойники: «Абонентское обслуживаниее» рядом с «Абонентское обслуживание»
 # делят отчёт надвое. Здесь их находят, а сводит человек («не угадывать»).
 
@@ -444,7 +321,8 @@ def ensure_registry(session: Session, workspace: Workspace) -> None:
     уникальном ключе, и экран оставался пустым.
     """
     existing = _field_rows(session, workspace.id)
-    if SYSTEM_KEYS <= set(existing) and existing and _has_main_view(session, workspace.id):
+    keys = {item.key for item in packs.industry_of(workspace).fields}
+    if keys <= set(existing) and existing and _has_main_view(session, workspace.id):
         from app.finance.core import views as core_views
 
         core_views.ensure(session, workspace)
@@ -472,7 +350,8 @@ def _seed(session: Session, workspace: Workspace, existing: dict[str, EntityFiel
     first_time = not existing
     previous: EntityField | None = None
     added: list[str] = []
-    for index, item in enumerate(SYSTEM_FIELDS):
+    industry = packs.industry_of(workspace)
+    for index, item in enumerate(industry.fields):
         if item.key in existing:
             previous = existing[item.key]
             continue
@@ -499,11 +378,11 @@ def _seed(session: Session, workspace: Workspace, existing: dict[str, EntityFiel
     if not first_time and set(LIVE_FIELDS) & set(added):
         _add_live_columns(session, workspace.id)
     if first_time:
-        for index, (value, meaning) in enumerate(SEED_STATUSES):
+        for index, (value, meaning) in enumerate(industry.statuses):
             _seed_value(session, workspace.id, "status", value, meaning, index)
-        for index, (value, meaning) in enumerate(SEED_TYPES):
+        for index, (value, meaning) in enumerate(industry.types):
             _seed_value(session, workspace.id, "type", value, meaning, index)
-        for index, (value, system) in enumerate(SEED_ECONOMIC_ROLES):
+        for index, (value, system) in enumerate(industry.economic_roles):
             _seed_value(session, workspace.id, "economic_role", value, {"system": system}, index)
     if not _has_main_view(session, workspace.id):
         session.add(

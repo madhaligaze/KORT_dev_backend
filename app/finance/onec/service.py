@@ -413,7 +413,7 @@ def _working(session: Session, workspace_id: uuid.UUID, entity_ids: set[uuid.UUI
 def month_view(
     session: Session, workspace: Workspace, month: str, *, base_id: uuid.UUID | None = None
 ) -> dict[str, Any]:
-    """Месяц по договорам: счёт, оплата, АВР, подписание, ЭСФ - как колонки книг BBC."""
+    """Месяц по договорам: счёт, оплата, АВР, подписание, ЭСФ - как колонки таблиц юрлиц."""
     try:
         year, number = (int(part) for part in month.split("-"))
         date(year, number, 1)

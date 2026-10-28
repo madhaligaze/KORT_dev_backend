@@ -1,16 +1,15 @@
 """«Оплачено (сводка)» - факт оплаты договора из книги-сводки компании.
 
-Как это было устроено в книгах BBC (разобрано 27.09.2026)
-─────────────────────────────────────────────────────────
-Главная книга - «Осн.Общая сводка BBC 2026», лист «Сводка все ЮР лица»: туда
-`IMPORTRANGE` сводит книги восьми юрлиц, строка - договор за месяц. Книга
-юротдела «Разовые» держит скрытый лист «Сводка ЮО» (та же сводка, отдел ЮО) и
-колонку «Оплачено» формулой:
+Как это было устроено в таблицах копии прода (разобрано 27.09.2026)
+──────────────────────────────────────────────────────────────────
+Главная таблица - сводная: туда `IMPORTRANGE` сводит таблицы восьми юрлиц,
+строка - договор за месяц. Таблица юротдела «Разовые» держит скрытый лист
+«Сводка ЮО» (та же сводная, отдел ЮО) и колонку «Оплачено» формулой:
 
-    VLOOKUP(Заказчик & № договора & код фирмы; 'Сводка ЮО'!A:AD; «Сумма Факт Поступ.»)
+    VLOOKUP(Заказчик & № договора & код фирмы; 'Сводка ЮО'!A:AD; поступило за месяц)
 
-где код фирмы - BBC, BBCL, BBCS… из справочника исполнителей, а колонка A
-сводки - «Заказчик & №» и «Наша Фирма». Остаток = сумма договора − оплачено.
+где код фирмы - код нашего юрлица из справочника исполнителей, а колонка A
+сводной - «Заказчик & №» и код юрлица. Остаток = сумма договора − оплачено.
 
 Что здесь по-другому и почему
 ─────────────────────────────
@@ -48,6 +47,7 @@ from typing import Any, Iterable, Sequence
 import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
+from app.finance.core.columns import column, with_company_names
 from app.finance.layout import Column, LayoutError, resolve_layout
 from app.finance import google
 from app.finance.contracts.fields import number_key, party_key
@@ -68,16 +68,16 @@ FIRST_READ_WAIT = 20.0
 #: Короче - не ищем одно имя внутри другого: «ТОО А» нашлось бы везде.
 MIN_CONTAINED = 5
 
-#: Колонки сводки. `hint` - где стояли 27.09.2026 (A=0): подсказка для
-#: одинаковых заголовков и строки «книгу поправили», а не адрес.
+#: Колонки сводки - ключи ядра (`core/columns.py`); шапка компании - её
+#: словарь колонок.
 COLUMNS: tuple[Column, ...] = (
-    Column("customer", "Заказчик", ("заказчик (название фирмы)", "заказчик", "клиент"), hint=8),
-    Column("number", "№ Договора", ("№ договора", "номер договора"), hint=16),
-    Column("paid", "Сумма Факт Поступ.", ("сумма факт поступ.", "сумма факт поступления", "факт поступление"), hint=29),
-    Column("own", "Наша Фирма", ("наша фирма",), hint=5, required=False),
-    Column("month", "Месяц строки (Техн. 1)", ("техн. 1",), hint=3, required=False),
-    Column("department", "Отдел", ("отдел",), hint=13, required=False),
-    Column("amount", "Сумма Договора", ("сумма договора",), hint=12, required=False),
+    column("customer", required=True, strict=False),
+    column("number", required=True, strict=False),
+    column("paid", required=True, strict=False),
+    column("own", strict=False),
+    column("month", strict=False),
+    column("department", strict=False),
+    column("amount", strict=False),
 )
 
 
@@ -92,11 +92,7 @@ class SummaryLayoutError(SummaryError):
 
 def columns_for(extra: dict[str, list[str]] | None) -> tuple[Column, ...]:
     """Колонки сводки со своими названиями компании - тот же словарь, что у ядра и «Счетов»."""
-    if not extra:
-        return COLUMNS
-    from app.finance.core.book import with_company_names
-
-    return with_company_names(COLUMNS, extra)
+    return with_company_names(COLUMNS, extra) if extra else COLUMNS
 
 
 @dataclass(frozen=True)

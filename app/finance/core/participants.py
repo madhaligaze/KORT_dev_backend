@@ -2,7 +2,7 @@
 
 Почему так
 ──────────
-В книгах BBC клиент - это строка «Заказчик», а в соседних колонках - как его
+В таблицах копии прода клиент - это строка «Заказчик», а в соседних колонках - как его
 пишет банк и как 1С; на 19.10 у 96 клиентов было три и больше написаний, а в
 152 строках колонку банка не заполнили, и оплаты не находили строку. В KORT
 та же болезнь: 24.10 на проде 17 клиентов заведены дважды («ТОО Х» и «Х») и
@@ -36,7 +36,7 @@ from app.finance import history
 from app.finance.contracts.fields import bump, party_key
 from app.finance.contracts.models import Contract, CounterpartyName, GroupEntity, ListValue
 from app.finance.contracts.service import Access, Actor, Registry, people_of, visible_to
-from app.finance.core import bin as bins
+from app.finance import packs
 from app.finance.core import book as book_module
 from app.finance.core import tax
 from app.finance.core.models import EntityTaxPeriod
@@ -137,7 +137,7 @@ def search(session: Session, workspace: Workspace, access: Access, q: str, *, li
     text = (q or "").strip()
     if len(text) < 2:
         return []
-    digits = bins.digits(text)
+    digits = packs.digits(text)
     like = f"%{text}%"
     key = party_key(text)
     # Имя - по `normalized_name` (нижний регистр Python): ILIKE в SQLite не
@@ -193,13 +193,13 @@ def _own_entities(session: Session, workspace: Workspace) -> dict[uuid.UUID, Gro
     }
 
 
-#: Организационная форма внутри названия счёта: «Kaspi Юр. ТОО "BBC HR"»,
+#: Организационная форма внутри названия счёта: «Kaspi Юр. ТОО "Тумар Офис"»,
 #: «Депозит TOO "…"» (латиницей - так тоже пишут).
 _FORM_INSIDE = re.compile(r"(?:^|[\s.,(])(тоо|too|ип|ао|llp|ооо)(?=[\s\"«“'])", re.IGNORECASE)
 
 
 def legal_tail(name: str) -> str:
-    """Имя после организационной формы, ключом: «Kaspi Юр. ТОО "BBC HR"» → «bbchr».
+    """Имя после организационной формы, ключом: «Kaspi Юр. ТОО "Тумар Офис"» → «тумарофис».
 
     «Товарищество с ограниченной ответственностью» - тоже форма. Формы нет -
     пусто: имя без формы может быть чем угодно, хоть «Пополнение».
@@ -210,11 +210,11 @@ def legal_tail(name: str) -> str:
 
 
 def entities_of_accounts(session: Session, workspace: Workspace, names: Iterable[str]) -> dict[str, GroupEntity]:
-    """Чьё наше юрлицо названо в счёте: «Kaspi Юр. ТОО "BBC HR"» → BBC HR.
+    """Чьё наше юрлицо названо в счёте: «Kaspi Юр. ТОО "Тумар Офис"» → Тумар Офис.
 
     Имя после формы сравнивается целиком - с именем, полным наименованием и
-    написаниями нашего юрлица: «BBC» внутри «BBC HR» - не BBC, а «ТОО "BBC
-    Marketing and Sales"» без такого юрлица - никто. Ни одного или два
+    написаниями нашего юрлица: «Тумар» внутри «Тумар Офис» - не Тумар, а «ТОО
+    "Тумар Маркетинг"» без такого юрлица - никто. Ни одного или два
     юрлица под одно имя - предложения нет, решает человек.
     """
     own = _own_entities(session, workspace)
@@ -501,7 +501,7 @@ def set_bin(
     if not (raw or "").strip():
         party.bin, party.kind = "", ""
     else:
-        checked = bins.check(raw, party.name)
+        checked = packs.country_of(workspace).ids.check(raw, party.name)
         if not checked.ok:
             raise ParticipantError(checked.error)
         other = owner_of_bin(session, workspace, checked.number, but=party.id)
@@ -963,6 +963,7 @@ def bin_proposals(session: Session, workspace: Workspace, access: Access, book: 
     по ИИН. Плательщик, чьё имя и так совпадает с участником, оплату находит
     сам - его не предлагаем.
     """
+    ids = packs.country_of(workspace).ids
     from app.finance.onec import match as onec_match
 
     parties = {
@@ -978,7 +979,7 @@ def bin_proposals(session: Session, workspace: Workspace, access: Access, book: 
     found: dict[uuid.UUID, dict[str, list[str]]] = {}
 
     def note(party_id: uuid.UUID | None, number: str, evidence: str) -> None:
-        if party_id not in parties or not bins.checksum_ok(number) or number in _rejected(parties[party_id]):
+        if party_id not in parties or not ids.checksum_ok(number) or number in _rejected(parties[party_id]):
             return
         found.setdefault(party_id, {}).setdefault(number, [])
         if evidence not in found[party_id][number]:
@@ -1003,21 +1004,21 @@ def bin_proposals(session: Session, workspace: Workspace, access: Access, book: 
             base = bases.get(doc.base_id)
             # Продажа: клиент - заказчик договора; покупка 1С не читает.
             if base is not None and base.group_entity_id == info.executor_id:
-                note(info.customer_id, bins.digits(doc.party_bin), f"1С: «{doc.party_full_name or doc.party_name}»")
+                note(info.customer_id, packs.digits(doc.party_bin), f"1С: «{doc.party_full_name or doc.party_name}»")
 
-    # Сводка: «По Выписке Банка» с подписанным БИН у строки, нашедшей договор.
+    # Сводная: имя в банке с подписанным БИН у строки, нашедшей договор.
     if book is not None:
         matcher = book_module.Matcher(session, workspace.id)
         customers = dict(session.execute(sa.select(Contract.id, Contract.customer_id).where(Contract.workspace_id == workspace.id)).all())
         for row in book.rows:
-            numbers = bins.found_in(row.bank_name) + bins.found_in(row.onec_name)
+            numbers = ids.found_in(row.bank_name) + ids.found_in(row.onec_name)
             if not numbers:
                 continue
             match = matcher.match(row)
             if match.state != "found":
                 continue
             for number in numbers:
-                note(customers.get(match.contract_id), number, f"сводка, «По Выписке Банка»: «{row.bank_name[:90]}»")
+                note(customers.get(match.contract_id), number, f"сводная, имя в банке: «{row.bank_name[:90]}»")
 
     # Выписка: плательщик с ИИН - фамилия и инициал участника договора без БИН.
     from app.finance.models import Operation
@@ -1049,7 +1050,7 @@ def bin_proposals(session: Session, workspace: Workspace, access: Access, book: 
             )
         )
         for payer_id, name, bin_value, details in payers:
-            number = bins.digits(bin_value or (details or {}).get("bin") or "")
+            number = packs.digits(bin_value or (details or {}).get("bin") or "")
             key = short_name(name)
             if not number or key is None or payer_id in sides:
                 continue
@@ -1069,7 +1070,7 @@ def bin_proposals(session: Session, workspace: Workspace, access: Access, book: 
                 "numbers": [
                     {
                         "bin": number,
-                        "kind": bins.kind_of(number, party.name),
+                        "kind": ids.kind_of(number, party.name),
                         "evidence": evidence[:4],
                         "taken_by": {"id": str(taken[number].id), "name": taken[number].name} if taken[number] else None,
                     }
@@ -1086,7 +1087,7 @@ def reject_bin(session: Session, workspace: Workspace, access: Access, actor: Ac
     """«Не тот номер» - больше не предлагать его этому участнику."""
     _require_edit(access)
     party = _party(session, workspace, party_id)
-    clean = bins.digits(number)
+    clean = packs.digits(number)
     details = dict(party.details or {})
     details["bin_rejected"] = sorted(set(details.get("bin_rejected", [])) | {clean})
     party.details = details
@@ -1109,14 +1110,14 @@ _WORDS = re.compile(r"[0-9a-zа-я]+")
 def _code_owner(
     code: str, counts: dict[uuid.UUID, int], entities: dict[uuid.UUID, GroupEntity], names: dict[uuid.UUID, str]
 ) -> tuple[uuid.UUID | None, str]:
-    """Чей код «Наша Фирма» книги.
+    """Чей код нашего юрлица в таблице.
 
-    1. Код равен имени нашего юрлица («BBCA», «BBC Astana») - его, даже если
+    1. Код равен имени нашего юрлица («ТС», «Тумар Сервис») - его, даже если
        часть строк с этим кодом нашла договоры других юрлиц: это переводы
        клиентов, которых нет в реестре, и их покажет тень.
     2. Все строки с кодом нашли договоры одного юрлица - его.
     3. У одного юрлица не меньше 80% строк, и в его имени есть слово кода
-       («BBC Omar» → «Omar Development & Consulting») - его.
+       («ТМ Плюс» → «Тумар Плюс») - его.
     Иначе - спорно: решает человек.
     """
     key = party_key(code)
@@ -1128,7 +1129,7 @@ def _code_owner(
     total = sum(counts.values())
     best, rows = max(counts.items(), key=lambda item: item[1])
     # Слово кода говорит о юрлице, только если оно есть в имени ровно одного
-    # из наших юрлиц: общее для группы слово («BBC» у всех) ничего не решает.
+    # из наших юрлиц: общее для группы слово («Тумар» у всех) ничего не решает.
     words_of = {eid: set(_WORDS.findall(norm(names.get(eid, "")))) for eid in entities}
     distinct = {word for word in _WORDS.findall(norm(code)) if sum(word in words for words in words_of.values()) == 1}
     if total and rows / total >= CODE_MAJORITY and distinct & words_of.get(best, set()):
@@ -1150,11 +1151,11 @@ class Harvest:
 
 
 def harvest(session: Session, workspace: Workspace, access: Access, actor: Actor, book: book_module.Book, *, apply: bool) -> dict[str, Any]:
-    """Написания «Заказчик / По Выписке Банка / По 1C» - клиенту договора строки; коды «Наша Фирма» - юрлицам.
+    """Написания заказчика, имени в банке и в 1С - клиенту договора строки; коды наших юрлиц - юрлицам.
 
     Написание пишется, только если строка однозначно нашла договор (номер и
     клиент) и это написание - одного клиента: «Филиал "Южная столица" АО
-    "Kaspi Bank"» в «По Выписке Банка» стоит у семи клиентов, платящих через
+    "Kaspi Bank"» в колонке имени в банке стоит у семи клиентов, платящих через
     Kaspi, и написанием ни одного из них не является (25.10.2026). Код юрлица
     ставится, если все строки с этим кодом нашли договоры одного и того же
     нашего юрлица, а у юрлица кода ещё нет. Без `apply` - только показать, что

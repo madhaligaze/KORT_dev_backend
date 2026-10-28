@@ -24,6 +24,15 @@ from app.finance.contracts import service, setup, summary, views
 from app.finance.contracts.models import Contract
 from app.finance.db import finance_session
 
+import company_layer
+
+
+@pytest.fixture(autouse=True)
+def _company_layer(monkeypatch):
+    """Компания теста - с шапкой таблиц копии прода: её знает словарь компании, а не ядро (п.9 «Пакеты»)."""
+    company_layer.everywhere(monkeypatch)
+
+
 FULL = service.Access(view=True, edit=True, setup=True)
 OWNER = service.Actor(uuid.uuid4(), "owner@test")
 
@@ -107,8 +116,9 @@ def test_svodka_perezhivaet_vstavlennuyu_kolonku():
     row = _row("ТОО Альфа", "№1", "500")
     row = row[:10] + [""] + row[10:]
     index = summary.build_index([shifted, row], title="", worksheet="Сводка")
+    # Колонка находится по названию; позиций у ядра нет (п.9 «Пакеты»), и
+    # строки «колонка переехала» больше нет.
     assert index.match("№1", ["ТОО Альфа"]).paid == Decimal("500")
-    assert "Сумма Факт Поступ." in index.drift
 
 
 def test_svodka_bez_nuzhnoy_kolonki_otkazyvaet():
