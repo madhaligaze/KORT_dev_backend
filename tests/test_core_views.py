@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from datetime import date
 from decimal import Decimal
@@ -68,9 +69,20 @@ def audit():
     history.CONTEXT.reset(token)
 
 
+#: Идентификаторы - шестнадцатеричные: «bbc» встречается и внутри случайного
+#: UUID («…-4474-bbc9-…»), и тест падал через раз.
+UUID_TEXT = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
 def _words(payload) -> list[str]:
-    text = json.dumps(payload, ensure_ascii=False).lower()
-    return [word for word in BBC_WORDS if word in text]
+    """Слова BBC в ответе - с тем, что вокруг: по нему видно, откуда слово."""
+    text = UUID_TEXT.sub("", json.dumps(payload, ensure_ascii=False).lower())
+    found = []
+    for word in BBC_WORDS:
+        at = text.find(word)
+        if at >= 0:
+            found.append(f"{word}: …{text[max(0, at - 60):at + 40]}…")
+    return found
 
 
 # ── Новая компания ───────────────────────────────────────────────────────────
@@ -79,7 +91,8 @@ def _words(payload) -> list[str]:
 def test_novaya_kompaniya_bez_slov_bbc(app: FastAPI) -> None:
     """Готово по странице: у новой компании нет ни слова BBC - ни в схеме
     реестра (поля, написания шапок, значения, листы), ни в видах колонки.
-    Компания своя, не «BBC (тест)» общего помощника: её название - наше юрлицо."""
+    Компания своя, не «BBC (тест)» общего помощника: проверяем слова продукта,
+    а не те, что тест сам вписал."""
     from test_finance_access import PASSWORD, client
 
     owner = client(app)
