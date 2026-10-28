@@ -13,6 +13,11 @@
 названию не понять. Скрытые строки - вопрос: их спрятал человек, и черновик
 договора, который не заключили, заводить молча нельзя.
 
+Колонки-повторы («Оплата 1», «Оплата 2» - `Field.repeat`) - не спор: это
+вторая оплата той же строки. Номер в хвосте шапки отбрасывается только для
+них. Словарь компании (`forms(words=...)`) - шапки, которые человек однажды
+назначил колонкам: в следующем таком файле KORT узнаёт их сам.
+
 Ничего не пишет: это «предложить» для файла - что KORT видит и о чём
 спросит, до того как разбор формы что-то заведёт.
 """
@@ -36,6 +41,8 @@ CLOSE_RATIO = 0.8
 #: Довод «таблица назвала себя сама» - в очках совпадения колонок.
 WORD_BONUS = 3
 _ROW_NUMBER = frozenset({"№", "#", "n", "no", "№ п/п", "п/п"})
+#: «Оплата 1», «Дата 2», «Оплата №3»: номер повтора в хвосте шапки.
+_REPEAT_TAIL = re.compile(r"\s*(?:№\s*)?(\d{1,2})$")
 
 
 @dataclass(frozen=True)
@@ -54,6 +61,8 @@ class Matcher:
 
     def __init__(self, fields: Sequence[Field]):
         self.fields = list(fields)
+        self.repeats = {item.key for item in self.fields if item.repeat}
+        self.patterned = [item for item in self.fields if item.patterns]
         self.by_name: dict[str, list[str]] = {}
         self.by_squashed: dict[str, list[str]] = {}
         self.squashed: dict[str, set[str]] = {}
@@ -88,6 +97,15 @@ class Matcher:
         ):
             if keys:
                 return Match(tuple(dict.fromkeys(keys)), how)
+        patterned = [item.key for item in self.patterned if forms_module.pattern_hit(item, raw)]
+        if patterned:
+            return Match(tuple(patterned), "core")
+        if self.repeats and _REPEAT_TAIL.search(full):
+            # Номер повтора отбрасывается только для колонок-повторов: «Техн. 1» - своё имя.
+            base = _REPEAT_TAIL.sub("", full)
+            keys = [key for key in self.by_name.get(base, []) + self.by_name.get(core(base), []) if key in self.repeats]
+            if keys:
+                return Match(tuple(dict.fromkeys(keys)), "core")
         if len(squashed) >= 4:
             keys = [key for key, names in self.squashed.items() if any(_loose(squashed, name) for name in names)]
             if keys:
@@ -241,7 +259,7 @@ def read_as(table: Table, form: Form, *, matcher: Matcher | None = None) -> Read
         best = max(Match((key,), item.how).strength for item in placed)
         top = [item for item in placed if Match((key,), item.how).strength == best]
         score += best
-        if len(top) > 1:
+        if len(top) > 1 and key not in matcher.repeats:
             item = form.field(key)
             names = ", ".join(f"«{entry.header.strip()}»" for entry in top)
             if item is not None and item.money:

@@ -931,12 +931,37 @@ def _rejected(party: Counterparty) -> set[str]:
     return {str(item) for item in (party.details or {}).get("bin_rejected", [])}
 
 
+#: Буквы имени человека - кириллица с казахскими, латиница.
+_NAME_WORD = re.compile(r"[a-zа-яёәіңғүұқөһ]+")
+
+
+def short_name(name: str) -> tuple[str, str] | None:
+    """Фамилия и первая буква имени человека: «КАСЫМОВ Е.» и «Касымов Ерлан» - («касымов», «е»).
+
+    Только для имени человека из двух-трёх слов без формы собственности: у
+    ТОО «фамилии» нет, и «Алтын Дала» не должно сойтись с «Алтын Арман».
+    """
+    if form_of(name):
+        return None
+    words = _NAME_WORD.findall(norm(_expand(name)))
+    if len(words) not in (2, 3) or len(words[0]) < 2:
+        return None
+    return words[0], words[1][0]
+
+
 def bin_proposals(session: Session, workspace: Workspace, access: Access, book: book_module.Book | None = None) -> list[dict[str, Any]]:
-    """Однозначные БИН для участников без БИН: из 1С и строк банка в сводке.
+    """Однозначные БИН для участников без БИН: из 1С, строк банка в сводке и выписок.
 
     Однозначно - когда у участника из всех источников ровно один номер и этот
     номер не записан у другого участника. Иначе предложение с пометкой
     «спорно» и всеми номерами - выбирает человек.
+
+    Выписка: слушатель платит с карты, банк пишет «КАСЫМОВ Е.» и ИИН, а в
+    таблице он «Касымов Ерлан» без ИИН (полигон, У9). По имени такая оплата
+    договора не находит; фамилия и инициал единственного участника без БИН
+    (`short_name`) - предложение записать ему ИИН плательщика, и оплата сядет
+    по ИИН. Плательщик, чьё имя и так совпадает с участником, оплату находит
+    сам - его не предлагаем.
     """
     from app.finance.onec import match as onec_match
 
@@ -993,6 +1018,44 @@ def bin_proposals(session: Session, workspace: Workspace, access: Access, book: 
                 continue
             for number in numbers:
                 note(customers.get(match.contract_id), number, f"сводка, «По Выписке Банка»: «{row.bank_name[:90]}»")
+
+    # Выписка: плательщик с ИИН - фамилия и инициал участника договора без БИН.
+    from app.finance.models import Operation
+
+    sides = {
+        party_id
+        for pair in session.execute(
+            sa.select(Contract.customer_id, Contract.executor_id).where(
+                Contract.workspace_id == workspace.id, Contract.deleted_at.is_(None)
+            )
+        )
+        for party_id in pair
+        if party_id in parties
+    }
+    by_short: dict[tuple[str, str], list[uuid.UUID]] = {}
+    for party_id in sides:
+        key = short_name(parties[party_id].name)
+        if key is not None:
+            by_short.setdefault(key, []).append(party_id)
+    if by_short:
+        payers = session.execute(
+            sa.select(Counterparty.id, Counterparty.name, Counterparty.bin, Counterparty.details).where(
+                Counterparty.workspace_id == workspace.id,
+                Counterparty.id.in_(
+                    sa.select(Operation.counterparty_id).where(
+                        Operation.workspace_id == workspace.id, Operation.kind == "income", Operation.deleted_at.is_(None)
+                    )
+                ),
+            )
+        )
+        for payer_id, name, bin_value, details in payers:
+            number = bins.digits(bin_value or (details or {}).get("bin") or "")
+            key = short_name(name)
+            if not number or key is None or payer_id in sides:
+                continue
+            fitting = [party_id for party_id in by_short.get(key, []) if party_key(parties[party_id].name) != party_key(name)]
+            if len(fitting) == 1 and len(by_short.get(key, [])) == 1:
+                note(fitting[0], number, f"выписка: «{name}»")
 
     out = []
     for party_id, numbers in found.items():

@@ -23,6 +23,16 @@
 «Сумма по договору» - и лист не прочитается. Словарь - названия колонок
 компании, добавленные к названиям ядра: ключ колонки → написания. Только
 названия, не номера (правило проекта «колонки - по названиям»).
+
+Разметка таблиц (`intake`, этап 2, шаг «Excel любой формы»)
+────────────────────────────────────────────────────────────
+Таблицу отдела, которую KORT не узнал сам, человек размечает один раз: что
+значит строка, что значит каждая колонка, порядок частей даты, чьи это
+договоры. `words` - словарь компании по формам (ключ колонки → шапки): в
+любом следующем файле с такой шапкой колонка узнаётся без вопроса.
+`layouts` - разметка листа целиком по подписи его шапки (`intake/layout.
+signature` - набор названий, не порядок: «Июль» с переставленными
+колонками - тот же лист).
 """
 from __future__ import annotations
 
@@ -357,3 +367,64 @@ __all__ = [
     "set_table_word",
     "table_words",
 ]
+
+
+# ── Разметка таблиц (этап 2, «Excel любой формы») ───────────────────────────
+
+#: Сколько разметок держит компания: таблиц отделов - десятки, не тысячи.
+LAYOUTS_MAX = 500
+
+
+def intake_words(session: Session, workspace_id: uuid.UUID) -> dict[str, dict[str, list[str]]]:
+    """Словарь компании для приёмника: форма → ключ колонки → шапки, назначенные человеком."""
+    row = session.get(CoreSettings, workspace_id)
+    raw = (((row.data if row is not None else None) or {}).get("intake") or {}).get("words") or {}
+    return {form: {key: [str(name) for name in names] for key, names in (items or {}).items()} for form, items in raw.items()}
+
+
+def intake_layouts(session: Session, workspace_id: uuid.UUID) -> dict[str, dict[str, Any]]:
+    """Разметки листов по подписи шапки."""
+    row = session.get(CoreSettings, workspace_id)
+    return dict((((row.data if row is not None else None) or {}).get("intake") or {}).get("layouts") or {})
+
+
+def remember_layout(
+    session: Session, workspace: Workspace, access: Access, actor: Actor, signature: str, layout: dict[str, Any]
+) -> None:
+    """Запомнить разметку листа и шапки её колонок - в словарь компании (повтор ничего не пишет)."""
+    if not access.edit:
+        raise PermissionError("Размечать таблицы можно с правом правки реестра")
+    row = _row(session, workspace)
+    if row is None:
+        row = CoreSettings(workspace_id=workspace.id, data={})
+        session.add(row)
+    data = dict(row.data or {})
+    section = dict(data.get("intake") or {})
+    layouts = dict(section.get("layouts") or {})
+    words = {form: {key: list(names) for key, names in items.items()} for form, items in (section.get("words") or {}).items()}
+    form = str(layout.get("form") or "")
+    added: list[str] = []
+    for header, key in (layout.get("columns") or {}).items():
+        name = norm(header)
+        if not key or not name or len(name) > 200:
+            continue
+        names = words.setdefault(form, {}).setdefault(str(key), [])
+        if name not in names:
+            names.append(name)
+            added.append(name)
+    if layouts.get(signature) == layout and not added:
+        return
+    layouts[signature] = layout
+    if len(layouts) > LAYOUTS_MAX:
+        raise FinanceError("Разметок таблиц слишком много - уберите старые")
+    section["layouts"], section["words"] = layouts, words
+    data["intake"] = section
+    row.data = data
+    row.updated_by = actor.user_id
+    row.updated_at = datetime.now(timezone.utc)
+    session.flush()
+    history.write(
+        session, workspace, kind="core.settings", entity="core_settings", entity_id=None,
+        title=f"разметка листа «{layout.get('sheet') or '-'}»" + (f": колонки {', '.join(f'«{name}»' for name in added[:6])}" if added else ""),
+        after={"intake": {"layout": signature, "words": added}}, actor=actor.email,
+    )

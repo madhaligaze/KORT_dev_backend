@@ -186,12 +186,16 @@ def apply_wanted(
     since: date,
     source: str,
     title: str,
+    only: set[uuid.UUID] | None = None,
 ) -> dict[str, Any]:
     """Записать сальдо любого источника пачкой: основание → договор → сумма или (сумма, строка).
 
-    Один путь для сводной таблицы (`book`) и ОСВ 1С (`1c`): сальдо, поставленное
-    человеком, источник не перебивает; снятое раньше возвращается под тем же
-    ключом; пачка - одна точка восстановления `core_opening`.
+    Один путь для сводной таблицы (`book`), ОСВ 1С (`1c`) и таблиц отделов
+    (`file`): сальдо, поставленное человеком, источник не перебивает; снятое
+    раньше возвращается под тем же ключом; пачка - одна точка восстановления
+    `core_opening`. Источник целиком (сводная, ОСВ) снимает сальдо договоров,
+    которых в нём нет; `only` - только эти договоры: таблица одного отдела не
+    знает о сальдо других.
     """
     _require(access)
     wanted = {
@@ -202,6 +206,8 @@ def apply_wanted(
     touched: set[uuid.UUID] = set()
     for basis in BASES:
         existing = current(session, workspace, since, basis)
+        if only is not None:
+            existing = {key: doc for key, doc in existing.items() if key in only}
         for contract_id in set(wanted[basis]) | set(existing):
             amount, line = wanted[basis].get(contract_id, (_ZERO, 0))
             doc = existing.get(contract_id)

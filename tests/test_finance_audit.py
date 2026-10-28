@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import io
+import json
 import uuid
 from typing import Any
 
@@ -44,6 +45,20 @@ def _sales_file() -> bytes:
     sheet.append(["Дата", "Номер", "Организация", "Контрагент", "Договор", "Сумма", "Валюта", "Содержание"])
     sheet.append([datetime(2026, 9, 30, 18), "00000000001", "ТОО BBC", "ТОО Альфа", "Договор № 1 от 01.01.2026", 100000, "KZT",
                   "Услуги за период с 01.09.2026 по 30.09.2026"])
+    buffer = io.BytesIO()
+    book.save(buffer)
+    return buffer.getvalue()
+
+
+def _listeners_file() -> bytes:
+    """Таблица отдела, которую KORT сам не узнаёт: слушатели курсов."""
+    from openpyxl import Workbook
+
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "Слушатели"
+    sheet.append(["ФИО / Организация", "Курс", "Начало", "Стоимость"])
+    sheet.append(["Касымов Ерлан", "Бухгалтерия с нуля", "15.09.2026", 350000])
     buffer = io.BytesIO()
     book.save(buffer)
     return buffer.getvalue()
@@ -81,6 +96,7 @@ ALLOWED: dict[tuple[str, str], str] = {
     ("POST", "/contracts/setup/views/preview"): "считает договоры под правило листа, в базу не пишет",
     ("POST", "/core/vat/preview"): "считает оборот юрлиц до и после перевода клиентов, в базу не пишет",
     ("POST", "/core/intake"): "приёмник называет форму каждого листа файла, в базу не пишет",
+    ("POST", "/core/intake/plan"): "предложение и сверка таблицы по разметке, в базу не пишет",
     ("POST", "/contracts/imports/{batch_id}/decide"): (
         "решения протокола - черновик разбора; события пишут загрузка файла и заведение"
     ),
@@ -367,6 +383,14 @@ def test_kazhdyy_izmenyayushchiy_marshrut_pishet_sobytie(app: FastAPI, monkeypat
         owner, "POST", "/core/onec-files",
         files=[("files", ("Реализация товаров и услуг.xlsx", _sales_file(), XLSX))],
     )
+    # Excel любой формы: разметка таблицы отдела запоминается словарём компании.
+    listeners = json.dumps({"sheets": {"Слушатели": {
+        "form": "contract", "columns": {"ФИО / Организация": "customer", "Курс": "subject", "Начало": "billing_from", "Стоимость": "amount"},
+        "billing": "total",
+    }}})
+    owner.post(f"{BASE}/core/intake/plan", files={"file": ("Учебный центр.xlsx", _listeners_file(), XLSX)}, data={"answers": listeners})
+    walk.call(owner, "POST", "/core/intake/apply", files={"file": ("Учебный центр.xlsx", _listeners_file(), XLSX)},
+              data={"answers": listeners})
 
     # ── компании ────────────────────────────────────────────────────────
     second = walk.call(owner, "POST", "/auth/companies", json={"title": "Вторая"}).json()["id"]

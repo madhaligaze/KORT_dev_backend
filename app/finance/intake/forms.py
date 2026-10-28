@@ -7,12 +7,19 @@
 колонок - реестр, выписка, сводная таблица.
 
 Написания колонок - открытый список. Новое написание - строка здесь (или в
-словаре компании), а не правка разбора.
+словаре компании - `forms(words=...)`, ответ человека в разметке листа), а не
+правка разбора.
+
+Колонка-повтор (`repeat`) - группа, которую таблица держит несколько раз:
+«Оплата 1 | Дата 1 | Оплата 2 | Дата 2» у таблицы слушателей. Две такие
+колонки - не спор, а вторая оплата той же строки. Колонка с датой в шапке
+(`patterns`) - «Долг на 01.06»: написание с любой датой.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from app.finance.layout import Column, norm
 
@@ -26,12 +33,18 @@ BALANCE = "balance"
 
 @dataclass(frozen=True)
 class Field:
-    """Колонка формы: ключ, подпись и написания шапки. `money` - деньги: спор за неё - отказ."""
+    """Колонка формы: ключ, подпись и написания шапки. `money` - деньги: спор за неё - отказ.
+
+    `repeat` - колонка группы, которую строка держит несколько раз (оплаты по
+    порядку); `patterns` - написания с переменной частью («долг на 01.06»).
+    """
 
     key: str
     title: str
     names: tuple[str, ...]
     money: bool = False
+    repeat: bool = False
+    patterns: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -54,8 +67,12 @@ class Form:
         return next((item for item in self.fields if item.key == key), None)
 
 
-def _f(key: str, title: str, *names: str, money: bool = False) -> Field:
-    return Field(key, title, tuple(dict.fromkeys(norm(name) for name in (title, *names) if name)), money)
+def _f(key: str, title: str, *names: str, money: bool = False, repeat: bool = False, patterns: tuple[str, ...] = ()) -> Field:
+    return Field(key, title, tuple(dict.fromkeys(norm(name) for name in (title, *names) if name)), money, repeat, patterns)
+
+
+#: «Долг на 01.06», «Сальдо на 01.06.2026», «Задолженность на 1 июня»: остаток на дату из шапки.
+OPENING_ON = r"^(?:долг|сальдо|задолженность|остаток долга)\s+на\s+\d"
 
 
 def from_columns(columns: Iterable[Column], money: Iterable[str] = ()) -> tuple[Field, ...]:
@@ -96,6 +113,10 @@ def contract_fields(extra: Sequence[Any] = ()) -> tuple[Field, ...]:
         merged = (*(known.names if known else ()), *names)
         out[key] = _f(key, getattr(item, "title"), *merged, money=getattr(item, "type", "") == "money")
     out["party_bin"] = _f("party_bin", "БИН/ИИН стороны", "бин/иин", "иин/бин", "бин", "иин", "бин клиента", "иин клиента")
+    # Оплаты в строке договора («Оплата 1 | Дата 1 | …» у таблицы слушателей) -
+    # то, что отдел записал себе. Оплаты KORT берёт из банка; эти - для сверки.
+    out["pay_sum"] = _f("pay_sum", "Оплата в строке", "оплата", "сумма оплаты", "платеж", "платёж", money=True, repeat=True)
+    out["pay_date"] = _f("pay_date", "Дата оплаты в строке", "дата оплаты", "дата платежа", repeat=True)
     return tuple(out.values())
 
 
@@ -122,6 +143,8 @@ def contract_month_fields() -> tuple[Field, ...]:
         _f("debt", "Долг", "задолженность", "остаток долга", money=True),
         _f("month", "Месяц", "период", "месяц начисления", "техн. 1"),
         _f("note", "Примечание", "комментарий", "доп. коммент."),
+        # «Долг на 01.06» в листе первого месяца - входящее сальдо договора на этот день.
+        _f("opening", "Долг на начало", "долг на начало", "сальдо на начало", money=True, patterns=(OPENING_ON,)),
         # Колонка денег без слов, чьи они: «Сумма». Одна - сумма месяца; две
         # одинаковые - отказ читать: какая из них аренда, а какая коммунальные,
         # по названию не понять (полигон, Ф5).
@@ -132,7 +155,8 @@ def contract_month_fields() -> tuple[Field, ...]:
         # «Сумма Факт Поступ.»): её видит любая компания (R14).
         known = base.get(item.key)
         names = (*(known.names if known else ()), *item.names)
-        base[item.key] = Field(item.key, item.title, tuple(dict.fromkeys(names)), item.money or bool(known and known.money))
+        base[item.key] = Field(item.key, item.title, tuple(dict.fromkeys(names)), item.money or bool(known and known.money),
+                               item.repeat, item.patterns)
     return tuple(base.values())
 
 
@@ -181,8 +205,10 @@ BALANCE_FIELDS: tuple[Field, ...] = (
        "сальдо на конец периода дт", money=True),
     _f("closing_credit", "Сальдо на конец периода Кредит", "сальдо на конец кредит", "конечное сальдо кредит",
        "сальдо на конец периода кт", money=True),
-    _f("opening", "Сальдо на начало", "входящее сальдо", "сальдо начало", "долг на начало", money=True),
+    _f("opening", "Сальдо на начало", "входящее сальдо", "сальдо начало", "долг на начало", money=True, patterns=(OPENING_ON,)),
     _f("closing", "Сальдо на конец", "исходящее сальдо", "сальдо конец", "долг на конец", money=True),
+    # Чей остаток, если строка - не уровень ОСВ, а строка таблицы: «Долги на 01.06» учебного центра.
+    _f("contract", "Договор", "№ договора", "номер договора", "договор контрагента"),
 )
 
 MONTH_WORDS = (
@@ -191,8 +217,25 @@ MONTH_WORDS = (
 )
 
 
-def forms(contract_extra: Sequence[Any] = ()) -> tuple[Form, ...]:
-    """Шесть форм с каталогами; `contract_extra` - поля реестра компании."""
+def with_words(form: Form, words: Mapping[str, Sequence[str]]) -> Form:
+    """Форма с написаниями компании: ключ колонки → шапки, которые человек ей назначил."""
+    if not words:
+        return form
+    fields = []
+    for item in form.fields:
+        extra = tuple(norm(name) for name in words.get(item.key, ()) if norm(name))
+        fields.append(Field(item.key, item.title, tuple(dict.fromkeys((*item.names, *extra))), item.money, item.repeat, item.patterns)
+                      if extra else item)
+    return Form(form.key, form.title, form.examples, tuple(fields), form.needs, form.words, form.not_words)
+
+
+def forms(contract_extra: Sequence[Any] = (), words: Mapping[str, Mapping[str, Sequence[str]]] | None = None) -> tuple[Form, ...]:
+    """Шесть форм с каталогами; `contract_extra` - поля реестра компании, `words` - словарь компании по формам."""
+    words = words or {}
+    return tuple(with_words(form, words.get(form.key) or {}) for form in _forms(contract_extra))
+
+
+def _forms(contract_extra: Sequence[Any] = ()) -> tuple[Form, ...]:
     return (
         Form(
             PARTICIPANT, "участник", "список клиентов, контрагенты 1С",
@@ -225,13 +268,21 @@ def forms(contract_extra: Sequence[Any] = ()) -> tuple[Form, ...]:
         Form(
             BALANCE, "остаток на дату", "ОСВ по 1210, «Сальдо Начало» таблицы, долги на дату",
             BALANCE_FIELDS,
-            needs=(("opening_debit", "opening_credit", "closing_debit", "closing_credit", "opening", "closing"),),
+            needs=(("opening_debit", "opening_credit", "closing_debit", "closing_credit", "opening", "closing"), ("account", "contract")),
             words=("оборотно-сальдов", "осв", "сальдо", "долги на"),
         ),
     )
 
 
+def by_key(key: str, catalog: Sequence[Form] | None = None) -> Form:
+    return next(form for form in (catalog or forms()) if form.key == key)
+
+
+def pattern_hit(item: Field, header: str) -> bool:
+    return any(re.search(pattern, norm(header)) for pattern in item.patterns)
+
+
 __all__ = [
-    "BALANCE", "CONTRACT", "CONTRACT_MONTH", "DOCUMENT", "Field", "Form", "PARTICIPANT", "PAYMENT",
-    "contract_fields", "contract_month_fields", "forms", "from_columns", "payment_fields",
+    "BALANCE", "CONTRACT", "CONTRACT_MONTH", "DOCUMENT", "Field", "Form", "OPENING_ON", "PARTICIPANT", "PAYMENT",
+    "by_key", "contract_fields", "contract_month_fields", "forms", "from_columns", "pattern_hit", "payment_fields", "with_words",
 ]
