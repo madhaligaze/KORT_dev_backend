@@ -440,6 +440,10 @@ def post(
     elif picked is not None:
         if chosen != ["journal"]:
             raise ValueError("по операциям проводится только журнал денег")
+        from app.finance.contracts.payments import widen
+
+        # Одинаковые оплаты на одинаковые договоры решаются вместе (`_pair_twins`).
+        picked = widen(session, workspace.id, picked)
         wanted.update(_journal_drafts(session, workspace, picked))
         prefixes = list(PREFIXES["journal"])
     else:
@@ -710,6 +714,10 @@ def _dirt(obj: Any, how: str) -> list[tuple[str, uuid.UUID]]:
         kinds = [obj.kind, *(_was(obj, "kind") if how == "dirty" else ())]
         comments = [obj.comment, *(_was(obj, "comment") if how == "dirty" else ())]
         if any(is_refund(kind, comment) for kind in kinds for comment in comments):
+            return [("journal", WHOLE)]
+        # Близнецы операции (`contracts/payments.widen`) ищутся по её стороне и
+        # сумме: стёртую или сменившую их - прежних близнецов уже не найти.
+        if how == "deleted" or (how == "dirty" and _changed(obj, frozenset({"counterparty_id", "amount_base"}))):
             return [("journal", WHOLE)]
         return [("journal", obj.id)]
     if isinstance(obj, ContractPayment):

@@ -1035,6 +1035,18 @@ def analyze_rows(
             continue
         date_cells.extend(row[index] for row in body if index < len(row))
     reading = decide_date_order(date_cells)
+    if reading.ambiguous and header_index > 0:
+        # Все даты операций - с днём не больше 12 (выписка ИП за июнь, полигон),
+        # но над таблицей тот же банк печатает «Период: 01.06.2026 - 30.06.2026»:
+        # 30 на первом месте решает порядок для всего файла. Противоречие в
+        # самих операциях реквизиты не перебивают - оно остаётся вопросом.
+        above = [
+            piece for cells in rows[:header_index] for cell in cells if isinstance(cell, str)
+            for piece in _DATE_IN_TEXT.findall(cell)
+        ]
+        joined = decide_date_order([*date_cells, *above]) if above else reading
+        if not joined.ambiguous:
+            reading = DateReading(joined.order, f"{joined.evidence} - в реквизитах над таблицей")
     if date_order in ("dmy", "mdy"):
         reading = DateReading(date_order, "порядок указан человеком", ambiguous=False)
 

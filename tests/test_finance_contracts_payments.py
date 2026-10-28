@@ -58,7 +58,7 @@ def _make(session, space_id, **values):
     return service.create(session, _ws(session, space_id), FULL, OWNER, values)
 
 
-def _income(session, space_id, payer: str, amount: str, day: date, *, bin_value: str = "") -> uuid.UUID:
+def _income(session, space_id, payer: str, amount: str, day: date, *, bin_value: str = "", comment: str = "") -> uuid.UUID:
     workspace = _ws(session, space_id)
     account = session.query(Account).filter(Account.workspace_id == space_id, Account.name == "Kaspi BBC").one()
     party = finance_service.ensure_counterparty(session, space_id, payer)
@@ -68,7 +68,8 @@ def _income(session, space_id, payer: str, amount: str, day: date, *, bin_value:
         session,
         workspace,
         finance_service.OperationInput(
-            kind="income", paid_at=day, amount=Decimal(amount), account_to_id=account.id, counterparty_id=party.id
+            kind="income", paid_at=day, amount=Decimal(amount), account_to_id=account.id, counterparty_id=party.id,
+            comment=comment,
         ),
     )
     session.flush()
@@ -138,6 +139,52 @@ def test_dva_dogovora_platezh_po_sroku_inache_spornyy(space):
         # «Как по выписке» - снова спорный.
         payments.decide(session, _ws(session, space), FULL, OWNER, third.id, disputed, "auto")
         assert _summary(session, space, third.id)["open"] == 1
+
+
+def test_odinakovye_oplaty_na_odinakovye_dogovory_po_odnoy_kazhdomu(space):
+    """Две оплаты за июнь без номера на два договора аренды по 180 000 - по одной каждому (полигон, «Береке»).
+
+    Какую ни отнеси к какому, оплачены оба июня. Одна оплата за сентябрь на те же
+    договоры - спорная (О4): от ответа зависит, чей месяц останется долгом.
+    Журнал фактов проводит операции по ключам - вторая оплата пары, пришедшая
+    позже, решает и первую.
+    """
+    import sqlalchemy as sa
+
+    from app.finance.core.models import Fact
+    from app.finance.core.payments import Money
+
+    def facts(session) -> dict[uuid.UUID, uuid.UUID | None]:
+        rows = session.execute(sa.select(Fact.key, Fact.contract_id).where(Fact.workspace_id == space, Fact.ended_seq.is_(None)))
+        return {uuid.UUID(key[3:]): contract_id for key, contract_id in rows if key.startswith("op:")}
+
+    with finance_session() as session:
+        a11 = _make(session, space, executor="BBC", customer="ТОО Береке", type="Абонентское обслуживание",
+                    amount="180000", signed_at="01.02.2026", number="А-11")
+        a12 = _make(session, space, executor="BBC", customer="ТОО Береке", type="Абонентское обслуживание",
+                    amount="180000", signed_at="01.02.2026", number="А-12")
+        first = _income(session, space, "ТОО Береке", "180000", date(2026, 7, 6), comment="Оплата за аренду за июнь 2026")
+        Money(session, _ws(session, space), today=date(2026, 10, 25))
+        assert facts(session)[first] is None, "одна оплата на два договора - спорная"
+        a11_id, a12_id = a11.id, a12.id
+        session.commit()
+    with finance_session() as session:
+        second = _income(session, space, "ТОО Береке", "180000", date(2026, 7, 11), comment="Оплата за аренду за июнь 2026")
+        september = _income(session, space, "ТОО Береке", "180000", date(2026, 9, 5), comment="Аренда за сентябрь")
+        Money(session, _ws(session, space), today=date(2026, 10, 25))
+        posted = facts(session)
+        assert {posted[first], posted[second]} == {a11_id, a12_id}, "пара решена, и первая перепроведена вместе со второй"
+        assert posted[september] is None, "О4: одна оплата на два договора - вопрос"
+        workspace = _ws(session, space)
+        both = [service.get_contract(session, workspace, item) for item in (a11_id, a12_id)]
+        allocation = payments.allocate(session, workspace, service.Registry(session, workspace), both)
+        assert sorted(item.id for item in allocation.open[a11_id]) == [september]
+        # Человек отнёс первую июньскую ко второму договору - вторая уходит к оставшемуся.
+        payments.decide(session, workspace, FULL, OWNER, a12_id, first, "link")
+        session.flush()
+        Money(session, workspace, today=date(2026, 10, 25))
+        posted = facts(session)
+        assert posted[first] == a12_id and posted[second] == a11_id
 
 
 def test_dogovor_bez_daty_ne_delaet_vse_oplaty_spornymi(space):

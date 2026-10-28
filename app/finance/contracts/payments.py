@@ -34,6 +34,18 @@
 виден у каждого кандидата с «Отнести к этому договору» и в «Оплачено» не
 входит - угадывать нельзя (правило проекта «не угадывать»).
 
+**Одинаковые оплаты на одинаковые договоры** - не спор. У клиента два
+договора аренды по 180 000, и за июнь пришли две оплаты по 180 000 без номера
+(полигон, «Береке»): какую ни отнеси к какому договору, оплачены оба июня, и
+вопрос человеку ничего не решает. Близнецы - спорные оплаты одного
+направления с теми же кандидатами, той же суммой, равной сумме каждого
+кандидата, и за тот же месяц (месяц словами назначения, иначе месяц платежа);
+если их ровно столько, сколько кандидатов (вместе с оплатами этой группы,
+которые человек уже отнёс сам), - по одной каждому договору. Одна оплата на
+два таких договора по-прежнему спорная (О4): от ответа зависит, чей месяц
+останется долгом. Близнецы решаются вместе, поэтому журнал фактов проводит
+операцию вместе с ними (`widen`).
+
 **Номер договора из источника** (`Operation.contract_ref`, «№ЮО/84» в
 журнале, 25.10.2026) - довод сильнее плательщика: платит нередко не сам
 клиент (Kaspi Pay от физлица, другое ТОО), и по имени такая оплата не
@@ -121,6 +133,11 @@ _NOT_REFUND = ("обеспечительн", "депозит", "залог", "г
 _DEPOSIT = ("обеспечительн", "гарантийный взнос", "гарантийного взноса", "залог")
 #: Сколько дней после поступления его возврат той же суммы ещё делает его возвращённым.
 RETURN_DAYS = 31
+#: «за июнь 2026», «за сентябрь»: месяц, за который платят, словами назначения.
+_MONTH_NAMED = re.compile(
+    r"(?<![а-яё])(январ|феврал|март|апрел|ма[йя]|июн|июл|август|сентябр|октябр|ноябр|декабр)[а-яё]*(?:\s+(\d{4}))?"
+)
+_MONTH_STEMS = ("январ", "феврал", "март", "апрел", "ма", "июн", "июл", "август", "сентябр", "октябр", "ноябр", "декабр")
 
 #: Срок договора для выбора между несколькими: предоплата - за месяц до даты
 #: договора, последний месяц - в два месяца после окончания.
@@ -334,6 +351,89 @@ def _named(
     return next(iter(found.values())) if len(found) == 1 else []
 
 
+def _paid_for(operation: Any) -> tuple[int, int]:
+    """За какой месяц платёж: месяц словами назначения, иначе месяц платежа."""
+    day = operation.paid_at
+    match = _MONTH_NAMED.search(norm(operation.comment or ""))
+    if match is None:
+        return day.year, day.month
+    month = next(index for index, stem in enumerate(_MONTH_STEMS, start=1) if match.group(1).startswith(stem))
+    if match.group(2):
+        return int(match.group(2)), month
+    # «Аренда за декабрь», заплаченная в январе, - декабрь прошлого года.
+    return (day.year - 1 if month > day.month + 1 else day.year), month
+
+
+def _pair_twins(
+    result: Allocation, operations: list[Any], manual: dict[uuid.UUID, uuid.UUID | None], sides: list[Side], by_party: set[uuid.UUID]
+) -> None:
+    """Одинаковые оплаты на одинаковые договоры - по одной каждому (см. описание модуля).
+
+    `by_party` - спорные по плательщику: спор номера с плательщиком решает человек.
+    """
+    candidates: dict[uuid.UUID, set[uuid.UUID]] = {}
+    for contract_id, items in result.open.items():
+        for operation in items:
+            if operation.id in by_party:
+                candidates.setdefault(operation.id, set()).add(contract_id)
+    if not candidates:
+        return
+    amounts = {side.contract_id: side.amount for side in sides}
+    numbers = {side.contract_id: side.number for side in sides}
+    rows = {operation.id: operation for operation in operations}
+    groups: dict[tuple[Any, ...], list[Any]] = {}
+    for operation_id, contract_ids in candidates.items():
+        operation = rows[operation_id]
+        if len(contract_ids) < 2 or any(amounts.get(item) != operation.amount_base for item in contract_ids):
+            continue
+        key = (frozenset(contract_ids), operation.kind, operation.amount_base, _paid_for(operation))
+        groups.setdefault(key, []).append(operation)
+    decided = [rows[operation_id] for operation_id in manual if operation_id in rows]
+    for (contract_ids, kind, amount, month), items in groups.items():
+        taken = [
+            manual[operation.id] for operation in decided
+            if manual[operation.id] in contract_ids and operation.kind == kind and operation.amount_base == amount
+            and _paid_for(operation) == month
+        ]
+        if len(set(taken)) != len(taken) or len(items) + len(taken) != len(contract_ids):
+            continue
+        free = sorted(contract_ids - set(taken), key=lambda item: (numbers.get(item, ""), str(item)))
+        for operation, contract_id in zip(sorted(items, key=lambda row: (row.paid_at, str(row.id))), free):
+            for item in contract_ids:
+                result.open[item] = [row for row in result.open.get(item, []) if row.id != operation.id]
+            result.paid.setdefault(contract_id, []).append((operation, "auto"))
+    result.open = {contract_id: items for contract_id, items in result.open.items() if items}
+
+
+def widen(session: Session, workspace_id: uuid.UUID, operations: set[uuid.UUID]) -> set[uuid.UUID]:
+    """Операции вместе с возможными близнецами - те же сторона и сумма (`_pair_twins` решает их вместе)."""
+    ids = list(operations)
+    pairs: set[tuple[uuid.UUID, Decimal]] = set()
+    for start in range(0, len(ids), 500):
+        pairs.update(
+            session.execute(
+                sa.select(Operation.counterparty_id, Operation.amount_base).where(
+                    Operation.id.in_(ids[start : start + 500]), Operation.counterparty_id.is_not(None)
+                )
+            ).all()
+        )
+    if not pairs:
+        return operations
+    out = set(operations)
+    parties = list({party for party, _amount in pairs})
+    for start in range(0, len(parties), 500):
+        for operation_id, party, amount in session.execute(
+            sa.select(Operation.id, Operation.counterparty_id, Operation.amount_base).where(
+                Operation.workspace_id == workspace_id,
+                Operation.counterparty_id.in_(parties[start : start + 500]),
+                Operation.kind.in_(("income", "expense")),
+            )
+        ):
+            if (party, amount) in pairs:
+                out.add(operation_id)
+    return out
+
+
 def allocate(
     session: Session,
     workspace: Workspace,
@@ -345,7 +445,8 @@ def allocate(
     """Разнести операции журнала по договорам (см. описание модуля).
 
     `operations` - только эти операции (журнал фактов проводит изменённые):
-    куда ляжет одна операция, от других операций не зависит.
+    куда ляжет одна операция, от других операций не зависит - кроме близнецов,
+    поэтому в выборке они должны быть вместе (`widen`).
     """
     result = Allocation()
     picked = list(operations) if operations is not None else None
@@ -420,6 +521,7 @@ def allocate(
     )
     known = {side.contract_id for side in sides}
     returned = returned_pairs(session, workspace.id)
+    by_party: set[uuid.UUID] = set()
 
     for operation in operations:
         if operation.id in manual:
@@ -520,8 +622,10 @@ def allocate(
         if len(candidates) == 1:
             result.paid.setdefault(next(iter(candidates)), []).append((operation, "auto"))
         else:
+            by_party.add(operation.id)
             for contract_id in candidates:
                 result.open.setdefault(contract_id, []).append(operation)
+    _pair_twins(result, operations, manual, sides, by_party)
     return result
 
 

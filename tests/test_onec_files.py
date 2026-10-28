@@ -173,9 +173,12 @@ def test_tumar_ofis_iz_faylov_1s_vidit_nam_dolzhny(world_files, finance_db) -> N
         _statements(session, workspace, world, files, entities)
         session.flush()
         # У7 (холдинг платит за дочку «по дог. А-07») KORT решает по номеру в назначении сам; спрашивает
-        # О5 (номер чужого договора) и оплаты «Береке» без номера при двух договорах на одну сумму (О4).
+        # О5 (номер чужого договора) и сентябрьскую оплату «Береке» без номера при двух договорах на одну
+        # сумму (О4). Две июньские оплаты «Береке» без номера на те же два договора - по одной каждому, не вопрос.
         asked = _answer_disputes(session, workspace, world, entities)
-        assert len(asked) == 4, asked
+        assert sorted(asked) == [
+            "2026-09-05 Аренда за сентябрь → А-12", "2026-09-12 Аренда за сентябрь по дог. А-01 → А-04",
+        ], asked
         # Д12: обеспечительный платёж Green Office - не оплата А-01 (аванса нет), скрыт своей причиной.
         from app.finance.core.payments import Money
 
