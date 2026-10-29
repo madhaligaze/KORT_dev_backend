@@ -26,7 +26,7 @@ from app.finance import packs
 from app.finance.core import book as book_module
 from app.finance.core import changes, participants, tax
 from app.finance.core import shadow as shadow_module
-from app.finance.db import finance_session
+from app.finance.db import finance_session, retrying
 
 router = APIRouter(prefix="/finance/core", tags=["finance-core"])
 
@@ -42,12 +42,17 @@ def _run(member: Member, action):
     """
     _guard()
     access = _access(member)
-    with finance_session() as session:
-        workspace = _workspace(session, member)
-        try:
-            return action(session, workspace, access)
-        except Exception as exc:  # noqa: BLE001 - `_raise` сам решает, что словами, а что ошибкой
-            return _raise(exc)
+
+    def once():
+        with finance_session() as session:
+            workspace = _workspace(session, member)
+            try:
+                return action(session, workspace, access)
+            except Exception as exc:  # noqa: BLE001 - `_raise` сам решает, что словами, а что ошибкой
+                return _raise(exc)
+
+    # Жертва взаимоблокировки - заново (`db.retrying`): `_raise` её не глотает.
+    return retrying(once)
 
 
 # ── Участники ────────────────────────────────────────────────────────────────

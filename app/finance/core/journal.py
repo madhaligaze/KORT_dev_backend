@@ -761,7 +761,14 @@ def _dirt(obj: Any, how: str) -> list[tuple[str, uuid.UUID]]:
         return [("journal", WHOLE)] if how == "deleted" else [("journal", obj.operation_id)]
     if isinstance(obj, (Document, ContractAmendment)):
         ids = {obj.contract_id, *(_was(obj, "contract_id") if how == "dirty" else ())}
-        return [("kort", item if item is not None else WHOLE) for item in ids]
+        out = [("kort", item if item is not None else WHOLE) for item in ids]
+        if isinstance(obj, ContractAmendment) and "executor" in {obj.effect, *(_was(obj, "effect") if how == "dirty" else ())}:
+            # Исполнители из соглашений «с даты» видны разнесению оплат и
+            # сопоставлению 1С (`contracts/payments.former_executors`): перевод
+            # клиента на другое ТОО будущим числом или его отмена меняют, к
+            # какому договору ложатся оплаты и документы, хотя сам договор не тронут.
+            out += shape
+        return out
     if isinstance(obj, Contract):
         if how == "dirty":
             # Примечание, статус, отдел, свои поля - разнесению и 1С всё равно.
@@ -778,7 +785,13 @@ def _dirt(obj: Any, how: str) -> list[tuple[str, uuid.UUID]]:
         return [("journal", WHOLE)]
     if isinstance(obj, (CounterpartyName, GroupEntity)):
         return shape
-    if isinstance(obj, (OnecBase, OnecDocument)):
+    if isinstance(obj, OnecBase):
+        # Чтение базы раз в полчаса пишет время, числа и ошибку чтения - факты
+        # от них не зависят: только от того, включена ли база и чьё она юрлицо.
+        if how == "dirty" and not _changed(obj, frozenset({"state", "group_entity_id"})):
+            return []
+        return [("1c", WHOLE)]
+    if isinstance(obj, OnecDocument):
         return [("1c", WHOLE)]
     return []
 

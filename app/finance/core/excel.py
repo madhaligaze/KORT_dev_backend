@@ -870,8 +870,12 @@ def apply(session: Session, workspace: Workspace, access: Access, actor: Actor, 
     from app.finance.contracts.service import Mode, create, patch
     from app.finance.core import participants
     from app.finance.core.changes import status_by_phase
+    from app.finance.db import one_intake
 
     _require(access)
+    # Тот же файл вторым запросом разом (двойное нажатие) завёл бы договоры ещё
+    # раз: второй ждёт коммита первого и видит заведённое им.
+    one_intake(session, workspace.id)
     proposals, sheets = _plan(session, workspace, data, file_name, answers, today=today, access=access)
     # Вопросы о данных (сумма текстом и т. п.) не держат лист; разметка - держит.
     blocked = [p.sheet for p in proposals if p.setup or p.blocking() or any(q.get("layout") for q in p.questions)]

@@ -39,7 +39,7 @@ from app.finance.contracts import shares as shares_module
 from app.finance.contracts import summary as summary_module
 from app.finance.contracts import sync as sync_module
 from app.finance.contracts.views import FilterError
-from app.finance.db import finance_session
+from app.finance.db import finance_session, retryable, retrying
 from app.finance.service import FinanceError
 
 log = logging.getLogger(__name__)
@@ -823,20 +823,24 @@ class PieceIn(BaseModel):
 @router.post("", status_code=201)
 def create_contract(body: CreateIn, member: Member = Depends(contract_editor)):
     access = _access(member)
-    with finance_session() as session:
-        workspace = _workspace(session, member)
-        try:
-            contract = service.create(
-                session, workspace, access, _actor(member), body.values,
-                view_key=body.view, block=body.block,
-                source="grid" if body.source == "grid" else "app",
-                before=body.before,
-                contract_id=body.id,
-            )
-            return service.one(session, workspace, access, contract)
-        except Exception as exc:  # noqa: BLE001
-            session.rollback()
-            return _raise(exc)
+
+    def once():
+        with finance_session() as session:
+            workspace = _workspace(session, member)
+            try:
+                contract = service.create(
+                    session, workspace, access, _actor(member), body.values,
+                    view_key=body.view, block=body.block,
+                    source="grid" if body.source == "grid" else "app",
+                    before=body.before,
+                    contract_id=body.id,
+                )
+                return service.one(session, workspace, access, contract)
+            except Exception as exc:  # noqa: BLE001
+                session.rollback()
+                return _raise(exc)
+
+    return retrying(once)
 
 
 @router.get("/{contract_id}")
@@ -854,33 +858,44 @@ def get_contract(contract_id: UUID, member: Member = Depends(contract_member)):
 @router.patch("/{contract_id}")
 def patch_contract(contract_id: UUID, body: PatchIn, member: Member = Depends(contract_editor)):
     access = _access(member)
-    with finance_session() as session:
-        workspace = _workspace(session, member)
-        try:
-            mode = service.Mode.parse(body.mode)
-            contract = service.patch(
-                session, workspace, access, _actor(member), contract_id, body.values,
-                known_seq=body.known_seq, mode=mode,
-            )
-            return service.one(session, workspace, access, contract)
-        except Exception as exc:  # noqa: BLE001
-            # Правка не состоялась целиком: ни одно поле, ни соглашение, ни
-            # заведённый по пути контрагент не остаются в базе.
-            session.rollback()
-            return _raise(exc, session=session, workspace=_workspace(session, member), access=access)
+
+    def once():
+        with finance_session() as session:
+            workspace = _workspace(session, member)
+            try:
+                mode = service.Mode.parse(body.mode)
+                contract = service.patch(
+                    session, workspace, access, _actor(member), contract_id, body.values,
+                    known_seq=body.known_seq, mode=mode,
+                )
+                return service.one(session, workspace, access, contract)
+            except Exception as exc:
+                # Правка не состоялась целиком: ни одно поле, ни соглашение, ни
+                # заведённый по пути контрагент не остаются в базе.
+                session.rollback()
+                if retryable(exc):
+                    raise
+                return _raise(exc, session=session, workspace=_workspace(session, member), access=access)
+
+    # Жертва взаимоблокировки - заново (`db.retrying`): `known_seq` тот же, чужая правка поля - конфликт.
+    return retrying(once)
 
 
 @router.delete("/{contract_id}")
 def delete_contract(contract_id: UUID, member: Member = Depends(contract_editor)):
     access = _access(member)
-    with finance_session() as session:
-        workspace = _workspace(session, member)
-        try:
-            service.remove(session, workspace, access, _actor(member), contract_id)
-            return {"ok": True}
-        except Exception as exc:  # noqa: BLE001
-            session.rollback()
-            return _raise(exc)
+
+    def once():
+        with finance_session() as session:
+            workspace = _workspace(session, member)
+            try:
+                service.remove(session, workspace, access, _actor(member), contract_id)
+                return {"ok": True}
+            except Exception as exc:  # noqa: BLE001
+                session.rollback()
+                return _raise(exc)
+
+    return retrying(once)
 
 
 @router.post("/{contract_id}/acknowledge")

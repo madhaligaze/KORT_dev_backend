@@ -55,6 +55,7 @@ from app.finance import packs
 from app.finance.core import opening as opening_module
 from app.finance.core import settings as core_settings
 from app.finance.core.accruals import month_key, month_start, periods
+from app.finance.db import one_intake
 from app.finance.models import Counterparty, Workspace
 from app.finance.onec import files as onec_files
 from app.finance.onec import match as onec_match
@@ -82,6 +83,13 @@ class StartError(FinanceError):
 def _require(access: Access) -> None:
     if not access.setup:
         raise PermissionError("Вход из 1С проходит владелец или администратор")
+
+
+def _writing(session: Session, workspace: Workspace, access: Access) -> None:
+    """Шаг, который пишет: право и вход данных компании по одному (`db.one_intake`) -
+    тот же шаг вторым запросом разом завёл бы те же договоры ещё раз."""
+    _require(access)
+    one_intake(session, workspace.id)
 
 
 def _money(value: Decimal | None) -> str | None:
@@ -569,7 +577,7 @@ def plan(
 
 def add_entity(session: Session, workspace: Workspace, access: Access, actor: Actor, base_id: uuid.UUID) -> dict[str, Any]:
     """Шаг 1: наше юрлицо базы - по БИН организации; нет - завести и привязать к базе."""
-    _require(access)
+    _writing(session, workspace, access)
     base = _base(session, workspace, base_id)
     if base.group_entity_id:
         return {"done": 0, "id": str(base.group_entity_id)}
@@ -597,7 +605,7 @@ def add_participants(session: Session, workspace: Workspace, access: Access, act
     """Шаг 2: участники из контрагентов базы - по БИН, с написаниями 1С."""
     from app.finance.core import participants
 
-    _require(access)
+    _writing(session, workspace, access)
     base = _base(session, workspace, base_id)
     source = read_source(session, workspace, base, today=today)
     resolve_parties(session, workspace, source)
@@ -658,7 +666,7 @@ def add_contracts(
     from app.finance.contracts.service import Mode, create, patch
     from app.finance.core.changes import status_from
 
-    _require(access)
+    _writing(session, workspace, access)
     if not access.edit:
         raise PermissionError("Заводить договоры можно с правом правки реестра")
     base = _base(session, workspace, base_id)
@@ -820,7 +828,7 @@ def start_since(
     session: Session, workspace: Workspace, access: Access, actor: Actor, base_id: uuid.UUID, osv: Osv
 ) -> dict[str, Any]:
     """Шаг 4: начать учёт с первого числа периода ОСВ и перенести сальдо договоров - точкой восстановления."""
-    _require(access)
+    _writing(session, workspace, access)
     base = _base(session, workspace, base_id)
     if osv.start is None:
         raise StartError("В ОСВ не назван период - с какого дня сальдо, не понять")
@@ -910,7 +918,7 @@ def keep_osv(session: Session, workspace: Workspace, access: Access, actor: Acto
 
     from app.finance.core.models import CoreSettings
 
-    _require(access)
+    _writing(session, workspace, access)
     base = _base(session, workspace, base_id)
     row = session.get(CoreSettings, workspace.id)
     if row is None:
@@ -938,7 +946,7 @@ def from_files(session: Session, workspace: Workspace, access: Access, actor: Ac
     Дальше база из файлов проходит те же шаги, что база в интернете; одна
     ОСВ на два ТОО («Отбор: Организация В списке») запоминается к обеим.
     """
-    _require(access)
+    _writing(session, workspace, access)
     report = onec_files.apply(session, workspace, upload, actor=actor.email)
     if upload.osv is not None:
         named = {party_key(name) for name in upload.osv.organizations}
@@ -977,7 +985,7 @@ def take_balances(
 
 def use_payments(session: Session, workspace: Workspace, access: Access, actor: Actor, base_id: uuid.UUID) -> dict[str, Any]:
     """Шаг 5: поступления 1С - источник оплат юрлица базы."""
-    _require(access)
+    _writing(session, workspace, access)
     base = _base(session, workspace, base_id)
     if not base.group_entity_id:
         raise StartError("Сначала - наше юрлицо базы")

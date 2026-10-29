@@ -76,12 +76,22 @@ def cursor_now(ctx: Ctx) -> str:
 
 
 def moved(ctx: Ctx, cursor: str | None) -> bool:
-    """Сдвинулось ли что-нибудь после курсора - два-четыре чтения счётчиков, без сборки."""
+    """Сдвинулось ли что-нибудь после курсора - чтения счётчиков, без сборки.
+
+    И записанное, но ещё не проведённое в журнал: фоновое чтение 1С пишет
+    документы, а счётчики договоров, операций и схемы не двигает - факты
+    появятся, когда журнал кто-нибудь проведёт. Без этого подписчик узнавал о
+    новых оплатах из 1С только после чужого экрана; теперь проводит сам
+    (`changes` зовёт `journal.ensure`).
+    """
     data = decode(cursor)
     if data is None:
         return False
     now = counters(ctx)
-    return any(now[key] > data[key] for key in ("c", "f", "o", "s")) or bool(data.get("fk"))
+    if any(now[key] > data[key] for key in ("c", "f", "o", "s")) or bool(data.get("fk")):
+        return True
+    workspace_id = ctx.workspace.id
+    return current(ctx.session, workspace_id, journal.INPUTS) > current(ctx.session, workspace_id, journal.POSTED)
 
 
 def changes(

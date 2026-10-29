@@ -250,3 +250,44 @@ def test_zavedenie_ne_derzhit_schetchik_i_stavit_odin_nomer(pg, monkeypatch):
         assert all(set(item.field_seq.values()) == {seq} and "number" in item.field_seq for item in imported)
         workspace = finance_service.get_workspace(session, space_id)
         assert len(service.changes(session, workspace, FULL, edited_seq)["contracts"]) == 30
+
+
+def test_dva_zavesti_razom_zavodyat_odin_raz(pg):
+    """Два «Завести» одной партии разом (двойное нажатие, повтор клиента по
+    таймауту): оба видели «предпросмотр» и заводили все договоры дважды. Теперь
+    вход данных - по одному (`db.one_intake`): второй ждёт и получает отказ."""
+    import sqlalchemy as sa
+
+    from app.finance.contracts import importer
+    from app.finance.contracts.models import Contract
+    from app.finance.service import FinanceError
+
+    actor = service.Actor(None, "owner@test")
+    with finance_session() as session:
+        workspace = finance_service.ensure_workspace(session)
+        setup.add_entity(session, workspace, name="BBC")
+        batch = importer.start(session, workspace, actor, _small_registry(), "реестр.xlsx")
+        own = [item["key"] for s in batch.report["sections"] if s["key"] == "entities" for item in s["items"] if item["own"]]
+        importer.decide(session, workspace, batch.id, {"entities": {"confirmed": True, "own": own}})
+        batch_id, space_id = batch.id, workspace.id
+
+    gate = threading.Barrier(2)
+    outcome: list[object] = []
+
+    def run_apply() -> None:
+        gate.wait(5)
+        try:
+            with finance_session() as session:
+                workspace = finance_service.get_workspace(session, space_id)
+                outcome.append(importer.apply(session, workspace, FULL, actor, batch_id)["created"])
+        except FinanceError as exc:
+            outcome.append(str(exc))
+
+    threads = [threading.Thread(target=run_apply) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+    assert sorted(outcome, key=str) == [30, "Эта загрузка уже заведена или отменена"], outcome
+    with finance_session() as session:
+        assert session.scalar(sa.select(sa.func.count()).select_from(Contract).where(Contract.workspace_id == space_id)) == 30

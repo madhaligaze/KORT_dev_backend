@@ -27,7 +27,7 @@ from fastapi.responses import JSONResponse
 from app.api.routes.finance import _guard, _workspace, require_access
 from app.finance.auth import Member
 from app.finance.contracts import service as contracts_service
-from app.finance.db import finance_session, get_finance_session_factory
+from app.finance.db import finance_session, get_finance_session_factory, retrying
 from app.finance.model import HEADER, MAJOR, VERSION
 from app.finance.model import apply as apply_module
 from app.finance.model import ask as ask_module
@@ -83,12 +83,17 @@ def _fail(exc: Exception) -> JSONResponse:
 
 
 def _call(member: Member, action):
-    """Вызов в транзакции: записалось - коммит, отказ - откат и ответ словами."""
+    """Вызов в транзакции: записалось - коммит, отказ - откат и ответ словами.
+    Жертва взаимоблокировки повторяется (`db.retrying`)."""
     _guard()
-    try:
+
+    def once():
         with finance_session() as session:
             ctx = of_member(session, _workspace(session, member), member)
             return action(ctx)
+
+    try:
+        return retrying(once)
     except HTTPException:
         raise
     except (FinanceError, PermissionError, contracts_service.NotFound) as exc:
@@ -98,17 +103,22 @@ def _call(member: Member, action):
 def _dry(member: Member, action):
     """Прогон без следа: транзакция откатывается всегда, что бы ни сделал вызов."""
     _guard()
-    session = get_finance_session_factory()()
+
+    def once():
+        session = get_finance_session_factory()()
+        try:
+            ctx = of_member(session, _workspace(session, member), member)
+            return action(ctx)
+        finally:
+            session.rollback()
+            session.close()
+
     try:
-        ctx = of_member(session, _workspace(session, member), member)
-        return action(ctx)
+        return retrying(once)
     except HTTPException:
         raise
     except (FinanceError, PermissionError, contracts_service.NotFound) as exc:
         return _fail(exc)
-    finally:
-        session.rollback()
-        session.close()
 
 
 # ── Схема и описать ──────────────────────────────────────────────────────────
@@ -193,12 +203,17 @@ def model_points(limit: int = Query(default=60, ge=1, le=200), member: Member = 
 def _changes_once(member: Member, cursor: str, include: frozenset[str], final: bool, contracts_since: int | None = None) -> Any:
     """Одна проверка: сдвинулось - ответ; нет и время ждать ещё есть - `None`."""
     _guard()
-    try:
+
+    def once():
         with finance_session() as session:
             ctx = of_member(session, _workspace(session, member), member)
             if not final and cursor and not stream_module.moved(ctx, cursor):
                 return None
+            # Подписчик проводит журнал (`stream.changes`) - и может стать жертвой взаимоблокировки.
             return stream_module.changes(ctx, cursor, include=include, contracts_since=contracts_since)
+
+    try:
+        return retrying(once)
     except HTTPException:
         raise
     except (FinanceError, PermissionError, contracts_service.NotFound) as exc:

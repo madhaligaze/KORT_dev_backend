@@ -2002,7 +2002,14 @@ def _apply(session: Session, workspace: Workspace, access: Access, actor: Actor,
     """
     if not access.setup:
         raise PermissionError("Загружать реестр может владелец или администратор")
+    # «Заведена ли» - после замка: два «Завести» разом (двойное нажатие, повтор
+    # клиента по таймауту на загрузке в минуты) оба видели «предпросмотр» и
+    # заводили партию дважды. Второй ждёт коммита первого и получает отказ.
+    from app.finance.db import one_intake
+
+    one_intake(session, workspace.id)
     batch = get_batch(session, workspace, batch_id)
+    session.refresh(batch, ["status"])
     if batch.status != "preview":
         raise FinanceError("Эта загрузка уже заведена или отменена")
     registry = Registry(session, workspace)

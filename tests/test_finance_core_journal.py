@@ -199,6 +199,81 @@ def test_svezhest_mezhdu_sessiyami_i_svoya_pravka(space, monkeypatch):
     assert not calls_made, "проведённое в той же транзакции, что и правка, - уже свежее для других"
 
 
+def test_perevod_budushchim_chislom_provodit_razneseniye(space):
+    """Перевод клиента на другое ТОО с 01.11 договор не трогает, но исполнители из
+    соглашения видны разнесению (`contracts/payments.former_executors`): оплата
+    клиента на счёт второго ТОО ложится на договор. Журнал проводит её сразу, а
+    не ждёт чужой правки формы реестра."""
+    from app.finance.core import vat
+
+    with finance_session() as session:
+        workspace = _ws(session, space)
+        setup.add_entity(session, workspace, name="BBC Legal", code="BBCL")
+        legal = session.scalar(sa.select(GroupEntity.counterparty_id).where(GroupEntity.code == "BBCL"))
+        account = finance_service.create_account(session, workspace, name='Kaspi Юр. ТОО "BBC Legal"', group_entity_id=legal)
+        party = finance_service.ensure_counterparty(session, workspace.id, "ТОО Альфаком", role="client")
+        operation_id = finance_service.create_operation(
+            session, workspace,
+            finance_service.OperationInput(
+                kind="income", paid_at=date(2026, 10, 20), amount=Decimal("100000"), counterparty_id=party.id,
+                account_to_id=account.id,
+            ),
+        ).id
+    with finance_session() as session:
+        journal.ensure(session, space["workspace"])
+        assert _by_key(session, space, f"op:{operation_id}")[0].contract_id is None, "BBC Legal - не исполнитель договора"
+    with finance_session() as session:
+        changes.transfer(session, _ws(session, space), FULL, OWNER, [vat.Move(space["alfa"], legal, date(2026, 11, 1))])
+    with finance_session() as session:
+        assert service.get_contract(session, _ws(session, space), space["alfa"]).executor_id == space["bbc"], "перевод - впереди"
+        journal.ensure(session, space["workspace"])
+        assert _by_key(session, space, f"op:{operation_id}")[0].contract_id == space["alfa"]
+        assert journal.post(session, _ws(session, space), ["journal", "1c"]) == {"new": 0, "changed": 0, "void": 0}, (
+            "проведённое по очереди - то же, что проведение целиком"
+        )
+
+
+def test_podpiska_vidit_zapisannoe_fonom(space):
+    """Чтение 1С пишет документы, не двигая счётчиков договоров, операций и схемы:
+    подписка видит записанное, но не проведённое, и проводит журнал сама. Время
+    чтения базы без новых документов журнал не трогает."""
+    from datetime import datetime, timezone
+
+    from app.finance.model import context, stream
+
+    with finance_session() as session:
+        journal.ensure(session, space["workspace"])
+    with finance_session() as session:
+        ctx = context.system(session, _ws(session, space))
+        cursor = stream.cursor_now(ctx)
+        assert not stream.moved(ctx, cursor)
+    with finance_session() as session:
+        base = OnecBase(
+            workspace_id=space["workspace"], title="ИБ ТОО BBC", url="https://1cfresh.kz/a/ea201/1", login="odata.user",
+            secret="-", group_entity_id=space["bbc"], organization_ref="org", sync_from=date(2026, 1, 1),
+        )
+        session.add(base)
+        session.flush()
+        session.add(OnecDocument(
+            workspace_id=base.workspace_id, base_id=base.id, kind="payment", ref=str(uuid.uuid4()),
+            doc_date=date(2026, 10, 20), party_name="ТОО АЛЬФАКОМ", amount=Decimal("100000"), posted=True,
+        ))
+        base_id = base.id
+    with finance_session() as session:
+        ctx = context.system(session, _ws(session, space))
+        assert stream.moved(ctx, cursor), "документ 1С записан, журнал не проведён - подписке пора"
+        out = stream.changes(ctx, cursor)
+        assert out["moved"]["facts"] and [item["source"] for item in out["facts"]] == ["1c"]
+        cursor = out["cursor"]
+    with finance_session() as session:
+        ctx = context.system(session, _ws(session, space))
+        assert not stream.moved(ctx, cursor)
+        base = session.get(OnecBase, base_id)
+        base.last_sync_at, base.counts = datetime.now(timezone.utc), {"payment": 1}
+    with finance_session() as session:
+        assert not stream.moved(context.system(session, _ws(session, space)), cursor), "перечитали базу - новых документов нет"
+
+
 def test_nachisleniyam_hvataet_dokumentov_yadra(space, monkeypatch):
     with finance_session() as session:
         Money(session, _ws(session, space), today=TODAY)
