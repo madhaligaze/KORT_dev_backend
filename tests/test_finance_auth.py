@@ -69,6 +69,24 @@ def test_neverniy_parol_ne_govorit_est_li_takaya_pochta(finance_db) -> None:
     assert str(wrong_password.value) == str(no_user.value)
 
 
+@pytest.mark.real_hasher
+def test_paroli_heshiruyutsya_s_boevoy_stoimostyu() -> None:
+    """Тесты считают argon2 дёшево (`conftest._cheap_password_hash`), код - нет.
+
+    Снизить стоимость в `auth.py` ради скорости значит облегчить подбор по
+    утёкшей базе; такая правка должна падать здесь, а не пройти незаметно.
+    """
+    from argon2 import Type
+
+    hasher = auth._hasher
+    assert hasher.type is Type.ID
+    assert hasher.time_cost >= 3 and hasher.memory_cost >= 65536
+    hashed = auth.hash_password("pass-12345")
+    assert hashed.startswith("$argon2id$") and "pass-12345" not in hashed
+    assert auth.verify_password(hashed, "pass-12345")
+    assert not auth.verify_password(hashed, "pass-12346")
+
+
 def test_korotkiy_parol_ne_prinimaetsya(finance_db) -> None:
     with finance_session() as session:
         with pytest.raises(AuthError) as exc:

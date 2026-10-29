@@ -59,6 +59,8 @@ pythonpath = ["."]
 markers = [
     # Проверки схемы: нужен живой Postgres, без него набор пропускается.
     "migrations: требует Postgres (TEST_DATABASE_URL / DATABASE_URL)",
+    # Тест идёт с боевой стоимостью argon2, без подмены из conftest.
+    "real_hasher: пароли хешируются с параметрами кода, а не дешёвыми тестовыми",
 ]
 
 [tool.mypy]

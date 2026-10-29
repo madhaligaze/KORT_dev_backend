@@ -14,6 +14,8 @@
 """
 from __future__ import annotations
 
+from functools import cache
+
 from fastapi import APIRouter, FastAPI
 from fastapi.routing import APIRoute
 
@@ -38,7 +40,16 @@ def finance_routers() -> tuple[APIRouter, ...]:
     )
 
 
+@cache
 def finance_app() -> FastAPI:
+    """Одно приложение на процесс.
+
+    Сборка - разбор каждого из почти двухсот маршрутов, 0,4 с; заново в
+    каждом тесте это шестая часть времени набора долей (замер 30.10.2026).
+    Своего состояния у приложения нет: база подменяется в модуле `db`,
+    сеанс живёт в cookie своего `TestClient`, маршруты и зависимости
+    одни и те же. Тест, которому нужно менять само приложение, собирает своё.
+    """
     application = FastAPI()
     for router in finance_routers():
         application.include_router(router, prefix=PREFIX)

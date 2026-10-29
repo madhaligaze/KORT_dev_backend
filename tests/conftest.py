@@ -7,16 +7,64 @@
 временный кластер на свободном порту, на весь прогон. Задан
 `TEST_DATABASE_URL` - берётся он. Нет ни того, ни другого - пропуск с
 причиной (машина без Postgres).
+
+Тестовая SQLite не ждёт диска (`_sqlite_without_fsync`), пароли хешируются
+дёшево (`_cheap_password_hash`).
 """
 from __future__ import annotations
 
 import os
 import shutil
 import socket
+import sqlite3
 import subprocess
 from collections.abc import Iterator
 
 import pytest
+from argon2 import PasswordHasher
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
+
+
+@event.listens_for(Engine, "connect")
+def _sqlite_without_fsync(dbapi_connection, _record) -> None:
+    """Каждый тест заводит свою базу-файл, и `create_all` пишет в неё 63 таблицы.
+
+    pysqlite фиксирует каждый `CREATE` отдельно, а фиксация ждёт сброса на
+    диск: на этой машине 10,5 с на тест, то есть почти весь прогон уходил на
+    запись пустых таблиц. Без ожидания диска - 0,12 с (замер 30.10.2026).
+
+    Смысл транзакций, блокировок и отката тот же: журнал отката лежит в
+    памяти, а не в файле рядом. Теряется только переживание сбоя питания -
+    базе, которую тест стирает за собой, оно не нужно.
+    """
+    if isinstance(dbapi_connection, sqlite3.Connection):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA synchronous = OFF")
+        cursor.execute("PRAGMA journal_mode = MEMORY")
+        cursor.close()
+
+
+#: argon2id той же формы, но самой низкой стоимости, какую допускает алгоритм.
+_CHEAP_HASHER = PasswordHasher(time_cost=1, memory_cost=8, parallelism=1)
+
+
+@pytest.fixture(autouse=True)
+def _cheap_password_hash(request, monkeypatch) -> None:
+    """Каждая учётка теста - хеш, каждый вход - проверка хеша.
+
+    С боевой стоимостью (t=3, 64 МиБ) это 65 мс на раз, и в наборах с
+    командой из шести человек четверть времени уходила на argon2 (замер
+    30.10.2026). Наборы проверяют, что пароль не хранится открытым, что
+    неверный не подходит и что вход не выдаёт почту, - от стоимости хеша это
+    не зависит. Саму стоимость держит `test_paroli_heshiruyutsya_s_boevoy_stoimostyu`
+    с меткой `real_hasher`: ему подмена не делается.
+    """
+    if request.node.get_closest_marker("real_hasher"):
+        return
+    from app.finance import auth
+
+    monkeypatch.setattr(auth, "_hasher", _CHEAP_HASHER)
 
 
 def _free_port() -> int:
