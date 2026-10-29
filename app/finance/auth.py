@@ -64,7 +64,7 @@ from sqlalchemy.orm import Session
 
 from app.finance import access as access_module, passwords
 from app.finance.access import Rights
-from app.finance.accounts_model import FinanceMembership, FinanceSession, FinanceUser, LoginDevice
+from app.finance.accounts_model import API_KEY_LEVELS, ApiKey, FinanceMembership, FinanceSession, FinanceUser, LoginDevice
 from app.finance.models import Workspace
 
 log = logging.getLogger(__name__)
@@ -174,6 +174,10 @@ class Member:
     #: Откуда запрос - для журнала действий; ставит зависимость маршрута.
     ip: str = ""
     user_agent: str = ""
+    #: Вошёл ключом API модели (`ApiKey`): его уровень (`read` / `write`) и
+    #: название; пусто - сеанс учётки.
+    key: str = ""
+    key_title: str = ""
 
     def can(self, ability: str) -> bool:
         """Прежние способности (`read`, `write`, `accounts`, `people`, `company`)."""
@@ -962,6 +966,96 @@ def resolve(
         rights=rights,
         ip=ip,
         user_agent=user_agent,
+    )
+
+
+# ── Ключи API модели ─────────────────────────────────────────────────────────
+#
+# Чужой сервис спрашивает ядро ключом, а не паролем человека (`ApiKey`).
+# Ключ действует правами выдавшего: права считаются на каждом запросе тем же
+# `access.load`, что у сеанса, - снятое у человека право снято и у ключа.
+
+KEY_PREFIX = "kort_"
+
+
+def create_key(session: Session, member: Member, *, title: str, level: str) -> tuple[ApiKey, str]:
+    """Выдать ключ компании от имени вошедшего. Токен - только в ответе, в базе - хеш."""
+    if member.workspace_id is None:
+        raise AuthError("Выберите компанию")
+    if member.key:
+        raise AuthError("Ключ выдаётся из сеанса учётки, а не ключом")
+    if level not in API_KEY_LEVELS:
+        raise AuthError("Уровень ключа - read или write")
+    clean = " ".join(str(title or "").split())[:120]
+    if not clean:
+        raise AuthError("Назовите ключ - по названию его узнают в списке и отзывают")
+    token = KEY_PREFIX + secrets.token_urlsafe(32)
+    key = ApiKey(
+        workspace_id=member.workspace_id, user_id=member.user_id, title=clean, level=level,
+        token_hash=_token_hash(token), prefix=token[: len(KEY_PREFIX) + 6],
+    )
+    session.add(key)
+    session.flush()
+    return key, token
+
+
+def keys_of(session: Session, workspace_id: uuid.UUID) -> list[dict[str, Any]]:
+    rows = session.execute(
+        sa.select(ApiKey, FinanceUser.email, FinanceUser.full_name)
+        .join(FinanceUser, FinanceUser.id == ApiKey.user_id)
+        .where(ApiKey.workspace_id == workspace_id)
+        .order_by(ApiKey.created_at.desc())
+    ).all()
+    return [
+        {
+            "id": str(key.id), "title": key.title, "level": key.level, "prefix": key.prefix,
+            "by": full_name or email or "", "created_at": key.created_at.isoformat() if key.created_at else None,
+            "last_used_at": key.last_used_at.isoformat() if key.last_used_at else None,
+            "revoked_at": key.revoked_at.isoformat() if key.revoked_at else None,
+        }
+        for key, email, full_name in rows
+    ]
+
+
+def revoke_key(session: Session, workspace_id: uuid.UUID, key_id: uuid.UUID) -> ApiKey:
+    key = session.get(ApiKey, key_id)
+    if key is None or key.workspace_id != workspace_id:
+        raise AuthError("Такого ключа нет")
+    if key.revoked_at is None:
+        key.revoked_at = _now()
+        session.flush()
+    return key
+
+
+def resolve_key(session: Session, token: str | None, *, ip: str = "", user_agent: str = "") -> Member | None:
+    """Токен ключа → снимок вошедшего правами выдавшего; отозванный ключ или закрытая учётка - никто."""
+    if not token or not token.startswith(KEY_PREFIX):
+        return None
+    row = session.execute(
+        sa.select(ApiKey, FinanceUser, FinanceMembership, Workspace.title)
+        .join(FinanceUser, FinanceUser.id == ApiKey.user_id)
+        .join(Workspace, Workspace.id == ApiKey.workspace_id)
+        .join(
+            FinanceMembership,
+            sa.and_(FinanceMembership.workspace_id == ApiKey.workspace_id, FinanceMembership.user_id == ApiKey.user_id),
+        )
+        .where(ApiKey.token_hash == _token_hash(token))
+    ).first()
+    if row is None:
+        return None
+    key, user, membership, workspace_title = row
+    if key.revoked_at is not None or user.status != "active" or membership.blocked_at is not None or user.must_change_password:
+        return None
+    now = _now()
+    used = _aware(key.last_used_at)
+    if used is None or (now - used) >= LAST_SEEN_STEP:
+        key.last_used_at = now
+        session.flush()
+    rights = access_module.load(session, key.workspace_id, user.id, membership.role)
+    return Member(
+        user_id=user.id, email=user.email or "", full_name=user.full_name or "", workspace_id=key.workspace_id,
+        workspace_title=workspace_title or "", role=membership.role, must_change_password=False, session_id=key.id,
+        phone=user.phone or "", rights=rights, ip=ip, user_agent=user_agent, key=key.level, key_title=key.title,
     )
 
 

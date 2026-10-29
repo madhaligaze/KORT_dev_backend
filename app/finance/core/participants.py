@@ -550,6 +550,63 @@ def update(session: Session, workspace: Workspace, access: Access, actor: Actor,
     return {"id": str(party.id), "full_name": party.full_name}
 
 
+def create(
+    session: Session,
+    workspace: Workspace,
+    access: Access,
+    actor: Actor,
+    *,
+    name: str,
+    bin: str = "",
+    full_name: str = "",
+    supplier: bool = False,
+) -> dict[str, Any]:
+    """Участник руками - тем же правилом, что из 1С и реестра, без двойников.
+
+    БИН/ИИН (проверка цифры - страной компании) уже записан у участника - это он,
+    а имя становится его написанием. Иначе - участник с этим именем (кавычки,
+    регистр, форма собственности - `Registry.resolve_party`); два таких - отказ с
+    именами, а не выбор наугад. Никого - новый участник.
+    """
+    _require_edit(access)
+    clean = " ".join(str(name or "").split())
+    if not clean:
+        raise ParticipantError("У участника должно быть имя")
+    checked = None
+    if str(bin or "").strip():
+        checked = packs.country_of(workspace).ids.check(bin, clean)
+        if not checked.ok:
+            raise ParticipantError(checked.error)
+    registry = Registry(session, workspace)
+    slot = "executor" if supplier else "customer"
+    party = owner_of_bin(session, workspace, checked.number) if checked is not None else None
+    how = "bin" if party is not None else ""
+    if party is None:
+        resolved = registry.resolve_party(clean, slot=slot, create=False)
+        if resolved.ambiguous:
+            names = ", ".join(f"«{item.name}»" for item in resolved.ambiguous[:3])
+            raise ParticipantError(f"Под «{clean}» уже несколько участников: {names} - выберите одного")
+        party, how = resolved.party, "name"
+    created = party is None
+    if party is None:
+        party, how = registry.resolve_party(clean, slot=slot, create=True).party, "created"
+        assert party is not None
+        _schema_changed(session, workspace)
+        history.write(
+            session, workspace, kind="participant.create", entity="counterparty", entity_id=party.id,
+            title=f"участник «{party.name}» заведён руками", after={"name": party.name}, actor=actor.email,
+        )
+    elif party_key(clean) != party_key(party.name):
+        remember(session, workspace, party.id, clean, source="manual")
+    if checked is not None and party.bin != checked.number:
+        if party.bin:
+            raise ParticipantError(f"У «{party.name}» уже записан БИН {party.bin}, а не {checked.number}")
+        set_bin(session, workspace, access, actor, party.id, checked.number)
+    if str(full_name or "").strip():
+        update(session, workspace, access, actor, party.id, {"full_name": full_name})
+    return {"id": str(party.id), "name": party.name, "bin": party.bin, "created": created, "how": how}
+
+
 def remember(session: Session, workspace: Workspace, party_id: uuid.UUID, name: Any, *, source: str) -> bool:
     """Запомнить написание. Повтор ничего не делает; новое - `True`."""
     text = " ".join(str(name or "").split())

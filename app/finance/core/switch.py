@@ -376,8 +376,13 @@ def _made(contract: Contract, month: str, accrual: Any, owner: uuid.UUID, doc: D
     )
 
 
-def build_bills(session: Session, workspace_id: uuid.UUID, board: Any, switched: set[uuid.UUID], today: date) -> Any:
+def build_bills(
+    session: Session, workspace_id: uuid.UUID, board: Any, switched: set[uuid.UUID], today: date, *, since: date | None = None
+) -> Any:
     """Сводка счетов, где счета юрлиц `switched` посчитаны KORT.
+
+    Окно месяцев - месяцы строк таблицы; строк нет (компания без сводной,
+    `billing.kort_board`) - с начала учёта `since`, без него - текущий месяц.
 
     Месяц договора, который KORT начисляет юрлицу из `switched`, получает
     состояние KORT: выставлен - если счёт знает KORT или таблица (№ счёта,
@@ -420,7 +425,10 @@ def build_bills(session: Session, workspace_id: uuid.UUID, board: Any, switched:
         else:
             (done if bill.group == done_group else bills).append(bill)
     current = month_key(today)
-    first = min(months) if months else current
+    if months:
+        first = min(months)
+    else:
+        first = min(month_key(since), current) if since is not None else current
     contracts = _visible(session, workspace, _EVERYTHING)
     ledger = Ledger(session, workspace_id, contracts)
     docs = kort_bills(session, workspace_id)

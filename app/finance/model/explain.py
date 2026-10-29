@@ -573,11 +573,11 @@ def _dtotal(ctx: Ctx, ref: str, data: dict[str, Any]) -> dict[str, Any]:
 
 
 def _bill(ctx: Ctx, ref: str, data: dict[str, Any]) -> dict[str, Any]:
-    from app.finance.contracts import bills
+    from app.finance.model.ask import unbilled_board
 
     if not ctx.can("invoices"):
         raise PermissionError("Счета вам не открыты")
-    board, _error = bills.current(ctx.session, ctx.workspace.id)
+    board, _error, _origin, _source = unbilled_board(ctx)
     bill = board.find(str(data.get("id"))) if board is not None else None
     if bill is None:
         raise FinanceError("Такого счёта в таблице больше нет")

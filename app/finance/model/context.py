@@ -48,12 +48,16 @@ def of_member(session: Session, workspace: Workspace, member: Any) -> Ctx:
 
     rights = getattr(member, "rights", None)
     levels = {item.key: rights.level(item.key) for item in RESOURCES} if rights is not None else {}
+    login = getattr(member, "login", "") or getattr(member, "email", "")
+    if getattr(member, "key", ""):
+        # Записанное ключом API подписано ключом (`auth.resolve_key`).
+        login = f"{login} · ключ «{member.key_title}»"
     return Ctx(
         session=session,
         workspace=workspace,
         access=access_of(member),
         viewer=views_module.viewer_of(member),
-        actor=Actor(member.user_id, getattr(member, "login", "") or getattr(member, "email", "")),
+        actor=Actor(member.user_id, login),
         levels=levels,
     )
 

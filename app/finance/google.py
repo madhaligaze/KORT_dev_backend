@@ -108,6 +108,17 @@ _meta_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _values_cache: dict[tuple[str, str], tuple[float, list[list[str]]]] = {}
 _lock = threading.Lock()
 
+#: Один лист - одно чтение на всех читателей. Сводную таблицу компании читают
+#: трое: «Оплачено (сводка)» (`contracts/summary.py`), «Счета»
+#: (`contracts/bills.py`) и сверка ядра (`core/book.py`), каждый со своим сроком
+#: и мимо кэша (`fresh`). Обновлялись они почти разом (выкладка, первый экран
+#: утра) - и лист читался трижды подряд, а три разбора могли увидеть три разных
+#: состояния таблицы. Теперь свежее чтение, которое уже идёт или закончилось
+#: секунды назад, отдаётся всем: разборы видят один снимок. «Обновить» позже
+#: этого окна читает заново.
+_SHARED_SECONDS = 5.0
+_reading: dict[tuple[str, str], threading.Event] = {}
+
 
 def _fresh(stamp: float) -> bool:
     return (time.monotonic() - stamp) < _CACHE_TTL_SECONDS
@@ -237,11 +248,31 @@ def fetch_tab_values(spreadsheet_id: str, tab_title: str, *, fresh: bool = False
     десятиминутный кэш мастера переноса держал бы её оплаты дольше него.
     """
     key = (spreadsheet_id, tab_title)
-    with _lock:
-        hit = _values_cache.get(key)
-        if hit and _fresh(hit[0]) and not fresh:
-            return hit[1]
+    while True:
+        with _lock:
+            hit = _values_cache.get(key)
+            if hit and _fresh(hit[0]) and (not fresh or time.monotonic() - hit[0] < _SHARED_SECONDS):
+                return hit[1]
+            busy = _reading.get(key)
+            if busy is None:
+                mine = _reading[key] = threading.Event()
+                break
+        # Тот же лист уже читается - его снимок и возьмём (см. `_SHARED_SECONDS`).
+        if not busy.wait(120):
+            raise GoogleError(f"Вкладка «{tab_title}» читается слишком долго - попробуйте ещё раз")
+        with _lock:
+            hit = _values_cache.get(key)
+            if hit is not None and time.monotonic() - hit[0] < _SHARED_SECONDS:
+                return hit[1]
+    try:
+        return _fetch_tab(spreadsheet_id, tab_title, key)
+    finally:
+        with _lock:
+            _reading.pop(key, None)
+        mine.set()
 
+
+def _fetch_tab(spreadsheet_id: str, tab_title: str, key: tuple[str, str]) -> list[list[str]]:
     meta = spreadsheet_meta(spreadsheet_id)
     tab = next((t for t in meta["tabs"] if t["title"] == tab_title), None)
     if tab is None:

@@ -23,8 +23,10 @@ from typing import Any
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
-from app.api.routes.finance import _guard, _workspace, require_access
+from app.api.routes.finance import _guard, _workspace, require_access, require_role
+from app.finance import auth, history
 from app.finance.auth import Member
 from app.finance.contracts import service as contracts_service
 from app.finance.db import finance_session, get_finance_session_factory, retrying
@@ -36,6 +38,7 @@ from app.finance.model import explain as explain_module
 from app.finance.model import schema as schema_module
 from app.finance.model import stream as stream_module
 from app.finance.model.context import of_member
+from app.finance.model.entry import Question
 from app.finance.service import FinanceError
 
 
@@ -57,8 +60,10 @@ def _version(response: Response, kort_model: str | None = Header(default=None, a
 
 router = APIRouter(prefix="/finance/model", tags=["finance-model"], dependencies=[Depends(_version)])
 
-#: Вызовы открыты тому, кому открыт хоть один источник видов.
-RESOURCES = ("contracts", "reports.debts", "invoices")
+#: Вызовы открыты тому, кому открыт хоть один источник видов или раздел, у
+#: которого есть команды (журнал денег, загрузка, счета); что именно можно -
+#: решает сам вызов и право каждой команды.
+RESOURCES = ("contracts", "reports.debts", "invoices", "journal", "import", "dictionaries")
 reader = require_access(RESOURCES)
 
 
@@ -69,6 +74,8 @@ def _fail(exc: Exception) -> JSONResponse:
     extra = {"command": command} if command is not None else {}
     if isinstance(exc, apply_module.Changed):
         return JSONResponse(status_code=409, content={"code": "changed", "detail": str(exc), "proposal": exc.proposal}, headers=headers)
+    if isinstance(cause, Question):
+        return JSONResponse(status_code=422, content={"code": "question", "question": cause.question, "detail": str(exc), **extra}, headers=headers)
     if isinstance(cause, contracts_service.ModeRequired):
         return JSONResponse(status_code=422, content={"code": "mode_required", "fields": cause.fields, "detail": str(exc), **extra}, headers=headers)
     if isinstance(cause, contracts_service.FieldConflict):
@@ -162,6 +169,33 @@ def model_explain(ref: str = Query(min_length=1, max_length=4096), member: Membe
     return _call(member, lambda ctx: explain_module.explain(ctx, ref))
 
 
+@router.post("/compare")
+def model_compare(body: schema_module.CompareIn, member: Member = Depends(reader)) -> Any:
+    """Сравнить: таблица «договор за месяц» (файл base64 или сводная Google компании) против KORT по звеньям. Ничего не пишет."""
+    from app.finance.intake import compare as compare_module
+
+    def action(ctx):
+        from app.finance.contracts.service import today
+
+        entity = uuid.UUID(body.entity) if body.entity else None
+        if body.data:
+            from app.finance.model.entry import _file
+
+            name = body.name or "таблица.xlsx"
+            book = compare_module.table_book(
+                ctx.session, ctx.workspace, _file(name, body.data), name, today=today(), entity=entity, answers=body.answers,
+            )
+        else:
+            book, error = compare_module.company_book(ctx.session, ctx.workspace.id)
+            if book is None:
+                raise compare_module.CompareError(error or "Сводная таблица компании не подключена - пришлите таблицу файлом")
+        links = tuple(body.links) if body.links else compare_module.LINKS
+        return {"version": VERSION, **compare_module.compare(ctx.session, ctx.workspace, ctx.access, book, today=today(),
+                                                             links=links, entity=entity)}
+
+    return _call(member, action)
+
+
 # ── Предложить, применить, отменить ──────────────────────────────────────────
 
 
@@ -169,21 +203,34 @@ def _commands(body: Any) -> list[dict[str, Any]]:
     return [item.model_dump() for item in body.commands]
 
 
+def _writes(member: Member) -> None:
+    """Ключ только для чтения не предлагает, не применяет и не отменяет."""
+    if member.key == "read":
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "forbidden", "detail": "Ключ только для чтения: предложить, применить и отменить ему закрыты"},
+            headers={HEADER: VERSION},
+        )
+
+
 @router.post("/propose")
 def model_propose(body: schema_module.ProposeIn, member: Member = Depends(reader)) -> Any:
     """Предложить: команды прогоном, который откатывается, - что заведётся и изменится, долг до и после."""
+    _writes(member)
     return _dry(member, lambda ctx: apply_module.propose(ctx, _commands(body)))
 
 
 @router.post("/apply")
 def model_apply(body: schema_module.ApplyIn, member: Member = Depends(reader)) -> Any:
     """Применить: пачка одной транзакцией и одной точкой восстановления; право - у каждой команды своё. Пишет журнал."""
+    _writes(member)
     return _call(member, lambda ctx: apply_module.apply(ctx, _commands(body), expect=body.expect))
 
 
 @router.post("/undo")
 def model_undo(body: schema_module.UndoIn, member: Member = Depends(reader)) -> Any:
     """Отменить: вернуть точку восстановления (свою - любой, чужую - администратор). Пишет журнал."""
+    _writes(member)
     try:
         point_id = uuid.UUID(body.point)
     except ValueError as exc:
@@ -195,6 +242,69 @@ def model_undo(body: schema_module.UndoIn, member: Member = Depends(reader)) -> 
 def model_points(limit: int = Query(default=60, ge=1, le=200), member: Member = Depends(reader)) -> Any:
     """Точки восстановления: свои, у администратора - все."""
     return _call(member, lambda ctx: apply_module.points(ctx, limit=limit))
+
+
+# ── Ключи для чужого сервиса ─────────────────────────────────────────────────
+
+#: Ключи выдают и отзывают владелец и администратор - из сеанса, не ключом.
+keeper = require_role("owner", "admin")
+
+
+class KeyIn(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+    #: `read` - описать, спросить, объяснить, подписаться; `write` - ещё предложить, применить, отменить.
+    level: str = Field(default="read", pattern="^(read|write)$")
+
+
+def _session_only(member: Member) -> None:
+    if member.key:
+        raise HTTPException(status_code=403, detail="Ключами распоряжаются из сеанса учётки, а не ключом")
+
+
+@router.get("/keys")
+def model_keys(member: Member = Depends(keeper)) -> dict[str, Any]:
+    """Ключи API модели компании: кем выданы, когда спрашивали в последний раз, отозваны ли. Токенов здесь нет."""
+    _session_only(member)
+    _guard()
+    with finance_session() as session:
+        return {"keys": auth.keys_of(session, member.workspace_id)}
+
+
+@router.post("/keys", status_code=201)
+def model_key_create(body: KeyIn, member: Member = Depends(keeper)) -> dict[str, Any]:
+    """Выдать ключ: токен - только в этом ответе, в базе - его хеш. Ключ действует правами выдавшего. Пишет журнал."""
+    _session_only(member)
+    _guard()
+    with finance_session() as session:
+        try:
+            key, token = auth.create_key(session, member, title=body.title, level=body.level)
+        except auth.AuthError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        workspace = _workspace(session, member)
+        history.write(
+            session, workspace, kind="api_key.create", entity="api_key", entity_id=key.id,
+            title=f"ключ API «{key.title}» выдан: {'чтение и запись' if key.level == 'write' else 'только чтение'}",
+            after={"title": key.title, "level": key.level, "prefix": key.prefix}, category="admin",
+        )
+        return {"id": str(key.id), "title": key.title, "level": key.level, "prefix": key.prefix, "token": token}
+
+
+@router.delete("/keys/{key_id}")
+def model_key_revoke(key_id: uuid.UUID, member: Member = Depends(keeper)) -> dict[str, Any]:
+    """Отозвать ключ: следующий его запрос - 401. Пишет журнал."""
+    _session_only(member)
+    _guard()
+    with finance_session() as session:
+        try:
+            key = auth.revoke_key(session, member.workspace_id, key_id)
+        except auth.AuthError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        workspace = _workspace(session, member)
+        history.write(
+            session, workspace, kind="api_key.revoke", entity="api_key", entity_id=key.id,
+            title=f"ключ API «{key.title}» отозван", before={"title": key.title, "level": key.level}, category="admin",
+        )
+        return {"id": str(key.id), "revoked": True}
 
 
 # ── Подписаться ──────────────────────────────────────────────────────────────

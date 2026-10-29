@@ -57,6 +57,16 @@ class UndoIn(_In):
     point: str = Field(description="id точки восстановления из ответа «применить» или GET /finance/model/points")
 
 
+class CompareIn(_In):
+    """Таблица «договор за месяц» против KORT: файл (`name`, `data` base64) или, без файла, сводная Google компании."""
+
+    name: str | None = Field(default=None, max_length=255)
+    data: str | None = Field(default=None, max_length=22 * 1024 * 1024)
+    links: list[Literal["accruals", "payments", "acts", "bills"]] | None = None
+    entity: str | None = Field(default=None, description="Наше юрлицо: строк без «Нашего юрлица» и сверка только его месяцев")
+    answers: dict[str, Any] | None = Field(default=None, description="Разметка листов - как у команды table.apply")
+
+
 # ── Ответы ───────────────────────────────────────────────────────────────────
 
 
@@ -156,6 +166,8 @@ CALLS = (
     ("undo", "POST", "/finance/model/undo", "Отменить: по точке восстановления", UndoIn, UndoOut),
     ("points", "GET", "/finance/model/points", "Точки восстановления", None, None),
     ("subscribe", "GET", "/finance/model/changes?cursor=&wait=&include=", "Подписаться: что изменилось после курсора", None, ChangesOut),
+    ("compare", "POST", "/finance/model/compare", "Сравнить: таблица «договор за месяц» против KORT по звеньям, без записи", CompareIn, None),
+    ("keys", "GET|POST|DELETE", "/finance/model/keys", "Ключи для чужого сервиса: выдать, список, отозвать (из сеанса)", None, None),
 )
 
 
@@ -176,10 +188,13 @@ def catalog() -> dict[str, Any]:
             for name, method, path, title, request, response in CALLS
         ],
         "commands": [
-            {"name": command.name, "title": command.title, "params": command.params.model_json_schema()}
+            {
+                "name": command.name, "title": command.title, "resource": command.resource, "setup": command.setup,
+                "params": command.params.model_json_schema(),
+            }
             for command in COMMANDS.values()
         ],
     }
 
 
-__all__ = ["AskIn", "ApplyIn", "CALLS", "CommandIn", "ProposeIn", "UndoIn", "catalog"]
+__all__ = ["AskIn", "ApplyIn", "CALLS", "CommandIn", "CompareIn", "ProposeIn", "UndoIn", "catalog"]

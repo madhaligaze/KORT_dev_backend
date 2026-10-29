@@ -324,6 +324,34 @@ def test_prava_vyzovov(app: FastAPI, owner: TestClient) -> None:
     assert denied.status_code == 403
 
 
+def test_klyuch_api_dlya_chuzhogo_servisa(app: FastAPI, owner: TestClient) -> None:
+    """Чужой сервис спрашивает ядро ключом, а не паролем человека: ключ - правами выдавшего, только `/finance/model/*`."""
+    issued = _ok(owner.post(f"{MODEL}/keys", json={"title": "Шина клиента", "level": "read"}), 201)
+    assert issued["token"].startswith("kort_") and issued["prefix"] == issued["token"][:11]
+    listed = _ok(owner.get(f"{MODEL}/keys"))["keys"]
+    assert [item["title"] for item in listed] == ["Шина клиента"] and "token" not in listed[0]
+    outside = TestClient(app)
+    reader = {"Authorization": f"Bearer {issued['token']}"}
+    assert outside.get(f"{MODEL}/describe", headers=reader).status_code == 200
+    debts = _ok(outside.post(f"{MODEL}/ask", json={"source": "debts"}, headers=reader))
+    assert debts["totals"]["debt"] == _ok(owner.post(f"{MODEL}/ask", json={"source": "debts"}))["totals"]["debt"]
+    alfa = next(row for row in _ok(outside.post(f"{MODEL}/ask", json={"view": ""}, headers=reader))["rows"] if row["number"] == "№1")
+    update = {"commands": [{"command": "contract.update", "params": {"id": alfa["id"], "values": {"note": "из шины"}}}]}
+    assert outside.post(f"{MODEL}/apply", json=update, headers=reader).status_code == 403, "ключ чтения не пишет"
+    assert outside.get(f"{BASE}/contracts", headers=reader).status_code == 401, "ключ открывает только API модели"
+    assert outside.get(f"{MODEL}/keys", headers=reader).status_code == 403, "ключами распоряжаются из сеанса"
+    assert outside.post(f"{MODEL}/keys", json={"title": "ещё", "level": "write"}, headers=reader).status_code == 403
+
+    writer_key = _ok(owner.post(f"{MODEL}/keys", json={"title": "Холст", "level": "write"}), 201)
+    writer = {"Authorization": f"Bearer {writer_key['token']}"}
+    _ok(outside.post(f"{MODEL}/apply", json=update, headers=writer))
+    audit_rows = _ok(owner.get(f"{BASE}/audit", params={"kind": "contract.update"}))["items"]
+    assert any("ключ «Холст»" in (item.get("actor_text") or "") for item in audit_rows), "записанное ключом подписано ключом"
+    _ok(owner.delete(f"{MODEL}/keys/{writer_key['id']}"))
+    assert outside.get(f"{MODEL}/describe", headers=writer).status_code == 401, "отозванный ключ - никто"
+    assert outside.get(f"{MODEL}/describe", headers={"Authorization": "Bearer kort_wrong"}).status_code == 401
+
+
 def test_podpiska_s_nomera_reestra(owner: TestClient) -> None:
     """Десктоп продолжает сохранённый реестр: подписка с его номера отдаёт договоры, изменённые после него."""
     registry = _ok(owner.get(f"{BASE}/contracts"))

@@ -721,7 +721,12 @@ def restore_point(
 
 
 #: Шаги пачки, которых не бывает отдельной точкой: их ставит только «применить».
-STEP_KINDS = ("core_status", "core_adjust", "view_created", "view_state", "view_removed")
+#: `entry_*` - ручной ввод (`core/entry.py`): оплаты, решения по ним, документы
+#: месяца, сальдо, начало учёта и источник оплат.
+STEP_KINDS = (
+    "core_status", "core_adjust", "view_created", "view_state", "view_removed",
+    "entry_operation", "entry_decision", "entry_document", "entry_opening", "entry_since", "entry_source", "entry_import",
+)
 
 
 def _restore_step(session, workspace, access, actor, point, kind, payload, done, skipped) -> None:
@@ -765,6 +770,10 @@ def _restore_step(session, workspace, access, actor, point, kind, payload, done,
         from app.finance.core import views as views_module
 
         views_module.undo(session, workspace, actor, kind, payload, done, skipped)
+    elif kind.startswith("entry_"):
+        from app.finance.core import entry
+
+        entry.undo(session, workspace, access, actor, kind, payload, done, skipped)
     else:
         skipped.append("шаг, который эта версия KORT вернуть не умеет")
 

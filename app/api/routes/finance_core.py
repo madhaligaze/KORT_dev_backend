@@ -1535,6 +1535,33 @@ def intake_describe(file: UploadFile = File(...), member: Member = Depends(edito
         heap.trim()
 
 
+@router.post("/intake/compare")
+def intake_compare(
+    file: UploadFile = File(...), answers: str = Form("{}"), entity: UUID | None = Form(default=None),
+    member: Member = Depends(viewer),
+) -> dict[str, Any]:
+    """Сравнить: лист «договор за месяц» из файла против KORT - начисления, оплаты, АВР, счета. Ничего не пишет.
+
+    Та же сверка, что со сводной таблицей компании (`intake/compare.py`), - для
+    любой таблицы этой формы.
+    """
+    from app.finance import heap
+    from app.finance.intake import compare as compare_module
+
+    data, name = _intake_file(file)
+    given = _intake_answers(answers)
+
+    def action(session, workspace, access):
+        today = contracts_service.today()
+        book = compare_module.table_book(session, workspace, data, name, today=today, entity=entity, answers=given)
+        return compare_module.compare(session, workspace, access, book, today=today, entity=entity)
+
+    try:
+        return _run(member, action)
+    finally:
+        heap.trim()
+
+
 @router.post("/intake/plan")
 def intake_plan(file: UploadFile = File(...), answers: str = Form("{}"), member: Member = Depends(editor)) -> dict[str, Any]:
     """Что таблица положит в модель по разметке человека - и где она расходится с KORT. Ничего не пишет."""

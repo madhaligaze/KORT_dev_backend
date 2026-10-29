@@ -14,64 +14,14 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass, field
 from datetime import date
-from typing import Any, Callable
+from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
 
 from app.finance.contracts import service
+from app.finance.model.base import Command, CommandError, Done, Step, _actor, _label, _Params
 from app.finance.model.context import Ctx
-from app.finance.service import FinanceError
-
-
-class CommandError(FinanceError):
-    """Команда записана неверно - словами."""
-
-
-@dataclass
-class Step:
-    """Обратный шаг для точки восстановления: вид точки и что вернуть."""
-
-    kind: str
-    payload: dict[str, Any]
-
-
-@dataclass
-class Done:
-    title: str
-    result: dict[str, Any] = field(default_factory=dict)
-    contracts: list[str] = field(default_factory=list)
-    steps: list[Step] = field(default_factory=list)
-
-
-@dataclass(frozen=True)
-class Command:
-    name: str
-    title: str
-    #: Раздел и уровень (`app/finance/access.py`), без которых команды нет.
-    resource: str
-    params: type[BaseModel]
-    run: Callable[[Ctx, Any], Done]
-    #: Какие договоры заденет - до исполнения: отпечаток «предложить» и «до» его следствий.
-    touches: Callable[[Any], list[str]] = lambda params: []
-
-
-class _Params(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-
-def _actor(ctx: Ctx) -> service.Actor:
-    if ctx.actor is None:
-        raise PermissionError("Записывать может только вошедший")
-    return ctx.actor
-
-
-def _label(contract: Any) -> str:
-    number = (contract.number or "").strip() if contract is not None else ""
-    if not number:
-        return "договор без номера"
-    return number if number.startswith("№") else f"№ {number}"
 
 
 # ── Договор: правка, заведение, удаление ─────────────────────────────────────
@@ -342,23 +292,30 @@ def _view_remove(ctx: Ctx, p: ViewRemove) -> Done:
     )
 
 
-COMMANDS: dict[str, Command] = {
-    item.name: item
-    for item in (
-        Command("contract.update", "Правка полей договора", "contracts", ContractUpdate, _contract_update, lambda p: [str(p.id)]),
-        Command("contract.create", "Новый договор", "contracts", ContractCreate, _contract_create, lambda p: [str(p.id)] if p.id else []),
-        Command("contract.delete", "Удалить договор (в корзину)", "contracts", ContractDelete, _contract_delete, lambda p: [str(p.id)]),
-        Command("contract.status_from", "Статус договора с даты", "contracts", ContractStatusFrom, _contract_status_from, lambda p: [str(p.id)]),
-        Command("contract.adjust", "Поправка начисления месяца", "contracts", ContractAdjust, _contract_adjust, lambda p: [str(p.id)]),
-        Command(
-            "clients.transfer", "Перевод клиентов к другому нашему юрлицу с даты", "contracts", ClientsTransfer, _clients_transfer,
-            lambda p: [str(move.contract_id) for move in p.moves],
-        ),
-        Command("view.save", "Сохранить вид", "contracts", ViewSave, _view_save),
-        Command("view.update", "Изменить вид", "contracts", ViewUpdate, _view_update),
-        Command("view.remove", "Убрать вид", "contracts", ViewRemove, _view_remove),
-    )
-}
+CONTRACT_COMMANDS: tuple[Command, ...] = (
+    Command("contract.update", "Правка полей договора", "contracts", ContractUpdate, _contract_update, lambda p: [str(p.id)]),
+    Command("contract.create", "Новый договор", "contracts", ContractCreate, _contract_create, lambda p: [str(p.id)] if p.id else []),
+    Command("contract.delete", "Удалить договор (в корзину)", "contracts", ContractDelete, _contract_delete, lambda p: [str(p.id)]),
+    Command("contract.status_from", "Статус договора с даты", "contracts", ContractStatusFrom, _contract_status_from, lambda p: [str(p.id)]),
+    Command("contract.adjust", "Поправка начисления месяца", "contracts", ContractAdjust, _contract_adjust, lambda p: [str(p.id)]),
+    Command(
+        "clients.transfer", "Перевод клиентов к другому нашему юрлицу с даты", "contracts", ClientsTransfer, _clients_transfer,
+        lambda p: [str(move.contract_id) for move in p.moves],
+    ),
+    Command("view.save", "Сохранить вид", "contracts", ViewSave, _view_save),
+    Command("view.update", "Изменить вид", "contracts", ViewUpdate, _view_update),
+    Command("view.remove", "Убрать вид", "contracts", ViewRemove, _view_remove),
+)
+
+
+def _catalog() -> dict[str, Command]:
+    from app.finance.model.entry import ENTRY_COMMANDS
+
+    return {item.name: item for item in (*CONTRACT_COMMANDS, *ENTRY_COMMANDS)}
+
+
+#: Все команды: договоры и виды - здесь, ручной ввод, деньги и файлы - `entry.py`.
+COMMANDS: dict[str, Command] = _catalog()
 #: Виды открыты тому, кому открыт их источник, - право проверяет `core/views.py`.
 VIEW_COMMANDS = frozenset({"view.save", "view.update", "view.remove"})
 
@@ -382,11 +339,29 @@ def parse(raw: Any) -> tuple[Command, BaseModel]:
     return command, params
 
 
+def open_to(ctx: Ctx, command: Command) -> bool:
+    """Открыта ли команда спрашивающему - то же правило, что `check_right`, без отказа."""
+    try:
+        check_right(ctx, command)
+    except PermissionError:
+        return False
+    return True
+
+
 def check_right(ctx: Ctx, command: Command) -> None:
+    """Право команды: её раздел на правку; у договоров - права реестра; у некоторых - владелец."""
     if command.name in VIEW_COMMANDS:
         return
-    if not ctx.access.edit:
-        raise PermissionError("Правка реестра вам не открыта - только просмотр")
+    if command.resource == "contracts":
+        if not ctx.access.edit:
+            raise PermissionError("Правка реестра вам не открыта - только просмотр")
+    elif not ctx.can(command.resource, "edit"):
+        from app.finance.access import RESOURCE_BY_KEY
+
+        title = RESOURCE_BY_KEY[command.resource].title if command.resource in RESOURCE_BY_KEY else command.resource
+        raise PermissionError(f"«{command.title}» - нужен раздел «{title}» на правку")
+    if command.setup and not ctx.access.setup:
+        raise PermissionError(f"«{command.title}» делает владелец или администратор")
 
 
-__all__ = ["COMMANDS", "Command", "CommandError", "Done", "Step", "check_right", "parse"]
+__all__ = ["COMMANDS", "Command", "CommandError", "Done", "Step", "check_right", "open_to", "parse"]

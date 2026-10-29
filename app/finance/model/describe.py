@@ -14,7 +14,7 @@ from typing import Any
 from app.finance import packs
 from app.finance.core import views as views_module
 from app.finance.model import VERSION
-from app.finance.model.commands import COMMANDS, VIEW_COMMANDS
+from app.finance.model.commands import COMMANDS, open_to
 from app.finance.model.context import Ctx
 from app.finance.model.stream import cursor_now
 
@@ -78,7 +78,7 @@ def describe(ctx: Ctx) -> dict[str, Any]:
             {
                 "name": command.name,
                 "title": command.title,
-                "open": command.name in VIEW_COMMANDS or access.edit,
+                "open": open_to(ctx, command),
             }
             for command in COMMANDS.values()
         ],

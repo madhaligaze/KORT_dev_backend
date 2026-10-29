@@ -361,10 +361,30 @@ def debts(ctx: Ctx, view: View, asked: dict[str, Any], day: date) -> dict[str, A
 # ── Счета к выставлению ──────────────────────────────────────────────────────
 
 
-def unbilled(ctx: Ctx, view: View, asked: dict[str, Any], *, force: bool = False, wait: float | None = None) -> dict[str, Any]:
-    """Счета книги-сводки, которые пора выставить, и ключи выставленных - то же, что раздел «Счета» и бот."""
+def unbilled_board(ctx: Ctx, *, force: bool = False, wait: float | None = None) -> tuple[Any, str, str, Any]:
+    """Доска счетов компании: из сводной таблицы, если она подключена, иначе из начислений и счетов KORT.
+
+    Возвращает доску (или `None` - таблица ещё читается), отказ чтения, откуда
+    (`table` / `kort`) и подключённую таблицу.
+    """
     from app.finance.contracts import bills
     from app.finance.contracts.summary import source_of
+    from app.finance.core import billing
+
+    source = source_of(ctx.session, ctx.workspace.id)
+    if source is None:
+        return billing.kort_board(ctx.session, ctx.workspace, today=today()), "", "kort", None
+    board, error = bills.current(ctx.session, ctx.workspace.id, force=force, **({"wait": wait} if wait is not None else {}))
+    return board, error, "table", source
+
+
+def unbilled(ctx: Ctx, view: View, asked: dict[str, Any], *, force: bool = False, wait: float | None = None) -> dict[str, Any]:
+    """Счета, которые пора выставить, и ключи выставленных - то же, что раздел «Счета» и бот.
+
+    Компания без сводной таблицы получает счета KORT: начисления её договоров,
+    по которым KORT не знает счёта (`core/billing.kort_board`).
+    """
+    from app.finance.contracts import bills
 
     if not ctx.can("invoices"):
         raise PermissionError("Счета вам не открыты")
@@ -377,10 +397,7 @@ def unbilled(ctx: Ctx, view: View, asked: dict[str, Any], *, force: bool = False
         {"key": "text", "title": "Состояние", "type": "text"},
         {"key": "amount", "title": "Сумма", "type": "money"},
     ]
-    source = source_of(ctx.session, ctx.workspace.id)
-    if source is None:
-        return {"columns": columns, "rows": [], "totals": {"bills": 0}, "board": None, "issued": [], "done": []}
-    board, error = bills.current(ctx.session, ctx.workspace.id, force=force, **({"wait": wait} if wait is not None else {}))
+    board, error, origin, source = unbilled_board(ctx, force=force, wait=wait)
     if board is None:
         return {
             "columns": columns, "rows": [], "totals": {"bills": 0}, "issued": [], "done": [],
@@ -414,6 +431,8 @@ def unbilled(ctx: Ctx, view: View, asked: dict[str, Any], *, force: bool = False
             "error": error,
             "kort": list(board.kort),
             "kort_error": board.kort_error,
+            # Откуда счета: сводная таблица компании или начисления KORT (компания без таблицы).
+            "source": origin,
         },
         # Выставленные - ключами (бот убирает их из постов), строками - за прошлый
         # и текущий месяц, как «Выставлены» раздела: весь год - тысяча строк.

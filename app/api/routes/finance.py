@@ -186,9 +186,20 @@ def signed_in(request: Request) -> Member:
             ip=client_ip(request),
             user_agent=_agent(request),
         )
+        if member is None and _model_path(request):
+            # Ключ API модели (`auth.resolve_key`) - только для `/finance/model/*`:
+            # кабинет, пароли и права ключом не открываются.
+            header = request.headers.get("authorization") or ""
+            scheme, _, token = header.partition(" ")
+            if scheme.lower() == "bearer" and token.strip():
+                member = auth.resolve_key(session, token.strip(), ip=client_ip(request), user_agent=_agent(request))
     if member is None:
         raise HTTPException(status_code=401, detail="Войдите в KORT")
     return member
+
+
+def _model_path(request: Request) -> bool:
+    return "/finance/model" in request.url.path.split("?", 1)[0]
 
 
 TEMPORARY_PASSWORD = "Сначала смените временный пароль"
@@ -202,7 +213,8 @@ def _enter(member: Member) -> None:
             session_id=member.session_id,
             ip=member.ip,
             user_agent=member.user_agent,
-            actor=member.login,
+            # Записанное ключом API подписано ключом: человек видит, что это не он руками.
+            actor=f"{member.login} · ключ «{member.key_title}»" if member.key else member.login,
         )
     )
 

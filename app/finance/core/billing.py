@@ -254,6 +254,41 @@ def _iso(text: str) -> date | None:
         return None
 
 
+# ── «Не выставлены» без таблицы ──────────────────────────────────────────────
+#
+# Компания без сводной таблицы ведёт счета только в KORT: месяц договора, который
+# KORT начисляет нашему юрлицу, - счёт к выставлению; счёт знает KORT (документ
+# `bill`) - выставлен. Правило то же, что у юрлиц, переведённых на KORT
+# (`switch.build_bills`): срок - «Период с» начисления, «скоро» - за три дня.
+# Окно - с начала учёта: долгую историю договоров без счетов человек не
+# выставляет, а начало учёта он назвал сам.
+
+_kort_boards: dict[uuid.UUID, tuple[tuple[Any, ...], Any]] = {}
+
+
+def kort_board(session: Session, workspace: Workspace, *, today: date) -> Any:
+    """Счета к выставлению из начислений и счетов KORT - доска той же формы, что из таблицы."""
+    from app.finance.contracts.models import GroupEntity
+    from app.finance.core import settings as core_settings
+    from app.finance.core import switch
+
+    own = set(
+        session.scalars(
+            sa.select(GroupEntity.counterparty_id).where(GroupEntity.workspace_id == workspace.id, GroupEntity.archived_at.is_(None))
+        )
+    )
+    since = core_settings.payments(session, workspace).since
+    # Посчитанное держится до правки данных компании: каждая правка пишет журнал действий.
+    key = (frozenset(own), today, since, switch._version(session, workspace.id))
+    cached = _kort_boards.get(workspace.id)
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    empty = bills_module.Board(read_at=_now(), title="KORT", worksheet="", spreadsheet_id="")
+    board = switch.build_bills(session, workspace.id, empty, own, today, since=since)
+    _kort_boards[workspace.id] = (key, board)
+    return board
+
+
 # ── Счёт без строки в таблице ────────────────────────────────────────────────
 #
 # Юрлицо ведёт счета в KORT (`core/switch.py`), и месяц, который KORT
@@ -393,4 +428,4 @@ def write_kort(
     }
 
 
-__all__ = ["CODES", "CODE_TITLES", "GROUP_TITLES", "kort_bills", "kort_card", "reconcile_bills", "record", "write_kort"]
+__all__ = ["CODES", "CODE_TITLES", "GROUP_TITLES", "kort_board", "kort_bills", "kort_card", "reconcile_bills", "record", "write_kort"]

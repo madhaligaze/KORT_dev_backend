@@ -189,8 +189,12 @@ def _diff(before: dict[str, dict[str, Any]], after: dict[str, dict[str, Any]]) -
 
 
 def _problem(index: int, command: Command, exc: Exception) -> dict[str, Any]:
+    from app.finance.model.entry import Question
+
     item: dict[str, Any] = {"command": index, "name": command.name, "detail": str(exc)}
-    if isinstance(exc, service.ModeRequired):
+    if isinstance(exc, Question):
+        item.update(code="question", question=exc.question)
+    elif isinstance(exc, service.ModeRequired):
         item.update(code="mode_required", fields=list(exc.fields))
     elif isinstance(exc, service.FieldConflict):
         item.update(code="conflict", conflicts=list(exc.conflicts))
