@@ -765,6 +765,8 @@ class Plan:
     declared_own: set[str] = field(default_factory=set)
     #: Блок → поле → значение, выведенное из файла, а не из колонки (`implied_departments`).
     implied: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: Строка → договор, который KORT уже знал (1С, прежняя загрузка): дополняется пустое (`known.py`).
+    known: dict[str, Any] = field(default_factory=dict)
 
 
 def _column_decisions(staged: dict[str, Any], decisions: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -961,13 +963,16 @@ def plan(session: Session, workspace: Workspace, batch: ContractImport, registry
                 number_only[ref] = by_number[0]
             orphans.append(item)
 
-    # Существующие договоры компании (повторная загрузка): совпадение по тому
-    # же ключу превращает строку файла из «завести» в «сверить».
+    # Существующие договоры компании (1С, повторная загрузка): строка, нашедшая
+    # свой договор, не заводится второй раз - она его дополняет (`known.py`).
     existing: dict[str, uuid.UUID] = {}
+    known: dict[str, Any] = {}
     live = session.scalars(
         sa.select(Contract).where(Contract.workspace_id == workspace.id, Contract.deleted_at.is_(None))
     ).all()
     if live:
+        known = _known_rows(session, workspace, registry, [*main_rows, *orphans])
+        existing.update({ref: item.contract_id for ref, item in known.items()})
         by_existing_key: dict[tuple[str, str, str], uuid.UUID] = {}
         for contract in live:
             customer = registry.parties.get(contract.customer_id) if contract.customer_id else None
@@ -981,7 +986,7 @@ def plan(session: Session, workspace: Workspace, batch: ContractImport, registry
             ] = contract.id
         for item in main_rows + orphans:
             found = by_existing_key.get(row_key(item["values"]))
-            if found is not None:
+            if found is not None and item["ref"] not in existing:
                 existing[item["ref"]] = found
 
     clusters = _party_clusters(main_rows + orphans, registry, decisions, main_refs={row["ref"] for row in main_rows})
@@ -993,7 +998,31 @@ def plan(session: Session, workspace: Workspace, batch: ContractImport, registry
         main_sheet, blocks, columns, main_rows, sheet_rows, matches, loose, orphans, existing, own_keys, clusters,
         loose_kinds=loose_kinds, number_only=number_only, hidden_rows=hidden_rows, declared_own=declared_own,
         implied={block_id: {"department": department} for block_id, department in implied.items()},
+        known=known,
     )
+
+
+def _known_rows(session: Session, workspace: Workspace, registry: Registry, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Строки, чей договор KORT уже знает, - с тем, что загрузка ему допишет, и расхождениями."""
+    from app.finance.contracts.known import Known
+    from app.finance.core import settings as core_settings
+
+    index = Known(session, workspace, registry)
+    found = index.match_rows(rows, PARTY_BIN)
+    if not found:
+        return {}
+    since = core_settings.payments(session, workspace).since
+    from app.finance.contracts.service import today as company_today
+
+    today = company_today()
+    timelines = index.amounts([contract.id for contract, _how in found.values()])
+    by_ref = {row["ref"]: row for row in rows}
+    out: dict[str, Any] = {}
+    for ref, (contract, how) in found.items():
+        row = by_ref[ref]
+        name = str(row["values"].get("customer") or row["values"].get("executor") or "").strip()
+        out[ref] = index.review(ref, row, contract, how, since=since, today=today, timeline=timelines.get(contract.id), name=name)
+    return out
 
 
 def _party_clusters(
@@ -1102,6 +1131,7 @@ def _report_and_plan(
         _section_bins(current_plan, packs.country_of(workspace).ids),
         _section_amounts(current_plan),
         _section_orphans(current_plan, decisions),
+        _section_known(current_plan, decisions),
         _section_diffs(current_plan, registry, decisions),
         _section_rules(current_plan, registry, decisions),
     ]
@@ -1205,7 +1235,11 @@ def _section_entities(current: Plan, decisions: dict[str, Any]) -> dict[str, Any
         for group in _similar_clusters(current.clusters)
     ]
     confirmed = bool((decisions.get("entities") or {}).get("confirmed"))
-    own_count = len(current.own_keys)
+    # Два написания одного уже знакомого юрлица («Тумар Сервис» в «Наше ТОО» и
+    # «ТОО "Тумар Сервис"» клиентом склада) - одно юрлицо, а не два.
+    targets = {current.clusters[key]["known"] or key for key in current.own_keys}
+    own_count = len(targets)
+    known = sum(1 for target in targets if target in {cluster["known"] for cluster in current.clusters.values()})
     spellings = sum(len(current.clusters[key]["names"]) for key in current.own_keys)
     return _section(
         "entities",
@@ -1215,6 +1249,7 @@ def _section_entities(current: Plan, decisions: dict[str, Any]) -> dict[str, Any
         summary=(
             f"{spellings} {_plural(spellings, 'написание', 'написания', 'написаний')} → {own_count} "
             f"{_plural(own_count, 'юрлицо', 'юрлица', 'юрлиц')}"
+            + (f", из них уже в KORT {known}" if known else "")
             + ("" if confirmed else " - подтвердите список")
         ),
         items=items,
@@ -1463,6 +1498,34 @@ def _section_amounts(current: Plan) -> dict[str, Any]:
         ),
         items=items,
     )
+
+
+def _section_known(current: Plan, decisions: dict[str, Any]) -> dict[str, Any]:
+    """Строки, чей договор KORT уже знает: дополнится пустое, расхождения - строками, вопрос - о сумме с даты."""
+    chosen = decisions.get("known") or {}
+    items = []
+    waiting = 0
+    for ref, match in current.known.items():
+        item = match.to_dict()
+        if match.question is not None:
+            item["answer"] = chosen.get(ref)
+            if item["answer"] not in ("kort", "file"):
+                waiting += 1
+        items.append(item)
+    if not items:
+        return _section("known", "Уже в KORT", blocking=False, done=True, summary="Договоров, которые KORT уже знает, в файле нет", items=[])
+    filled = sum(1 for item in items if item["fill"])
+    differ = sum(1 for item in items if item["compare"])
+    summary = (
+        f"{len(items)} {_plural(len(items), 'строка', 'строки', 'строк')} - договоры, которые KORT уже знает: "
+        f"не заведутся второй раз, пустое дополнится у {filled}"
+    )
+    if differ:
+        summary += f"; расходится с KORT у {differ} - KORT считает своё"
+    if waiting:
+        summary += f"; {waiting} {_plural(waiting, 'вопрос', 'вопроса', 'вопросов')} о сумме"
+    items.sort(key=lambda item: (item["question"] is None, not item["compare"], item["name"]))
+    return _section("known", "Уже в KORT", blocking=bool(waiting), done=not waiting, summary=summary, items=items)
 
 
 def _section_orphans(current: Plan, decisions: dict[str, Any]) -> dict[str, Any]:
@@ -2049,6 +2112,9 @@ def _apply(session: Session, workspace: Workspace, access: Access, actor: Actor,
             insert_chunk()
     insert_chunk()
 
+    # Договоры, которые KORT уже знал: только пустое, сумма - по ответу человека.
+    updated = _fill_known(session, workspace, access, actor, current, decisions, batch.file_name)
+
     # 5. БИН сторон из колонки «БИН/ИИН» - только годные и только пустым
     # участникам: номер, уже записанный у участника, файл не перебивает.
     bin_count = _write_bins(session, workspace, registry, current, actor)
@@ -2058,7 +2124,7 @@ def _apply(session: Session, workspace: Workspace, access: Access, actor: Actor,
 
     batch.status = "applied"
     batch.applied_at = now
-    batch.report = {**batch.report, "result": {"created": created, "failed": failed, "bins": bin_count}}
+    batch.report = {**batch.report, "result": {"created": created, "updated": updated, "failed": failed, "bins": bin_count}}
     # Разобранные строки после заведения не нужны: протокол остаётся в
     # отчёте, файл второй раз не читается. На 20 000 строк это 6 МБ в базе.
     batch.staged = {}
@@ -2075,12 +2141,53 @@ def _apply(session: Session, workspace: Workspace, access: Access, actor: Actor,
         kind="contract.import",
         entity="contract_import",
         entity_id=batch.id,
-        title=f"реестр загружен из «{batch.file_name}»: {created} {_plural(created, 'договор', 'договора', 'договоров')}",
-        after={"created": created, "failed": len(failed)},
+        title=f"реестр загружен из «{batch.file_name}»: {created} {_plural(created, 'договор', 'договора', 'договоров')}"
+        + (f", дополнено {updated}" if updated else ""),
+        after={"created": created, "updated": updated, "failed": len(failed)},
         actor=actor.email,
     )
     session.flush()
-    return {"created": created, "failed": failed}
+    return {"created": created, "updated": updated, "failed": failed}
+
+
+def _fill_known(
+    session: Session, workspace: Workspace, access: Access, actor: Actor, current: Plan, decisions: dict[str, Any], file_name: str,
+) -> int:
+    """Найденным договорам - пустое из файла; «сумма весь срок» - соглашения о сумме сняты, нынешняя действует всегда."""
+    from app.finance.contracts.amendments import remove_amendment
+    from app.finance.contracts.models import ContractAmendment
+    from app.finance.contracts.service import Mode, patch
+
+    chosen = decisions.get("known") or {}
+    updated = 0
+    for ref, match in current.known.items():
+        values = dict(match.fill)
+        if values:
+            try:
+                patch(session, workspace, access, actor, match.contract_id, values, known_seq=None,
+                      mode=Mode(kind="fix", summary=f"из реестра «{file_name}»"))
+            except FinanceError:
+                # Закрытый список не принял значение (отдел, люди) - остальное всё равно дописать.
+                for key in list(values):
+                    try:
+                        patch(session, workspace, access, actor, match.contract_id, {key: values[key]}, known_seq=None,
+                              mode=Mode(kind="fix", summary=f"из реестра «{file_name}»"))
+                    except FinanceError:
+                        continue
+        question = match.question
+        if question is not None and chosen.get(ref) == "file":
+            # Вопрос задаётся, только когда сумма файла - нынешняя сумма KORT: сняв
+            # соглашения о сумме, договор считает её весь срок.
+            for amendment_id in session.scalars(
+                sa.select(ContractAmendment.id).where(
+                    ContractAmendment.contract_id == match.contract_id, ContractAmendment.effect == "amount"
+                )
+            ).all():
+                remove_amendment(session, workspace, access, actor, match.contract_id, amendment_id)
+            values["amount"] = question["file"]
+        if values:
+            updated += 1
+    return updated
 
 
 def _write_bins(session: Session, workspace: Workspace, registry: Registry, current: Plan, actor: Actor) -> int:

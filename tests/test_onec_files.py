@@ -88,16 +88,25 @@ def _statements(session, workspace, world, files, entities) -> None:
 
 
 def _answer_disputes(session, workspace, world, entities) -> list[str]:
-    """Спорные оплаты: человек-робот относит каждую к договору по правде полигона."""
+    """Спорные оплаты: человек-робот относит каждую к договору по правде полигона.
+
+    По одной, и после каждого ответа спор читается заново, как на экране:
+    ответ по одной оплате холдинга за дочку (У7) решает и остальные его оплаты.
+    """
     from app.finance.contracts import payments as contract_payments
     from app.finance.core.payments import Money
     from app.finance.models import Operation
 
-    money = Money(session, workspace, today=TODAY)
     codes = {entity_id: key for key, entity_id in entities.items()}
     contracts = list(session.scalars(sa.select(Contract).where(Contract.deleted_at.is_(None))))
     asked = []
-    for operation_id, candidates in sorted(money.disputed.items(), key=lambda item: str(item[0])):
+    seen: set = set()
+    while True:
+        disputed = {key: value for key, value in Money(session, workspace, today=TODAY).disputed.items() if key not in seen}
+        if not disputed:
+            break
+        operation_id, candidates = min(disputed.items(), key=lambda item: (session.get(Operation, item[0]).paid_at, str(item[0])))
+        seen.add(operation_id)
         operation = session.get(Operation, operation_id)
         truth = next(
             p for p in world.payments
@@ -109,7 +118,7 @@ def _answer_disputes(session, workspace, world, entities) -> list[str]:
         assert codes.get(chosen.executor_id) in (wanted.entity, wanted.executor_on(TODAY)), truth
         contract_payments.decide(session, workspace, FULL, ACTOR, chosen.id, operation_id, "link")
         asked.append(f"{truth.day} {truth.purpose} → {wanted.number}")
-    session.flush()
+        session.flush()
     return asked
 
 
@@ -172,11 +181,13 @@ def test_tumar_ofis_iz_faylov_1s_vidit_nam_dolzhny(world_files, finance_db) -> N
         assert moved["missing"] == []
         _statements(session, workspace, world, files, entities)
         session.flush()
-        # У7 (холдинг платит за дочку «по дог. А-07») KORT решает по номеру в назначении сам; спрашивает
-        # О5 (номер чужого договора) и сентябрьскую оплату «Береке» без номера при двух договорах на одну
-        # сумму (О4). Две июньские оплаты «Береке» без номера на те же два договора - по одной каждому, не вопрос.
+        # Спрашивает: У7 (холдинг платит за дочку «по дог. А-07») - один раз, первую его оплату, остальные
+        # ложатся по ответу; О5 (номер чужого договора); сентябрьскую оплату «Береке» без номера при двух
+        # договорах на одну сумму (О4). Две июньские оплаты «Береке» без номера на те же два договора - по
+        # одной каждому, не вопрос.
         asked = _answer_disputes(session, workspace, world, entities)
         assert sorted(asked) == [
+            "2026-06-10 Аренда за июнь за ТОО Мега Ритейл по дог. А-07 → А-07",
             "2026-09-05 Аренда за сентябрь → А-12", "2026-09-12 Аренда за сентябрь по дог. А-01 → А-04",
         ], asked
         # Д12: обеспечительный платёж Green Office - не оплата А-01 (аванса нет), скрыт своей причиной.

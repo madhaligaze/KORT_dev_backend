@@ -865,6 +865,28 @@ def payment_decide(operation_id: UUID, body: PaymentDecisionIn, member: Member =
     )
 
 
+class PaymentPartIn(BaseModel):
+    contract_id: UUID
+    amount: str = Field(max_length=40)
+
+
+class PaymentSplitIn(BaseModel):
+    parts: list[PaymentPartIn] = Field(min_length=2, max_length=20)
+
+
+@router.post("/payments/{operation_id}/split")
+def payment_split(operation_id: UUID, body: PaymentSplitIn, member: Member = Depends(editor)) -> dict[str, Any]:
+    """Одна оплата за несколько договоров: часть каждому, вместе - вся сумма (О2)."""
+    from app.finance.core import payments as payments_module
+
+    return _run(
+        member,
+        lambda s, w, a: payments_module.split(
+            s, w, a, _actor(member), operation_id, [(part.contract_id, part.amount) for part in body.parts]
+        ),
+    )
+
+
 class OpeningIn(BaseModel):
     #: Сальдо на начало учёта; `null` - снять.
     amount: str | None = Field(default=None, max_length=40)

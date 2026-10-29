@@ -755,6 +755,31 @@ def _osv_openings(session: Session, workspace: Workspace, source: Source, osv: O
     }
 
 
+def osv_contracts(session: Session, workspace: Workspace, base: OnecBase, osv: Osv, registry: Registry | None = None) -> list[Contract]:
+    """Договоры, о которых говорит ведомость: юрлица базы и наших ТОО её «Отбора», с прежними исполнителями.
+
+    Сальдо ОСВ пишется только им: вторая база 1С той же компании (полигон
+    целиком: «Тумар Офис» файлами после «Тумар Сервис» в интернете) снимала
+    сальдо договоров первой - их в её ведомости нет.
+    """
+    from app.finance.contracts.payments import former_executors
+
+    registry = registry or Registry(session, workspace)
+    owners = {base.group_entity_id} - {None}
+    for name in osv.organizations:
+        found = registry.resolve_party(name, slot="executor", create=False).party
+        if found is not None and registry.is_own(found.id):
+            owners.add(found.id)
+    former = former_executors(session, workspace.id)
+    return [
+        item
+        for item in session.scalars(
+            sa.select(Contract).where(Contract.workspace_id == workspace.id, Contract.deleted_at.is_(None))
+        )
+        if {item.executor_id, *former.get(item.id, ())} & owners
+    ]
+
+
 def osv_wanted(session: Session, workspace: Workspace, base: OnecBase, osv: Osv) -> tuple[dict[uuid.UUID, Decimal], list[dict[str, Any]]]:
     """Договор KORT → сальдо на начало по ОСВ; строки без договора - списком.
 
@@ -766,22 +791,8 @@ def osv_wanted(session: Session, workspace: Workspace, base: OnecBase, osv: Osv)
     1С на два ТОО - одна ОСВ на оба), в том числе тех, с кого клиента потом
     перевели (Д7): на начало учёта договор был их.
     """
-    from app.finance.contracts.payments import former_executors
-
     registry = Registry(session, workspace)
-    owners = {base.group_entity_id} - {None}
-    for name in osv.organizations:
-        found = registry.resolve_party(name, slot="executor", create=False).party
-        if found is not None and registry.is_own(found.id):
-            owners.add(found.id)
-    former = former_executors(session, workspace.id)
-    contracts = [
-        item
-        for item in session.scalars(
-            sa.select(Contract).where(Contract.workspace_id == workspace.id, Contract.deleted_at.is_(None))
-        )
-        if {item.executor_id, *former.get(item.id, ())} & owners
-    ]
+    contracts = osv_contracts(session, workspace, base, osv, registry)
     by_party: dict[uuid.UUID, list[Contract]] = {}
     for contract in contracts:
         if contract.customer_id:
@@ -825,6 +836,7 @@ def start_since(
     moved = opening_module.apply_wanted(
         session, workspace, access, actor, {"accruals": openings, "acts": openings}, since=day, source="1c",
         title=f"входящее сальдо на {day:%d.%m.%Y} из ОСВ 1С",
+        only={item.id for item in osv_contracts(session, workspace, base, osv)} | set(openings),
     )
     return {"since": day.isoformat(), "missing": missing, **moved}
 
@@ -977,5 +989,5 @@ def use_payments(session: Session, workspace: Workspace, access: Access, actor: 
 
 __all__ = [
     "Act", "Draft", "MAIN", "Party", "Source", "StartError", "add_contracts", "add_entity", "add_participants", "find_moves",
-    "accrual_openings", "from_files", "keep_osv", "osv_wanted", "plan", "take_balances", "read_source", "resolve_parties", "shape", "start_since", "stored_osv", "use_payments",
+    "accrual_openings", "from_files", "keep_osv", "osv_contracts", "osv_wanted", "plan", "take_balances", "read_source", "resolve_parties", "shape", "start_since", "stored_osv", "use_payments",
 ]

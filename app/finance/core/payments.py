@@ -56,7 +56,7 @@ from app.finance.core.models import Fact
 from app.finance.layout import norm
 from app.finance.models import Account, Category, Counterparty, Operation, Workspace
 from app.finance.onec.match import visual_key
-from app.finance.onec.models import OnecBase
+from app.finance.onec.models import OnecBase, OnecDocument
 from app.finance.service import FinanceError
 
 _ZERO = Decimal("0")
@@ -318,6 +318,10 @@ class Money:
         #: Возвращённые поступления (`contracts/payments.returned_pairs`) и обеспечительные платежи - не оплаты.
         self.returned: set[uuid.UUID] = set()
         self.deposits: set[uuid.UUID] = set()
+        #: Спорные, где плательщик - не сторона договора из назначения (У7).
+        self.third: set[uuid.UUID] = set()
+        #: Возврат клиенту → предложенный договор (О6).
+        self.refunds: dict[uuid.UUID, uuid.UUID] = {}
         self.by_contract: dict[uuid.UUID, list[Payment]] = defaultdict(list)
         wanted = {entity for entity, source in self.settings.sources.items() if source == "1c"}
         self._bases: dict[str, str] | None = None
@@ -334,6 +338,10 @@ class Money:
                     self.returned.add(journal.ref_of(fact))
                 if data.get("deposit"):
                     self.deposits.add(journal.ref_of(fact))
+                if data.get("third"):
+                    self.third.add(journal.ref_of(fact))
+                if data.get("refund") and fact.contract_id is None:
+                    self.refunds[journal.ref_of(fact)] = uuid.UUID(data["refund"])
                 if fact.contract_id is None:
                     continue
                 self.journal_paid[fact.contract_id].append(fact)
@@ -546,11 +554,12 @@ class Money:
             self.session.execute(sa.select(Category.id, Category.name).where(Category.workspace_id == self.workspace.id)).all()
         )
         # Без `raw` - строка выписки списку не нужна.
+        # Поступления - и возвраты клиентам, к которым KORT предлагает договор (О6).
         query = sa.select(Operation).options(sa.orm.defer(Operation.raw)).where(
             Operation.workspace_id == self.workspace.id,
             Operation.deleted_at.is_(None),
             Operation.status == "fact",
-            Operation.kind == "income",
+            sa.or_(Operation.kind == "income", Operation.id.in_(list(self.refunds) or [journal.WHOLE])),
         )
         start = since or self.since
         if start is not None:
@@ -588,10 +597,15 @@ class Money:
             if operation.id in self.deposits:
                 self.hidden["deposit"] += 1
                 continue
-            entity = entity_of_account.get(operation.account_to_id) if operation.account_to_id else None
+            account = operation.account_to_id if operation.kind == "income" else operation.account_from_id
+            entity = entity_of_account.get(account) if account else None
             if entity is not None and self.settings.source_of(entity) != "journal":
                 continue
             payer = self.names.get(operation.counterparty_id, "") if operation.counterparty_id else ""
+            if operation.id in self.refunds:
+                out.append(self._without_item(operation, payer, account, entity, categories,
+                                              [(self.refunds[operation.id], "возврат")], disputed=False, direction="out"))
+                continue
             if (operation.counterparty_id and self.registry.is_own(operation.counterparty_id)) or (
                 payer and (legal_tail(payer) in own_keys or bare_key(payer) in own_keys)
             ):
@@ -601,7 +615,8 @@ class Money:
             if (category and norm(category) in ignored_categories) or (payer and norm(payer) in ignored_payers):
                 self.hidden["ignored"] += 1
                 continue
-            candidates: dict[uuid.UUID, str] = {cid: "спор" for cid in disputed.get(operation.id, set())}
+            why_open = "за другого" if operation.id in self.third else "спор"
+            candidates: dict[uuid.UUID, str] = {cid: why_open for cid in disputed.get(operation.id, set())}
             if not candidates:
                 ref = number_key(operation.contract_ref) if operation.contract_ref else ""
                 for contract in by_number.get(ref, []) if ref else []:
@@ -623,34 +638,105 @@ class Money:
                     if len(same_sum) <= SAME_SUM_MAX:
                         for contract in same_sum:
                             candidates.setdefault(contract.id, "сумма")
-            ranked = sorted(candidates.items(), key=lambda item: ("спор", "номер", "клиент", "сумма").index(item[1]))[:6]
-            out.append(
-                {
-                    "operation_id": str(operation.id),
-                    "paid_at": operation.paid_at.isoformat(),
-                    "amount": _money(operation.amount_base),
-                    "payer": payer,
-                    "account": self.accounts.get(operation.account_to_id, "") if operation.account_to_id else "",
-                    "entity_id": str(entity) if entity else None,
-                    "category": category,
-                    "comment": (operation.comment or "")[:240],
-                    "contract_ref": operation.contract_ref or "",
-                    "hint": list(_hint_of(operation.period_start, operation.period_end, operation.accrued_at) or ()) or None,
-                    "disputed": operation.id in disputed,
-                    "candidates": [
-                        {
-                            "id": str(cid),
-                            "number": self.contracts[cid].number,
-                            "customer": self.names.get(self.contracts[cid].customer_id, ""),
-                            "executor_id": str(self.contracts[cid].executor_id) if self.contracts[cid].executor_id else None,
-                            "why": why,
-                        }
-                        for cid, why in ranked
-                        if cid in self.contracts
-                    ],
-                }
-            )
+            ranked = sorted(candidates.items(), key=lambda item: WHY_ORDER.index(item[1]))[:6]
+            item = self._without_item(operation, payer, account, entity, categories, ranked, disputed=operation.id in disputed)
+            if operation.id in disputed and len(disputed[operation.id]) > 1:
+                parts = split_from_onec(self.session, self.workspace, operation, disputed[operation.id], entity)
+                if parts:
+                    item["split"] = [
+                        {"id": str(cid), "number": self.contracts[cid].number, "amount": _money(amount)} for cid, amount in parts
+                    ]
+            out.append(item)
         return out
+
+    def _without_item(
+        self, operation: Operation, payer: str, account: uuid.UUID | None, entity: uuid.UUID | None, categories: dict[uuid.UUID, str],
+        ranked: list[tuple[uuid.UUID, str]], *, disputed: bool, direction: str = "in",
+    ) -> dict[str, Any]:
+        category = categories.get(operation.category_id, "") if operation.category_id else ""
+        return {
+            "operation_id": str(operation.id),
+            "paid_at": operation.paid_at.isoformat(),
+            "amount": _money(operation.amount_base),
+            "direction": direction,
+            "payer": payer,
+            "account": self.accounts.get(account, "") if account else "",
+            "entity_id": str(entity) if entity else None,
+            "category": category,
+            "comment": (operation.comment or "")[:240],
+            "contract_ref": operation.contract_ref or "",
+            "hint": list(_hint_of(operation.period_start, operation.period_end, operation.accrued_at) or ()) or None,
+            "disputed": disputed,
+            "candidates": [
+                {
+                    "id": str(cid),
+                    "number": self.contracts[cid].number,
+                    "customer": self.names.get(self.contracts[cid].customer_id, ""),
+                    "executor_id": str(self.contracts[cid].executor_id) if self.contracts[cid].executor_id else None,
+                    "why": why,
+                }
+                for cid, why in ranked
+                if cid in self.contracts
+            ],
+        }
+
+
+#: Почему договор - кандидат поступления: порядок показа.
+WHY_ORDER = ("спор", "за другого", "возврат", "номер", "клиент", "сумма")
+
+
+def split_from_onec(
+    session: Session, workspace: Workspace, operation: Operation, candidates: set[uuid.UUID], entity: uuid.UUID | None,
+) -> list[tuple[uuid.UUID, Decimal]]:
+    """Части спорной оплаты, как их разделил бухгалтер в 1С (О2) - или ничего.
+
+    Документ оплаты 1С того же дня, той же суммы и того же плательщика (БИН),
+    у юрлица счёта, где строки расшифровки легли на разные договоры KORT из
+    спора и вместе дают всю сумму. Не нашлось ровно одного такого документа -
+    предложения нет: частей KORT не придумывает.
+    """
+    payer_bin = ""
+    if operation.counterparty_id is not None:
+        payer = session.get(Counterparty, operation.counterparty_id)
+        payer_bin = str(payer.bin or "") if payer is not None else ""
+    if not payer_bin:
+        return []
+    query = (
+        sa.select(OnecDocument.id, OnecDocument.ref, OnecDocument.amount, OnecBase.group_entity_id)
+        .join(OnecBase, OnecBase.id == OnecDocument.base_id)
+        .where(
+            OnecDocument.workspace_id == workspace.id, OnecDocument.kind == "payment", OnecDocument.doc_date == operation.paid_at,
+            OnecDocument.party_bin == payer_bin, OnecDocument.deleted.is_(False), OnecDocument.gone.is_(False),
+        )
+    )
+    lines: dict[str, list[tuple[uuid.UUID, Decimal]]] = defaultdict(list)
+    for doc_id, ref, amount, base_entity in session.execute(query):
+        if entity is not None and base_entity != entity or amount is None:
+            continue
+        lines[ref.split(":")[0]].append((doc_id, amount))
+    found = []
+    for rows in lines.values():
+        if len(rows) < 2 or sum((amount for _doc, amount in rows), _ZERO) != operation.amount_base:
+            continue
+        contracts = {
+            uuid.UUID(key.split(":", 1)[1]): contract_id
+            for key, contract_id in session.execute(
+                sa.select(Fact.key, Fact.contract_id).where(
+                    Fact.workspace_id == workspace.id, Fact.key.in_([f"1c:{doc}" for doc, _amount in rows]),
+                    Fact.ended_seq.is_(None), Fact.void.is_(False),
+                )
+            )
+        }
+        parts: dict[uuid.UUID, Decimal] = {}
+        for doc, amount in rows:
+            contract_id = contracts.get(doc)
+            if contract_id is None or contract_id not in candidates:
+                break
+            parts[contract_id] = parts.get(contract_id, _ZERO) + amount
+        else:
+            if len(parts) > 1:
+                found.append(sorted(parts.items(), key=lambda item: str(item[0])))
+    return found[0] if len(found) == 1 else []
 
 
 def _visible(session: Session, workspace: Workspace, access: Access, contracts: Iterable[Contract]) -> list[Contract]:
@@ -798,25 +884,25 @@ def decide(
             raise FinanceError("К какому договору - не сказано")
         contract = get_contract(session, workspace, contract_id)
         ensure_writable(session, registry, access, contract)
-    row = session.scalar(
+    rows = list(session.scalars(
         sa.select(ContractPayment).where(
             ContractPayment.workspace_id == workspace.id, ContractPayment.operation_id == operation_id
         )
-    )
-    before = {"contract_id": str(row.contract_id) if row and row.contract_id else None, "decided": row is not None}
-    if action == "auto":
-        if row is not None:
-            session.delete(row)
-    else:
+    ))
+    row = rows[0] if rows else None
+    before = {"contract_id": str(row.contract_id) if row and row.contract_id else None, "decided": row is not None,
+              "parts": len(rows) if len(rows) > 1 else None}
+    # Новое решение - одной строкой: лишние части разделённой оплаты снимаются.
+    keep = rows[0] if rows and action != "auto" else None
+    for item in rows:
+        if item is not keep:
+            session.delete(item)
+    if action != "auto":
         target = contract.id if contract is not None else None
-        if row is None:
-            session.add(
-                ContractPayment(
-                    workspace_id=workspace.id, operation_id=operation_id, contract_id=target, created_by=actor.user_id
-                )
-            )
+        if keep is None:
+            session.add(ContractPayment(workspace_id=workspace.id, operation_id=operation_id, contract_id=target, created_by=actor.user_id))
         else:
-            row.contract_id, row.created_by = target, actor.user_id
+            keep.contract_id, keep.amount, keep.created_by = target, None, actor.user_id
     session.flush()
     words = {
         "link": f"к договору {contract.number or 'без номера'}" if contract is not None else "",
@@ -838,7 +924,57 @@ def decide(
     return {"operation_id": str(operation.id), "action": action, "contract_id": str(contract.id) if contract else None}
 
 
+def split(
+    session: Session, workspace: Workspace, access: Access, actor: Actor, operation_id: uuid.UUID, parts: list[tuple[uuid.UUID, Any]],
+) -> dict[str, Any]:
+    """Разделить поступление между договорами (О2): часть каждому, вместе - вся сумма."""
+    from app.finance.contracts.service import read_money
+
+    _check_money(access)
+    if not access.edit:
+        raise PermissionError("Разносить оплаты вам не открыто")
+    operation = session.get(Operation, operation_id)
+    if operation is None or operation.workspace_id != workspace.id or operation.deleted_at is not None:
+        raise FinanceError("Такой операции в журнале нет")
+    if operation.kind not in ("income", "expense"):
+        raise FinanceError("Перевод между своими счетами - не оплата по договору")
+    registry = Registry(session, workspace)
+    wanted: dict[uuid.UUID, Decimal] = {}
+    numbers = []
+    for contract_id, raw in parts:
+        amount, terms = read_money(raw, field="Часть") if not isinstance(raw, Decimal) else (raw, "")
+        if amount is None or amount <= 0:
+            raise FinanceError(f"Часть «{terms or raw}» - не сумма больше нуля")
+        contract = get_contract(session, workspace, contract_id)
+        ensure_writable(session, registry, access, contract)
+        if contract.id in wanted:
+            raise FinanceError(f"Договор {contract.number or 'без номера'} назван дважды")
+        wanted[contract.id] = amount
+        numbers.append(f"{contract.number or 'без номера'} {_money(amount)}")
+    if len(wanted) < 2:
+        raise FinanceError("Разделить можно минимум на два договора")
+    total = sum(wanted.values(), _ZERO)
+    if total != operation.amount_base:
+        raise FinanceError(f"Части вместе - {_money(total)}, а оплата - {_money(operation.amount_base)}")
+    for item in session.scalars(
+        sa.select(ContractPayment).where(ContractPayment.workspace_id == workspace.id, ContractPayment.operation_id == operation_id)
+    ):
+        session.delete(item)
+    session.flush()
+    for contract_id, amount in wanted.items():
+        session.add(ContractPayment(workspace_id=workspace.id, operation_id=operation_id, contract_id=contract_id, amount=amount,
+                                    created_by=actor.user_id))
+    session.flush()
+    history.write(
+        session, workspace, kind="core.payment.split", entity="payment", entity_id=operation.id,
+        title=f"оплата {operation.paid_at:%d.%m.%Y} на {_money(operation.amount_base)} разделена: {', '.join(numbers)}",
+        after={"parts": {str(key): _money(value) for key, value in wanted.items()}}, actor=actor.email,
+    )
+    return {"operation_id": str(operation.id), "parts": [{"contract_id": str(key), "amount": _money(value)} for key, value in wanted.items()]}
+
+
 __all__ = [
+    "WHY_ORDER",
     "AHEAD_MONTHS",
     "Bucket",
     "ContractMoney",
@@ -846,6 +982,8 @@ __all__ = [
     "OPENING",
     "Part",
     "Payment",
+    "split",
+    "split_from_onec",
     "allocate_months",
     "contract_money",
     "decide",

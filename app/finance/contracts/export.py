@@ -208,7 +208,7 @@ def build(session: Session, workspace: Workspace, access: Access, actor: Actor, 
         allocation = payments_module.allocate(session, workspace, registry, contracts)
         for item in visible:
             summary = payments_module.summary_of(
-                item, allocation.paid.get(item.id, []), len(allocation.open.get(item.id, []))
+                item, allocation.paid.get(item.id, []), len(allocation.open.get(item.id, [])), registry
             )
             if summary is not None:
                 live[item.id] = summary

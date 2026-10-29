@@ -710,6 +710,12 @@ def test_kazhdyy_izmenyayushchiy_marshrut_pishet_sobytie(app: FastAPI, monkeypat
                                                      "account_to_id": reserve, "comment": "непонятный приход"})
     assert stray.status_code < 400, stray.text
     walk.call(owner, "POST", "/core/payments/{operation_id}/decide", operation_id=stray.json()["id"], json={"action": "none"})
+    # Одна оплата за два договора - частями (полигон, О2).
+    both = owner.post(f"{BASE}/operations", json={"kind": "income", "paid_at": "2026-06-20", "amount": "3000",
+                                                    "account_to_id": reserve, "comment": "за два договора"})
+    assert both.status_code < 400, both.text
+    walk.call(owner, "POST", "/core/payments/{operation_id}/split", operation_id=both.json()["id"],
+              json={"parts": [{"contract_id": sigma, "amount": "1000"}, {"contract_id": omega, "amount": "2000"}]})
     walk.call(owner, "PUT", "/core/payments/ignore", json={"kind": "payers", "name": "Вознаграждение"})
     # Словарь колонок: «Сумма Договора» компании называется иначе.
     walk.call(owner, "PUT", "/core/book/columns", json={"key": "amount", "name": "Сумма по договору"})

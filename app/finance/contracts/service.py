@@ -585,6 +585,27 @@ class Registry:
     def is_own(self, party_id: uuid.UUID | None) -> bool:
         return party_id is not None and party_id in self.own
 
+    def _own_without_form(self, text: str) -> Counterparty | None:
+        """Наше юрлицо, названное без формы собственности: «Тумар Офис» - это «ТОО "Тумар Офис"».
+
+        Таблицы отделов пишут свои ТОО коротко, 1С - полностью, и реестр поверх
+        1С заводил второе юрлицо (полигон целиком). Только имя без формы и
+        только среди наших юрлиц, ровно одно совпадение: «ИП Альфа» при нашем
+        «ТОО Альфа» сюда не попадает - у неё своя форма.
+        """
+        from app.finance.core.participants import bare_key, form_of
+
+        if not self.own or form_of(text):
+            return None
+        key = party_key(text)
+        hits = {
+            party_id
+            for party_id, entity in self.own.items()
+            if key in {bare_key(name) for name in (self.parties[party_id].name if party_id in self.parties else "",
+                                                   entity.full_name, entity.code) if name}
+        }
+        return self.parties.get(next(iter(hits))) if len(hits) == 1 else None
+
     def resolve_party(self, raw: Any, *, slot: str, create: bool = True) -> Resolved:
         """Сторона по тексту или идентификатору.
 
@@ -611,6 +632,9 @@ class Registry:
                 if len(own) == 1:
                     return Resolved(self.parties.get(own[0]))
                 return Resolved(None, ambiguous=[self.parties[pid] for pid in ids if pid in self.parties])
+        own = self._own_without_form(text)
+        if own is not None:
+            return Resolved(own)
         if not create:
             return Resolved(None)
         party = Counterparty(

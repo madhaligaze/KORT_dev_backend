@@ -575,10 +575,16 @@ class ContractPayment(FinanceBase):
     старые метки. Хранится только то, чего система решить не может: у клиента
     два договора с одним нашим ТОО, и платёж подходит к обоим. `contract_id`
     пустой - «ни к одному»: платёж не по договору (возврат, ошибка банка).
+
+    Одна оплата за два договора (полигон, О2) - строка на каждый договор с
+    суммой части (`amount`); пусто - вся операция.
     """
 
     __tablename__ = "contract_payments"
-    __table_args__ = (sa.UniqueConstraint("operation_id", name="uq_contract_payments_operation"),)
+    __table_args__ = (
+        sa.UniqueConstraint("operation_id", "contract_id", name="uq_contract_payments_operation_contract"),
+        sa.Index("ix_contract_payments_operation_id", "operation_id"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(sa.Uuid, primary_key=True, default=_uuid)
     workspace_id: Mapped[uuid.UUID] = mapped_column(
@@ -590,6 +596,8 @@ class ContractPayment(FinanceBase):
     contract_id: Mapped[uuid.UUID | None] = mapped_column(
         sa.Uuid, sa.ForeignKey("contracts.id", ondelete="CASCADE"), index=True
     )
+    #: Часть операции этому договору; пусто - вся операция.
+    amount: Mapped[Decimal | None] = mapped_column(MONEY)
     created_by: Mapped[uuid.UUID | None] = mapped_column(
         sa.Uuid, sa.ForeignKey("users.id", ondelete="SET NULL")
     )

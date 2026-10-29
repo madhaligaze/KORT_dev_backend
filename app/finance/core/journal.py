@@ -277,7 +277,16 @@ def _journal_drafts(session: Session, workspace: Any, operations: set[uuid.UUID]
         session.scalars(sa.select(Contract).where(Contract.workspace_id == workspace.id, Contract.deleted_at.is_(None)))
     )
     allocation = contract_payments.allocate(session, workspace, registry, contracts, operations=operations)
-    paid = {operation.id: (contract_id, how) for contract_id, items in allocation.paid.items() for operation, how in items}
+    paid: dict[uuid.UUID, tuple[uuid.UUID, str]] = {}
+    #: Разделённая оплата (О2): операция → (договор, часть).
+    parts: dict[uuid.UUID, list[tuple[uuid.UUID, Decimal]]] = defaultdict(list)
+    for contract_id, items in allocation.paid.items():
+        for operation, how in items:
+            if how == "split":
+                parts[operation.id].append((contract_id, operation.amount_base))
+            else:
+                paid[operation.id] = (contract_id, how)
+    sale = {contract.id for contract in contracts if registry.is_own(contract.executor_id)}
     returned = allocation.returned
     deposits = allocation.deposits
     disputed: dict[uuid.UUID, set[uuid.UUID]] = defaultdict(set)
@@ -303,27 +312,48 @@ def _journal_drafts(session: Session, workspace: Any, operations: set[uuid.UUID]
     if operations is not None:
         query = query.where(Operation.id.in_(list(operations) or [WHOLE]))
         decisions = decisions.where(ContractPayment.operation_id.in_(list(operations) or [WHOLE]))
+    def amount_of(contract_id: uuid.UUID | None, kind: str, amount: Decimal) -> Decimal:
+        # Встречное направление - возврат: у продажи списание клиенту, у покупки - поступление от поставщика (О6).
+        if contract_id is None:
+            return amount
+        expected = "income" if contract_id in sale else "expense"
+        return amount if kind == expected else -amount
+
     for operation in session.execute(query):
         found = paid.get(operation.id)
         candidates = disputed.get(operation.id)
-        if operation.kind == "expense" and found is None and not candidates:
+        refund = allocation.refunds.get(operation.id)
+        if operation.kind == "expense" and found is None and not candidates and not refund and operation.id not in parts:
             # Списание без договора - не оплата: зарплата, налоги, переводы.
             continue
         account = operation.account_to_id if operation.kind == "income" else operation.account_from_id
+        data = {
+            "direction": "in" if operation.kind == "income" else "out",
+            "account": account, "how": found[1] if found else None,
+            "months": _months(operation.period_start, operation.period_end, operation.accrued_at),
+            "label": operation.period_label, "comment": operation.comment, "contract_ref": operation.contract_ref,
+            "open": sorted(str(item) for item in candidates) if candidates else None,
+            "third": True if operation.id in allocation.third else None,
+            "refund": str(refund) if refund else None,
+            "returned": str(returned[operation.id]) if operation.id in returned else None,
+            "deposit": True if operation.id in deposits else None,
+        }
+        entity_id = entity_of_account.get(account) if account else None
+        if operation.id in parts:
+            # Факт на каждую часть: «объяснить» и регистры видят часть у её договора.
+            for contract_id, amount in parts[operation.id]:
+                key = f"op:{operation.id}:{contract_id}"
+                out[key] = Draft(
+                    key=key, kind="payment", source="journal", day=operation.paid_at,
+                    amount=amount_of(contract_id, operation.kind, amount), contract_id=contract_id,
+                    party_id=operation.counterparty_id, entity_id=entity_id, data={**data, "how": "split"},
+                )
+            continue
         key = f"op:{operation.id}"
         out[key] = Draft(
-            key=key, kind="payment", source="journal", day=operation.paid_at, amount=operation.amount_base,
-            contract_id=found[0] if found else None, party_id=operation.counterparty_id,
-            entity_id=entity_of_account.get(account) if account else None,
-            data={
-                "direction": "in" if operation.kind == "income" else "out",
-                "account": account, "how": found[1] if found else None,
-                "months": _months(operation.period_start, operation.period_end, operation.accrued_at),
-                "label": operation.period_label, "comment": operation.comment, "contract_ref": operation.contract_ref,
-                "open": sorted(str(item) for item in candidates) if candidates else None,
-                "returned": str(returned[operation.id]) if operation.id in returned else None,
-                "deposit": True if operation.id in deposits else None,
-            },
+            key=key, kind="payment", source="journal", day=operation.paid_at,
+            amount=amount_of(found[0] if found else None, operation.kind, operation.amount_base),
+            contract_id=found[0] if found else None, party_id=operation.counterparty_id, entity_id=entity_id, data=data,
         )
     for row in session.scalars(decisions):
         key = f"cp:{row.operation_id}"
@@ -469,6 +499,11 @@ def post(
         current = {}
         for start in range(0, len(keys), _CHUNK):
             current.update({fact.key: fact for fact in session.execute(query.where(Fact.key.in_(keys[start : start + _CHUNK])))})
+        # Части разделённых оплат (`op:<операция>:<договор>`) редки - их ключи не назвать заранее.
+        names = {str(item) for item in picked}
+        for fact in session.execute(query.where(Fact.key.like("op:%:%"))):
+            if fact.key.split(":")[1] in names:
+                current[fact.key] = fact
     else:
         current = {fact.key: fact for fact in session.execute(query)}
     writes: list[tuple[Draft, Fact | None]] = []
@@ -721,7 +756,9 @@ def _dirt(obj: Any, how: str) -> list[tuple[str, uuid.UUID]]:
             return [("journal", WHOLE)]
         return [("journal", obj.id)]
     if isinstance(obj, ContractPayment):
-        return [("journal", obj.operation_id)]
+        # Снятое решение могло быть прецедентом для оплат того же плательщика за
+        # другого (У7, `contracts/payments.widen`): их уже не найти - целиком.
+        return [("journal", WHOLE)] if how == "deleted" else [("journal", obj.operation_id)]
     if isinstance(obj, (Document, ContractAmendment)):
         ids = {obj.contract_id, *(_was(obj, "contract_id") if how == "dirty" else ())}
         return [("kort", item if item is not None else WHOLE) for item in ids]
@@ -921,8 +958,11 @@ def current(
 
 
 def ref_of(fact: Fact) -> uuid.UUID:
-    """Строка хранилища, из которой проведён факт: операция, документ 1С или ядра, соглашение."""
-    return uuid.UUID(fact.key.split(":", 1)[1])
+    """Строка хранилища, из которой проведён факт: операция, документ 1С или ядра, соглашение.
+
+    Часть разделённой оплаты - `op:<операция>:<договор>`: строка - операция.
+    """
+    return uuid.UUID(fact.key.split(":")[1])
 
 
 @dataclass(frozen=True)

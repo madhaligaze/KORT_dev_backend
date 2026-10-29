@@ -65,11 +65,29 @@
 текст плательщика. Берётся только номер после слова «договор» или «дог.»
 («по счёту № 84» - номер счёта, а не договора) и только существующий у
 юрлица договор того же направления; номера нет в KORT - назначение не
-мешает, решает плательщик. Плательщик не узнан - решает номер (платит
-холдинг за дочку, полигон У7). Узнан, и номер - его договор - этот договор
+мешает, решает плательщик. Узнан, и номер - его договор - этот договор
 (клиент с двумя договорами на одну сумму, О4). Узнан, а номер - договор
 другого клиента - спорный (О5): кто прав, плательщик или назначение, решает
-человек.
+человек. Плательщик - отдельное лицо, не сторона ни одного договора
+(холдинг платит за дочку, полигон У7) - тоже спорный, с одним кандидатом:
+что «Мега Холдинг» платит за «Мега Ритейл», знает человек, а не текст
+назначения. Спрашивается один раз: отнёс человек оплату этого плательщика к
+договору - следующие его оплаты с тем же номером ложатся туда же
+(прецедент). Посредник - не «другой»: банк или Kaspi Pay (написание
+нескольких клиентов), пустой плательщик, назначение с БИН/ИИН самой стороны
+(клиент платит через Kaspi Pay, в назначении его ИИН и номер договора, копия
+прода) - решает номер.
+
+**Одна оплата за два договора** («Оплата за сентябрь 2026», 280 000 = 200 000
++ 80 000, полигон О2) - решение человека частями: строка `ContractPayment`
+на каждый договор с суммой части. Часть ложится в договор как оплата той же
+даты (`Part`). Предложение частей - из 1С, где бухгалтер уже разделил ту же
+оплату по договорам (`core/payments.split_from_onec`).
+
+**Возврат клиенту** (списание с «возврат» в назначении, не пара к
+поступлению) - деньги клиента, которые мы отдали: долг растёт обратно. KORT
+предлагает договор - из назначения или единственный договор клиента - и
+после «да» человека возврат ложится в договор оплатой со знаком минус (О6).
 
 **Возвращённое поступление** - не оплата: клиент заплатил, а через несколько
 дней наше ТОО вернуло ему ту же сумму с «возврат» в назначении («Возврат
@@ -123,6 +141,8 @@ from app.finance.onec.match import number_loose, visual_key
 from app.finance.service import FinanceError
 
 #: «по договору № А-07», «по дог. А-07», «дог.15»: номер после слова «договор».
+#: БИН/ИИН в тексте назначения: двенадцать цифр подряд.
+_TWELVE = re.compile(r"(?<!\d)\d{12}(?!\d)")
 _NAMED = re.compile(r"(?<![а-яё])(?:договор[а-яё]*|дог)\.?\s*(?:№\s*)?([0-9a-zа-яё][\w\-/.]*)", re.IGNORECASE)
 
 #: «возврат», «возврата», «возвратом» - но не «возвратной» (заём).
@@ -187,6 +207,20 @@ class Allocation:
     returned: dict[uuid.UUID, uuid.UUID] = field(default_factory=dict)
     #: Обеспечительные платежи (`is_deposit`): не оплата ни одного договора.
     deposits: set[uuid.UUID] = field(default_factory=set)
+    #: Спорная операция, где плательщик - не сторона договора из назначения (У7): вопрос, а не довод.
+    third: set[uuid.UUID] = field(default_factory=set)
+    #: Возврат клиенту → договор, к которому KORT его предлагает (О6): оплата со знаком минус после «да».
+    refunds: dict[uuid.UUID, uuid.UUID] = field(default_factory=dict)
+
+
+class Part:
+    """Часть разделённой оплаты: та же операция, сумма - часть договора (О2)."""
+
+    def __init__(self, operation: Any, amount: Decimal):
+        self._operation, self.amount_base = operation, amount
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._operation, name)
 
 
 def _sides(contracts: Iterable[Contract], registry: Registry, former: dict[uuid.UUID, set[uuid.UUID]] | None = None) -> list[Side]:
@@ -419,6 +453,17 @@ def widen(session: Session, workspace_id: uuid.UUID, operations: set[uuid.UUID])
         )
     if not pairs:
         return operations
+    # Решение человека по оплате плательщика - прецедент для его оплат за другого
+    # (У7): с решённой операцией проводятся все операции её плательщика.
+    decided: set[uuid.UUID] = set()
+    for start in range(0, len(ids), 500):
+        decided.update(
+            session.scalars(
+                sa.select(Operation.counterparty_id)
+                .join(ContractPayment, ContractPayment.operation_id == Operation.id)
+                .where(Operation.id.in_(ids[start : start + 500]), Operation.counterparty_id.is_not(None))
+            )
+        )
     out = set(operations)
     parties = list({party for party, _amount in pairs})
     for start in range(0, len(parties), 500):
@@ -429,7 +474,7 @@ def widen(session: Session, workspace_id: uuid.UUID, operations: set[uuid.UUID])
                 Operation.kind.in_(("income", "expense")),
             )
         ):
-            if (party, amount) in pairs:
+            if (party, amount) in pairs or party in decided:
                 out.add(operation_id)
     return out
 
@@ -463,6 +508,7 @@ def allocate(
     # Как выписка может назвать сторону договора.
     by_key: dict[str, set[uuid.UUID]] = {}
     by_bin: dict[str, set[uuid.UUID]] = {}
+    bin_of: dict[uuid.UUID, str] = {}
     for party_id, party in registry.parties_for(theirs_ids).items():
         by_key.setdefault(party_key(party.name), set()).add(party_id)
         by_key.setdefault(visual_key(party.name), set()).add(party_id)
@@ -473,6 +519,7 @@ def allocate(
         ).strip()
         if bin_value:
             by_bin.setdefault(bin_value, set()).add(party_id)
+            bin_of[party_id] = bin_value
     for normalized, name, party_id in session.execute(
         sa.select(CounterpartyName.normalized, CounterpartyName.name, CounterpartyName.counterparty_id).where(
             CounterpartyName.workspace_id == workspace.id, CounterpartyName.counterparty_id.in_(theirs_ids)
@@ -512,18 +559,33 @@ def allocate(
         party.id: party
         for party in session.scalars(sa.select(Counterparty).where(Counterparty.id.in_(payer_ids)))
     } if payer_ids else {}
-    manual = dict(
-        session.execute(
-            sa.select(ContractPayment.operation_id, ContractPayment.contract_id).where(
-                ContractPayment.workspace_id == workspace.id
-            )
-        ).all()
-    )
+    manual: dict[uuid.UUID, uuid.UUID | None] = {}
+    split: dict[uuid.UUID, list[tuple[uuid.UUID, Decimal]]] = {}
+    #: Плательщик → договоры, к которым человек уже относил его оплаты как оплаты за другого (У7).
+    precedent: dict[uuid.UUID, set[uuid.UUID]] = {}
+    for operation_id, contract_id, amount, payer_id in session.execute(
+        sa.select(ContractPayment.operation_id, ContractPayment.contract_id, ContractPayment.amount, Operation.counterparty_id)
+        .join(Operation, Operation.id == ContractPayment.operation_id)
+        .where(ContractPayment.workspace_id == workspace.id)
+    ):
+        if amount is not None and contract_id is not None:
+            split.setdefault(operation_id, []).append((contract_id, amount))
+        else:
+            manual[operation_id] = contract_id
+        if contract_id is not None and payer_id is not None:
+            precedent.setdefault(payer_id, set()).add(contract_id)
     known = {side.contract_id for side in sides}
     returned = returned_pairs(session, workspace.id)
+    # Возврат, который вернул поступление целиком, - уже не деньги клиента на руках.
+    paired = set(returned.values())
     by_party: set[uuid.UUID] = set()
 
     for operation in operations:
+        if operation.id in split:
+            for contract_id, amount in split[operation.id]:
+                if contract_id in known:
+                    result.paid.setdefault(contract_id, []).append((Part(operation, amount), "split"))
+            continue
         if operation.id in manual:
             chosen = manual[operation.id]
             if chosen in known:
@@ -537,6 +599,7 @@ def allocate(
             continue
         payer = payers.get(operation.counterparty_id) if operation.counterparty_id else None
         matches: set[uuid.UUID] = set()
+        intermediary = False
         if payer is not None:
             if payer.id in theirs_ids:
                 matches = {payer.id}
@@ -547,6 +610,7 @@ def allocate(
                     # «Филиал "Южная столица" АО "Kaspi Bank"» было написанием семи
                     # клиентов, и платёж уходил тому, чья сумма совпала (25.10.2026).
                     matches = set()
+                    intermediary = True
                 payer_bin = str(payer.bin or (payer.details or {}).get("bin") or "").strip()
                 if payer_bin:
                     matches |= by_bin.get(payer_bin, set())
@@ -556,11 +620,39 @@ def allocate(
         def ours(side: Side) -> bool:
             return entity is None or side.ours == entity
 
+        if is_refund(operation.kind, operation.comment) and operation.id not in paired:
+            # Возврат клиенту его денег - не оплата, пока человек не скажет «да» (О6):
+            # предлагается договор из назначения, иначе единственный договор клиента.
+            target = _named(operation.comment, "income", ours, by_number, by_loose)
+            target = [side for side in target if not matches or side.theirs in matches]
+            if not target and matches:
+                target = [side for theirs in matches for side in by_side.get((theirs, "income"), []) if ours(side)]
+            if len({side.contract_id for side in target}) == 1:
+                result.refunds[operation.id] = target[0].contract_id
+            continue
+
         ref = number_key(operation.contract_ref) if operation.contract_ref else ""
         if not ref and operation.comment:
             named = _named(operation.comment, operation.kind, ours, by_number, by_loose)
             if named:
                 agreeing = {side.contract_id: side for side in named if not matches or side.theirs in matches}
+                numbers_in_text = set(_TWELVE.findall(operation.comment))
+                if (
+                    agreeing and not matches and payer is not None and not intermediary
+                    and not numbers_in_text & {bin_of.get(side.theirs, "") for side in agreeing.values()}
+                    and not set(agreeing) & precedent.get(payer.id, set())
+                ):
+                    # Плательщик - отдельное лицо, не сторона ни одного договора, а назначение
+                    # называет договор клиента: платит за другого (холдинг за дочку, У7).
+                    # Довод слабый - текст плательщика; спросить один раз: решение человека по
+                    # этому плательщику дальше переносится на его оплаты с тем же номером.
+                    # Посредник (банк, Kaspi Pay - написание нескольких клиентов) и назначение
+                    # с БИН/ИИН самой стороны («от ИП … ИИН …») - это оплата клиента
+                    # через банк: номер решает, как прежде.
+                    result.third.add(operation.id)
+                    for contract_id in agreeing:
+                        result.open.setdefault(contract_id, []).append(operation)
+                    continue
                 if agreeing:
                     chosen_sides = _narrow(agreeing, operation)
                     if len(chosen_sides) == 1:
@@ -633,12 +725,22 @@ def _money(value: Decimal | None) -> str | None:
     return None if value is None else format(value.quantize(Decimal("0.01")), "f")
 
 
-def summary_of(contract: Contract, found: list[tuple[Operation, str]], open_count: int) -> dict[str, Any] | None:
+def signed(contract: Contract, operation: Any, registry: Registry | None) -> Decimal:
+    """Сумма операции в «Оплачено» договора: встречное направление - возврат, со знаком минус (О6)."""
+    if registry is None:
+        return operation.amount_base
+    expected = "income" if registry.is_own(contract.executor_id) else "expense"
+    return operation.amount_base if operation.kind == expected else -operation.amount_base
+
+
+def summary_of(
+    contract: Contract, found: list[tuple[Operation, str]], open_count: int, registry: Registry | None = None
+) -> dict[str, Any] | None:
     """«Оплачено» и «Остаток» договора. Нет ни одной оплаты - нет и ответа:
     пустая ячейка честнее нуля, если выписка этого счёта ещё не загружена."""
     if not found and not open_count:
         return None
-    paid = sum((operation.amount_base for operation, _how in found), Decimal("0"))
+    paid = sum((signed(contract, operation, registry) for operation, _how in found), Decimal("0"))
     remaining = None
     if found and contract.billing == "total" and contract.amount is not None:
         remaining = contract.amount - paid
@@ -684,7 +786,7 @@ def summaries(session: Session, workspace: Workspace, access: Access) -> dict[st
     for contract in everything:
         if contract.id not in shown:
             continue
-        item = summary_of(contract, allocation.paid.get(contract.id, []), len(allocation.open.get(contract.id, [])))
+        item = summary_of(contract, allocation.paid.get(contract.id, []), len(allocation.open.get(contract.id, [])), registry)
         if item is not None:
             out[str(contract.id)] = item
     return {"contracts": out}
@@ -729,7 +831,7 @@ def of_contract(session: Session, workspace: Workspace, access: Access, contract
     items = [_operation_out(operation, how, names, accounts) for operation, how in found]
     items += [_operation_out(operation, "open", names, accounts) for operation in disputed]
     items.sort(key=lambda item: item["paid_at"], reverse=True)
-    return {"summary": summary_of(contract, found, len(disputed)), "items": items}
+    return {"summary": summary_of(contract, found, len(disputed), registry), "items": items}
 
 
 def decide(
@@ -756,24 +858,22 @@ def decide(
         raise FinanceError("Такой операции в журнале нет")
     if operation.kind not in ("income", "expense"):
         raise FinanceError("Перевод между своими счетами - не оплата по договору")
-    row = session.scalar(
+    # Новое решение - одной строкой: лишние части разделённой оплаты (О2) снимаются.
+    rows = list(session.scalars(
         sa.select(ContractPayment).where(
             ContractPayment.workspace_id == workspace.id, ContractPayment.operation_id == operation_id
         )
-    )
-    if action == "auto":
-        if row is not None:
+    ))
+    keep = rows[0] if rows and action != "auto" else None
+    for row in rows:
+        if row is not keep:
             session.delete(row)
-    else:
+    if action != "auto":
         target = contract.id if action == "link" else None
-        if row is None:
-            session.add(
-                ContractPayment(
-                    workspace_id=workspace.id, operation_id=operation_id, contract_id=target, created_by=actor.user_id
-                )
-            )
+        if keep is None:
+            session.add(ContractPayment(workspace_id=workspace.id, operation_id=operation_id, contract_id=target, created_by=actor.user_id))
         else:
-            row.contract_id, row.created_by = target, actor.user_id
+            keep.contract_id, keep.amount, keep.created_by = target, None, actor.user_id
     session.flush()
     words = {"link": "отнесена к договору", "unlink": "не по договору", "auto": "разнесение снова по выписке"}
     history.write(
