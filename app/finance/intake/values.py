@@ -207,7 +207,7 @@ def parse_date(raw: Any, reading: DateReading) -> date | None:
     if isinstance(raw, date):
         return raw
     if isinstance(raw, (int, float)) and not isinstance(raw, bool):
-        # Серийный номер Excel. Эпоха 1899-12-30 - та же, что в «Книгах»;
+        # Серийный номер Excel, эпоха 1899-12-30;
         # полдень не добавляем: он округляет дату вверх и уводит книгу на день.
         try:
             from datetime import timedelta

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
+# Перенос учёта из другой базы в базу KORT - схема `finance` целиком.
 #
-#
-#   SOURCE_DATABASE_URL=postgresql://…/railway   # база 
+#   SOURCE_DATABASE_URL=postgresql://…/railway   # база-источник
 #   TARGET_DATABASE_URL=postgresql://…/railway   # база KORT
-#   bash backend/scripts/copy_from_pdf_converter.sh
+#   bash backend/scripts/copy_finance_schema.sh
 #
 # Нужны pg_dump / pg_restore / psql той же старшей версии, что сервер (18).
 #
@@ -16,13 +16,13 @@
 #   4. ставит `alembic_version` = 0023 - схема уже на последней ревизии;
 #   5. печатает счёт записей в источнике и в KORT рядом.
 #
-# Остальные схемы прода (public, bbc, books, webexcel) не трогаются и не
-# переносятся. Источник только читается.
+# Остальные схемы источника не трогаются и не переносятся. Источник только
+# читается.
 set -euo pipefail
 
 KORT_HEAD="0023"
 
-: "${SOURCE_DATABASE_URL:?задайте SOURCE_DATABASE_URL - база}"
+: "${SOURCE_DATABASE_URL:?задайте SOURCE_DATABASE_URL - база-источник}"
 : "${TARGET_DATABASE_URL:?задайте TARGET_DATABASE_URL - база KORT}"
 
 # Адреса SQLAlchemy (postgresql+psycopg://) утилитам Postgres непонятны.
@@ -73,7 +73,7 @@ q "$DST" "delete from alembic_version"
 q "$DST" "insert into alembic_version (version_num) values ('$KORT_HEAD')"
 
 echo
-echo "таблица            KORT"
+echo "таблица                 источник   KORT"
 for table in workspaces users employees accounts operations contracts; do
   a="$(q "$SRC" "select count(*) from finance.$table")"
   b="$(q "$DST" "select count(*) from finance.$table")"

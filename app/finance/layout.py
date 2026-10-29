@@ -275,7 +275,7 @@ def resolve_layout(sheet: str, columns: Iterable[Column], header: Sequence[str])
 
     Падает только на том, что действительно нечитаемо: пропала обязательная
     колонка, или её название стало неоднозначным. Сдвиг колонок - не ошибка:
-    он попадает в `Layout.drift`, лист читается дальше, а дашборд показывает
+    он попадает в `Layout.drift`, лист читается дальше, а экран показывает
     примечание о том, что книга изменилась.
     """
     headers = [str(value or "") for value in header]
@@ -341,7 +341,7 @@ def resolve_layout(sheet: str, columns: Iterable[Column], header: Sequence[str])
     )
     if drift:
         # Не ошибка, но обязано быть видно в логах: книга изменилась, и когда
-        # цифры на дашборде поедут, это первое, на что надо смотреть.
+        # цифры поедут, это первое, на что надо смотреть.
         log.warning("лист «%s» - колонки сдвинулись: %s", sheet, layout.describe_drift())
     if absent:
         log.info("лист «%s» - необязательные колонки отсутствуют: %s", sheet, ", ".join(absent))

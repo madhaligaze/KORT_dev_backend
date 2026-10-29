@@ -963,8 +963,8 @@ def employee_sessions(session: Session, workspace: Workspace, member: auth.Membe
     """Сеансы сотрудника в этой компании.
 
     Администратор видит сеансы сотрудников, владелец - всех; чужой и
-    несуществующий сотрудник отвечают одинаково (урок кабинета соседнего дашборда: иначе
-    перебор выдавал бы, чьи это идентификаторы).
+    несуществующий сотрудник отвечают одинаково: иначе перебор выдавал бы, чьи
+    это идентификаторы.
     """
     employee = get_employee(session, workspace.id, employee_id)
     target = _membership(session, workspace.id, employee.user_id)
