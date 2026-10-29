@@ -41,6 +41,7 @@ from sqlalchemy.orm import Session
 from app.finance.layout import norm, squash
 from app.finance import history
 from app.finance.intake import header as intake_header
+from app.finance.intake.rows import is_label_total
 from app.finance.intake import tables as intake_tables
 from app.finance.contracts import setup
 from app.finance import packs
@@ -376,17 +377,6 @@ def _score(matcher: HeaderMatcher) -> Any:
     return lambda row: sum(1 for value in row if _cell_text(value) and matcher.match(_cell_text(value))[0] is not None)
 
 
-def _is_total_line(row: Sequence[Any]) -> bool:
-    """Строка итога реестра: единственный текст в ней - «Итого»/«Всего», остальное - суммы.
-
-    Строже, чем у выписки (`intake.rows.is_total`): у договора бывает
-    примечание «Всего три платежа» или предмет «Баланс», и такой договор
-    пропал бы молча. У итога текст один - подпись.
-    """
-    texts = [norm(value) for value in row if isinstance(value, str) and value.strip() and not looks_numeric(value)]
-    return len(texts) == 1 and texts[0].startswith(("итого", "всего", "total"))
-
-
 def _resolve_own(columns: list[Column]) -> None:
     """Колонка «Наше ТОО» - наша сторона: при «Клиенте» мы исполнитель, при «Поставщике» - заказчик.
 
@@ -460,7 +450,7 @@ def find_blocks(sheet: SheetData, catalog: Sequence[FieldNames]) -> list[Block]:
                 for c, v in cells
                 if c < len(columns) and columns[c].key not in (None, ROW_NUMBER)
             ]
-            if len(mapped) >= 2 and not _is_total_line(row):
+            if len(mapped) >= 2 and not is_label_total(row):
                 data.append((r_index, row))
         # Колонки без шапки, но с данными (колонка T «Сводной»).
         width = max((len(row) for _, row in data), default=len(columns))

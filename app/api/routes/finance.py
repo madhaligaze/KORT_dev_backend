@@ -2439,15 +2439,27 @@ class BillBookIn(BaseModel):
     defaults: dict[str, str] = Field(default_factory=dict)
 
 
-def _summary_key(session: Any, workspace_id: UUID, source: Any) -> tuple[Any, ...]:
-    """Сводная для таблиц юрлиц: где она и словарь колонок компании - шапку её таблиц знает компания."""
+#: Сводная файлом собрана не из таблиц юрлиц: строки счёта, куда его записать, нет.
+_FILE_BILL = (
+    "Сводная таблица компании - файл: строки счёта в таблице юрлица у неё нет. Отметьте счёт в своей таблице и "
+    "загрузите новую версию или переведите «Счета» юрлица на KORT («Переход»)"
+)
+
+
+def _summary_key(session: Any, workspace_id: UUID, source: Any) -> tuple[Any, ...] | None:
+    """Сводная для таблиц юрлиц: где она и словарь колонок компании - шапку её таблиц знает компания.
+
+    `None` - сводная файлом: таблиц юрлиц за ней нет (`_FILE_BILL`).
+    """
     from app.finance.contracts import bill_book
     from app.finance.core import settings as core_settings
 
+    if source.kind == "file":
+        return None
     return (source.spreadsheet_id, source.worksheet, bill_book.words_key(core_settings.book_columns(session, workspace_id)))
 
 
-def _board_of(session: Any, workspace_id: UUID) -> tuple[Any, tuple[Any, ...]]:
+def _board_of(session: Any, workspace_id: UUID) -> tuple[Any, tuple[Any, ...] | None]:
     """Прочитанная книга-сводка (с записанным из KORT) - и откуда она."""
     from app.finance.contracts import bills as bills_module
     from app.finance.contracts.summary import source_of
@@ -2461,7 +2473,7 @@ def _board_of(session: Any, workspace_id: UUID) -> tuple[Any, tuple[Any, ...]]:
     return board, _summary_key(session, workspace_id, source)
 
 
-def _bill_of(session: Any, workspace_id: UUID, bill_id: str) -> tuple[Any, tuple[Any, ...]]:
+def _bill_of(session: Any, workspace_id: UUID, bill_id: str) -> tuple[Any, tuple[Any, ...] | None]:
     """Счёт из книги-сводки по адресу карточки - и сама сводка."""
     if not _is_bill_id(bill_id):
         raise HTTPException(status_code=404, detail="Такого счёта нет")
@@ -2575,8 +2587,8 @@ def read_bill(bill_id: str, member: Member = Depends(require_access("invoices"))
     with finance_session() as session:
         workspace_id = _workspace(session, member).id
         bill, summary = _bill_of(session, workspace_id, bill_id)
-        # Счёт юрлица, переведённого на KORT, без строки в таблице - пишется в KORT.
-        kort = core_billing.kort_card(session, workspace_id, bill) if bill.source == "kort" and not bill.line else None
+        # Счёт юрлица, переведённого на KORT, без строки в таблице юрлица - пишется в KORT.
+        kort = core_billing.kort_card(session, workspace_id, bill) if bill.source == "kort" and (not bill.line or summary is None) else None
     out: dict[str, Any] = {
         "bill": bill.out(),
         "book": kort,
@@ -2584,6 +2596,9 @@ def read_bill(bill_id: str, member: Member = Depends(require_access("invoices"))
         "can_edit": member.rights.can("invoices", "edit"),
     }
     if kort is not None:
+        return out
+    if summary is None:
+        out["problem"] = _FILE_BILL
         return out
     try:
         out["book"] = bill_book.card(bill_book.api(), summary, bill.key)
@@ -2607,7 +2622,7 @@ def write_bill(bill_id: str, body: BillBookIn, member: Member = Depends(require_
     with finance_session() as session:
         workspace_id = _workspace(session, member).id
         bill, summary = _bill_of(session, workspace_id, bill_id)
-    if bill.source == "kort" and not bill.line:
+    if bill.source == "kort" and (not bill.line or summary is None):
         # Строки в таблице нет - счёт записывается документом KORT, с журналом (`core/billing.py`).
         from app.finance.core import billing as core_billing
 
@@ -2618,6 +2633,8 @@ def write_bill(bill_id: str, body: BillBookIn, member: Member = Depends(require_
                 )
         except bill_book.BookError as exc:
             raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+    if summary is None:
+        raise HTTPException(status_code=409, detail=_FILE_BILL)
     where = f"{bill.customer} {bill.number}, {bill.month}".strip()
     try:
         saved = bill_book.save(bill_book.api(), summary, bill.key, body.expect, body.values, body.defaults)

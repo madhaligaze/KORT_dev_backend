@@ -391,6 +391,21 @@ def undo(session: Session, workspace: Workspace, access: Access, actor: Actor, k
             session, workspace, access, actor, entity_id=uuid.UUID(payload["entity_id"]), source=payload.get("before") or "journal",
         )
         done.append("источник оплат - как был")
+    elif kind == "entry_summary":
+        from app.finance.contracts import summary
+
+        _require_setup(access)
+        summary.restore(session, workspace.id, payload.get("before"), actor.user_id)
+        done.append("сводная таблица - как была" if payload.get("before") else "сводная таблица отключена")
+    elif kind == "entry_link":
+        from app.finance.core import switch
+
+        switch.set_source(
+            session, workspace, access, actor, link=payload["link"], entity_id=uuid.UUID(payload["entity_id"]),
+            source=payload.get("before") or "book",
+        )
+        switch.forget(workspace.id)
+        done.append(f"{switch.LINK_TITLES[payload['link']]} - как было")
     elif kind == "entry_import":
         # Выписка, заведённая командой, - назад целиком: её операции в корзину.
         rows = list(

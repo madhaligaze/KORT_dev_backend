@@ -29,9 +29,17 @@
   Май/Июня 2026)» - строки до начала помесячных листов: у них месяца нет.
 * Строка → договор - тем же правилом, что «Оплачено (сводка)»: номер, потом
   клиент; два подходящих клиента - спорно, не угадываем (`Matcher`).
+* Лист читается и разбирается один раз на всех: сверка ядра, «Оплачено
+  (сводка)» и «Счета» берут строки из одного разбора (`sheet`, `parse`), а
+  правила строки у каждого свои (`summary.index_of`, `bills.board_of`).
+* Сводная бывает и файлом (`summary.connect_file`): его строки приёмник уже
+  прочитал словарём компании, в базе они лежат словами ядра (`FILE_COLUMNS`),
+  и всё, что умеет лист Google, - сверка, «Переход», «Оплачено», «Счета», -
+  умеет и файл.
 """
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import logging
 import re
@@ -92,6 +100,12 @@ class LayoutBroken(BookError):
 def columns_for(extra: dict[str, list[str]] | None) -> tuple[Column, ...]:
     """Колонки ядра с написаниями компании (словарь `core/settings.book_columns`)."""
     return with_company_names(COLUMNS, extra) if extra else COLUMNS
+
+
+#: Колонки сводной, положенной файлом: шапка - подписи колонок ядра. Словарь
+#: компании к строкам файла уже применил приёмник, когда читал его
+#: (`intake/compare.table_values`), второй раз он не применяется.
+FILE_COLUMNS: tuple[Column, ...] = tuple(dataclasses.replace(column, names=(column.title,)) for column in COLUMNS)
 
 
 def blank(value: Any) -> bool:
@@ -225,6 +239,21 @@ class BookRow:
         return tuple(name for name in (self.customer, self.bank_name, self.onec_name) if name)
 
 
+@dataclass(frozen=True)
+class Line:
+    """Строка листа как есть: номер строки и ячейки по ключам колонок, строкой, без разбора.
+
+    Из этих строк свои строки собирают «Оплачено (сводка)» (`summary.index_of`)
+    и «Счета» (`bills.board_of`): разбор листа один, правила чтения у каждого свои.
+    """
+
+    line: int
+    cells: dict[str, str]
+
+    def get(self, key: str) -> str:
+        return self.cells.get(key, "")
+
+
 @dataclass
 class Book:
     """Прочитанная сводка и откуда она."""
@@ -238,6 +267,106 @@ class Book:
     rev: str = ""
     #: Шапка листа как есть - для словаря колонок компании.
     header: list[str] = field(default_factory=list)
+    #: Все строки листа, где есть клиент или номер, - как есть (`Line`).
+    lines: list[Line] = field(default_factory=list)
+    #: Колонки, которых в листе нет: ключ → подпись. Без чего читатель не читает
+    #: лист, решает он сам (`require`): сверке нужно наше юрлицо, «Оплачено» - поступления.
+    missing: dict[str, str] = field(default_factory=dict)
+
+
+#: Без чего лист не читается вовсе: строки без клиента и номера - не договоры.
+_ROW_KEYS = ("customer", "number")
+#: Без чего не читает сверка ядра: чей договор - наше юрлицо.
+BOOK_REQUIRED = ("own", "customer", "number")
+
+
+def columns_with(given: Sequence[Column], keys: dict[str, str] | None = None) -> tuple[Column, ...]:
+    """Колонки ядра, где у ключей читателя - его написания (`keys` - ключ читателя → ключ ядра).
+
+    Разбор листа один на всех читателей: он раскладывает все колонки ядра, а
+    читатель, который пришёл со своими написаниями (тесты, прежние вызовы
+    `build_index`, `build_board`), приносит их в этот же разбор.
+    """
+    names = {(keys or {}).get(column.key, column.key): column for column in given}
+    return tuple(
+        dataclasses.replace(base, title=names[base.key].title, names=names[base.key].names) if base.key in names else base
+        for base in COLUMNS
+    )
+
+
+def missing_text(worksheet: str, titles: Sequence[str]) -> str:
+    """Отказ «колонки не нашлись» - теми же словами, что `resolve_layout`."""
+    return (
+        f"Лист «{worksheet}»: не удалось привязать колонки по названиям. "
+        "Колонку переименовали или лист заменили другим. "
+        + "; ".join(f"«{title}» - не нашёл колонку с таким заголовком" for title in titles)
+    )
+
+
+def require(book: Book, keys: Sequence[str]) -> str:
+    """Чего из `keys` в листе нет - отказом словами; всё есть - пусто."""
+    lost = [book.missing[key] for key in keys if key in book.missing]
+    return missing_text(book.worksheet, lost) if lost else ""
+
+
+def parse(
+    values: Sequence[Sequence[Any]],
+    *,
+    title: str,
+    worksheet: str,
+    spreadsheet_id: str = "",
+    columns: Sequence[Column] = COLUMNS,
+) -> Book:
+    """Один разбор листа для всех читателей: шапка по названиям, строки как есть и строки сверки.
+
+    Колонка, которой нет, не роняет разбор - она в `missing`, и каждый читатель
+    сам решает, читает ли он без неё (`require`). Роняет только нечитаемое:
+    одно название у двух колонок, колонка встречается дважды.
+    """
+    if not values:
+        raise BookError(f"Лист «{worksheet}» пуст")
+    header = [str(cell) for cell in values[0]]
+    try:
+        layout = resolve_layout(worksheet, [dataclasses.replace(column, required=False) for column in columns], header)
+    except LayoutError as exc:
+        raise LayoutBroken(str(exc), header) from exc
+    found = [column.key for column in columns if layout.placements[column.key].found]
+    lines: list[Line] = []
+    rows: list[BookRow] = []
+    digest = hashlib.sha1()
+    for offset, raw in enumerate(values[1:]):
+        row = [str(cell) for cell in raw]
+        cells = {key: layout.cell(row, key) for key in found}
+        if not any(cells.get(key, "").strip() for key in _ROW_KEYS):
+            continue
+        line = Line(offset + 2, cells)
+        lines.append(line)
+        item = _book_row(line)
+        if item is not None:
+            rows.append(item)
+            digest.update(f"{item.key}|{item.amount}|{item.bill_no}|{item.paid}|{item.act_no}|{item.closing_acts}\n".encode())
+    return Book(
+        read_at=datetime.now(timezone.utc),
+        title=title,
+        worksheet=worksheet,
+        spreadsheet_id=spreadsheet_id,
+        rows=rows,
+        drift=layout.describe_drift(),
+        rev=digest.hexdigest()[:16],
+        header=header,
+        lines=lines,
+        missing={column.key: column.title for column in columns if column.key not in found},
+    )
+
+
+def problem_of(book: Book) -> str:
+    """Почему сверка ядра не читает этот лист; читает - пусто."""
+    problem = require(book, BOOK_REQUIRED)
+    if problem:
+        return problem
+    if not book.rows:
+        return f"В листе «{book.worksheet}» нет ни одной строки договора - таблица, похоже, ещё собирается"
+    return ""
 
 
 def build_book(
@@ -248,87 +377,74 @@ def build_book(
     spreadsheet_id: str = "",
     columns: Sequence[Column] = COLUMNS,
 ) -> Book:
-    """Разобрать значения листа. Шапка - первая строка; строка листа 2 - первая данных."""
-    if not values:
-        raise BookError(f"Лист «{worksheet}» пуст")
-    header = [str(cell) for cell in values[0]]
-    try:
-        layout = resolve_layout(worksheet, columns, header)
-    except LayoutError as exc:
-        raise LayoutBroken(str(exc), header) from exc
-    rows: list[BookRow] = []
-    digest = hashlib.sha1()
-    for offset, raw in enumerate(values[1:]):
-        row = [str(cell) for cell in raw]
-        customer = text_of(layout.cell(row, "customer"))
-        number = text_of(layout.cell(row, "number"))
-        if not customer and not number:
-            continue
-        cell = lambda key: layout.cell(row, key)  # noqa: E731 - короче по месту
-        period_from = date_of(cell("period_from"))
-        label = text_of(cell("month"))
-        payments = tuple(
-            Payment(date_of(cell(f"pay{part}_date")), amount)
-            for part in (1, 2, 3)
-            if (amount := money_of(cell(f"pay{part}_sum"))) not in (None, Decimal("0"))
-        )
-        item = BookRow(
-            line=offset + 2,
-            own=text_of(cell("own")),
-            customer=customer,
-            number=number,
-            month=month_of(label, period_from),
-            month_label=label,
-            kind=text_of(cell("kind")),
-            staff=text_of(cell("staff")),
-            bank_name=text_of(cell("bank_name")),
-            onec_name=text_of(cell("onec_name")),
-            bill_day=text_of(cell("bill_day")),
-            amount=money_of(cell("amount")),
-            department=text_of(cell("department")),
-            subject=text_of(cell("subject")),
-            signed_at=date_of(cell("signed_at")),
-            amendments=text_of(cell("amendments")),
-            period_from=period_from,
-            period_to=date_of(cell("period_to")),
-            note=text_of(cell("note")),
-            opening_acts=money_of(cell("opening_acts")),
-            bill_state=str(cell("bill_state")).strip(),
-            bill_period=text_of(cell("bill_period")),
-            bill_no=text_of(cell("bill_no")),
-            bill_date=date_of(cell("bill_date")),
-            paid_state=flag_of(cell("paid_state")),
-            paid=money_of(cell("paid")),
-            payments=payments,
-            act_state=flag_of(cell("act_state")),
-            act_sum=money_of(cell("act_sum")),
-            act_no=text_of(cell("act_no")),
-            act_date=date_of(cell("act_date")),
-            accepted_state=flag_of(cell("accepted_state")),
-            accepted_date=date_of(cell("accepted_date")),
-            esf_state=flag_of(cell("esf_state")),
-            esf_date=date_of(cell("esf_date")),
-            comment=text_of(cell("comment")),
-            closing_acts=money_of(cell("closing_acts")),
-            status=text_of(cell("status")),
-            opening_accruals=money_of(cell("opening_accruals")),
-            closing_accruals=money_of(cell("closing_accruals")),
-            refund_sum=money_of(cell("refund_sum")),
-            refund_date=date_of(cell("refund_date")),
-        )
-        rows.append(item)
-        digest.update(f"{item.key}|{item.amount}|{item.bill_no}|{item.paid}|{item.act_no}|{item.closing_acts}\n".encode())
-    if not rows:
-        raise BookError(f"В листе «{worksheet}» нет ни одной строки договора - таблица, похоже, ещё собирается")
-    return Book(
-        read_at=datetime.now(timezone.utc),
-        title=title,
-        worksheet=worksheet,
-        spreadsheet_id=spreadsheet_id,
-        rows=rows,
-        drift=layout.describe_drift(),
-        rev=digest.hexdigest()[:16],
-        header=header,
+    """Разобрать значения листа для сверки ядра. Шапка - первая строка; строка листа 2 - первая данных."""
+    book = parse(values, title=title, worksheet=worksheet, spreadsheet_id=spreadsheet_id, columns=columns)
+    missing = require(book, BOOK_REQUIRED)
+    if missing:
+        raise LayoutBroken(missing, book.header)
+    problem = problem_of(book)
+    if problem:
+        raise BookError(problem)
+    return book
+
+
+def _book_row(line: Line) -> BookRow | None:
+    """Строка сверки из строки листа; без клиента и номера (после заглушек «#N/A», «-») - не договор."""
+    customer = text_of(line.get("customer"))
+    number = text_of(line.get("number"))
+    if not customer and not number:
+        return None
+    cell = line.get
+    period_from = date_of(cell("period_from"))
+    label = text_of(cell("month"))
+    payments = tuple(
+        Payment(date_of(cell(f"pay{part}_date")), amount)
+        for part in (1, 2, 3)
+        if (amount := money_of(cell(f"pay{part}_sum"))) not in (None, Decimal("0"))
+    )
+    return BookRow(
+        line=line.line,
+        own=text_of(cell("own")),
+        customer=customer,
+        number=number,
+        month=month_of(label, period_from),
+        month_label=label,
+        kind=text_of(cell("kind")),
+        staff=text_of(cell("staff")),
+        bank_name=text_of(cell("bank_name")),
+        onec_name=text_of(cell("onec_name")),
+        bill_day=text_of(cell("bill_day")),
+        amount=money_of(cell("amount")),
+        department=text_of(cell("department")),
+        subject=text_of(cell("subject")),
+        signed_at=date_of(cell("signed_at")),
+        amendments=text_of(cell("amendments")),
+        period_from=period_from,
+        period_to=date_of(cell("period_to")),
+        note=text_of(cell("note")),
+        opening_acts=money_of(cell("opening_acts")),
+        bill_state=str(cell("bill_state")).strip(),
+        bill_period=text_of(cell("bill_period")),
+        bill_no=text_of(cell("bill_no")),
+        bill_date=date_of(cell("bill_date")),
+        paid_state=flag_of(cell("paid_state")),
+        paid=money_of(cell("paid")),
+        payments=payments,
+        act_state=flag_of(cell("act_state")),
+        act_sum=money_of(cell("act_sum")),
+        act_no=text_of(cell("act_no")),
+        act_date=date_of(cell("act_date")),
+        accepted_state=flag_of(cell("accepted_state")),
+        accepted_date=date_of(cell("accepted_date")),
+        esf_state=flag_of(cell("esf_state")),
+        esf_date=date_of(cell("esf_date")),
+        comment=text_of(cell("comment")),
+        closing_acts=money_of(cell("closing_acts")),
+        status=text_of(cell("status")),
+        opening_accruals=money_of(cell("opening_accruals")),
+        closing_accruals=money_of(cell("closing_accruals")),
+        refund_sum=money_of(cell("refund_sum")),
+        refund_date=date_of(cell("refund_date")),
     )
 
 
@@ -423,13 +539,25 @@ class Matcher:
         return RowMatch("other_client", candidates=tuple(item[0] for item in candidates))
 
 
-# ── Кэш ─────────────────────────────────────────────────────────────────────
+# ── Кэш: одно чтение сводной на всех читателей ──────────────────────────────
+#
+# Сводную таблицу компании читают трое: сверка ядра (здесь), «Оплачено
+# (сводка)» (`contracts/summary.py`) и «Счета» (`contracts/bills.py`). До
+# 29.10.2026 у каждого было своё чтение листа, свой кэш и свой разбор: лист
+# читался трижды, и три разбора могли видеть три состояния таблицы. Теперь
+# чтение и разбор - здесь, один раз (`sheet`), а читатели строят свои строки из
+# того же `Book` (`derive`). Источник - Google (лист по расписанию) или таблица
+# файлом, которую компания положила в KORT (`SummarySource.kind = file`).
+
+#: Чаще этого «Обновить» таблицу не перечитывает: квота Google общая на аккаунт.
+FORCE_GAP = 30.0
 
 
 @dataclass
 class _Slot:
-    #: Таблица, лист и подпись словаря колонок: новое написание - перечитать.
+    #: Откуда и подпись словаря колонок: другой лист, файл или написание - читать заново.
     source: tuple[str, ...]
+    #: Последний разобранный лист (сверке ещё нужны свои колонки - `current`).
     book: Book | None = None
     error: str = ""
     at: float = 0.0
@@ -437,6 +565,8 @@ class _Slot:
     extra: dict[str, list[str]] = field(default_factory=dict)
     #: Шапка листа, который не разобрался, - чтобы её можно было сопоставить.
     header: list[str] = field(default_factory=list)
+    #: Строки читателей по этой книге (`derive`): один раз на прочитанное.
+    derived: dict[str, tuple[Book, Any]] = field(default_factory=dict)
 
 
 _slots: dict[uuid.UUID, _Slot] = {}
@@ -444,6 +574,7 @@ _guard = threading.Lock()
 
 
 def _read(spreadsheet_id: str, worksheet: str, extra: dict[str, list[str]] | None = None) -> Book:
+    """Лист Google - разобранным (`parse`). Тесты подменяют именно его: сеть им не нужна."""
     if not google.is_configured():
         raise BookError("Не заданы креды Google - таблицу прочитать нечем")
     try:
@@ -451,14 +582,13 @@ def _read(spreadsheet_id: str, worksheet: str, extra: dict[str, list[str]] | Non
         values = google.fetch_tab_values(spreadsheet_id, worksheet, fresh=True)
     except google.GoogleError as exc:
         raise BookError(str(exc)) from exc
-    return build_book(
-        values, title=meta.get("title", ""), worksheet=worksheet, spreadsheet_id=spreadsheet_id, columns=columns_for(extra)
-    )
+    return parse(values, title=meta.get("title", ""), worksheet=worksheet, spreadsheet_id=spreadsheet_id, columns=columns_for(extra))
 
 
-def _refresh(slot: _Slot, done: threading.Event) -> None:
+def _store(slot: _Slot, read: Any) -> None:
+    """Положить в слот прочитанное `read()` - или отказ словами."""
     try:
-        book = _read(slot.source[0], slot.source[1], slot.extra)
+        book = read()
         with _guard:
             slot.book, slot.error, slot.header = book, "", book.header
     except LayoutBroken as exc:
@@ -467,50 +597,132 @@ def _refresh(slot: _Slot, done: threading.Event) -> None:
     except BookError as exc:
         with _guard:
             slot.error = str(exc)
-    except Exception as exc:  # noqa: BLE001 - чтение книги не должно ронять ядро
-        log.exception("сводка ядра: таблица не прочиталась")
+    except Exception as exc:  # noqa: BLE001 - чтение таблицы не должно ронять ни ядро, ни реестр
+        log.exception("сводная таблица не прочиталась")
         with _guard:
             slot.error = f"Таблица не прочиталась: {exc}"
     finally:
         with _guard:
             slot.at = time.monotonic()
+
+
+def _refresh(slot: _Slot, done: threading.Event) -> None:
+    try:
+        _store(slot, lambda: _read(slot.source[1], slot.source[2], slot.extra))
+    finally:
+        with _guard:
             slot.reading = None
         done.set()
+
+
+def source_key(session: Session, workspace_id: uuid.UUID, source: Any) -> tuple[tuple[str, ...], dict[str, list[str]]]:
+    """Ключ чтения: Google - таблица, лист и подпись словаря колонок компании; файл - его отпечаток.
+
+    Файл словарь не перечитывает: его строки уже словами ядра (`FILE_COLUMNS`).
+    """
+    from app.finance.core import settings as core_settings
+
+    if getattr(source, "kind", "google") == "file":
+        return ("file", source.digest or "", source.worksheet or ""), {}
+    extra = core_settings.book_columns(session, workspace_id)
+    return ("google", source.spreadsheet_id, source.worksheet, signature(extra)), extra
+
+
+def sheet(session: Session, workspace_id: uuid.UUID, *, wait: float = FIRST_READ_WAIT, force: bool = False) -> _Slot | None:
+    """Сводная таблица компании - прочитанная и разобранная один раз на всех читателей.
+
+    Google: первое чтение ждём до `wait` секунд, дальше устаревшее отдаётся
+    сразу, а свежее читается в фоне; «Обновить» (`force`) - не чаще
+    `FORCE_GAP`. Файл: разбирается из базы, как только его положили. `None` -
+    таблица не подключена.
+    """
+    source = source_of(session, workspace_id)
+    if source is None:
+        return None
+    key, extra = source_key(session, workspace_id, source)
+    done: threading.Event | None = None
+    with _guard:
+        slot = _slots.get(workspace_id)
+        if slot is not None and slot.source == ANY:
+            return slot
+        if slot is None or slot.source != key:
+            slot = _slots[workspace_id] = _Slot(source=key, extra=dict(extra))
+        parsed = slot.at > 0
+        if key[0] != "file":
+            age = time.monotonic() - slot.at
+            # Отказ Google не повторяется на каждый запрос: раз в минуту, иначе
+            # ошибка съела бы квоту всего аккаунта.
+            stale = age >= (ERROR_RETRY if slot.book is None and slot.error else CACHE_TTL) or (slot.book is None and not slot.error)
+            if force and age >= FORCE_GAP:
+                stale = True
+            if slot.reading is not None:
+                done = slot.reading
+            elif stale:
+                done = slot.reading = threading.Event()
+                threading.Thread(target=_refresh, args=(slot, done), daemon=True).start()
+    if key[0] == "file":
+        if not parsed:
+            _store(slot, lambda: parse(
+                source.values or [], title=source.title or source.file_name, worksheet=source.worksheet or source.file_name,
+                columns=FILE_COLUMNS,
+            ))
+        return slot
+    if done is not None and (slot.book is None or force) and wait > 0:
+        done.wait(wait)
+    return slot
+
+
+def derive(slot: _Slot, name: str, build: Any) -> Any:
+    """Строки читателя `name` по книге слота - один раз на прочитанное; книги ещё нет - `None`."""
+    with _guard:
+        book = slot.book
+        hit = slot.derived.get(name)
+    if book is None:
+        return None
+    if hit is not None and hit[0] is book:
+        return hit[1]
+    value = build(book)
+    with _guard:
+        slot.derived[name] = (book, value)
+    return value
+
+
+def peek(workspace_id: uuid.UUID) -> _Slot | None:
+    """Слот компании без чтения: сборка реестра не ждёт сеть."""
+    with _guard:
+        return _slots.get(workspace_id)
+
+
+def expire(workspace_id: uuid.UUID) -> None:
+    """Следующее обращение перечитает таблицу Google (KORT только что записал в книгу юрлица)."""
+    with _guard:
+        slot = _slots.get(workspace_id)
+        if slot is not None and slot.source != ANY and slot.source[0] == "google":
+            slot.at = 0.0
+
+
+def prime(workspace_id: uuid.UUID, key: tuple[str, ...], extra: dict[str, list[str]], book: Book | None, error: str = "") -> None:
+    """Положить прочитанное при подключении таблицы: первые экраны не ждут второго чтения."""
+    with _guard:
+        _slots[workspace_id] = _Slot(
+            source=key, book=book, error=error, at=time.monotonic(), extra=dict(extra), header=book.header if book else [],
+        )
 
 
 def current(
     session: Session, workspace_id: uuid.UUID, *, wait: float = FIRST_READ_WAIT, force: bool = False
 ) -> tuple[Book | None, str]:
-    """Книга компании и отказ чтения. `(None, "")` - книга-сводка не подключена."""
-    from app.finance.core import settings as core_settings
-
-    source = source_of(session, workspace_id)
-    if source is None:
+    """Книга сверки ядра и отказ чтения. `(None, "")` - сводная таблица не подключена."""
+    slot = sheet(session, workspace_id, wait=wait, force=force)
+    if slot is None:
         return None, ""
-    extra = core_settings.book_columns(session, workspace_id)
-    key = (source.spreadsheet_id, source.worksheet, signature(extra))
     with _guard:
-        slot = _slots.get(workspace_id)
-        if slot is not None and slot.source == ANY:
-            return slot.book, slot.error
-        if slot is None or slot.source != key:
-            slot = _slots[workspace_id] = _Slot(source=key, extra=extra)
-        age = time.monotonic() - slot.at
-        stale = force or age >= (ERROR_RETRY if slot.book is None and slot.error else CACHE_TTL) or (
-            slot.book is None and not slot.error
-        )
-        if slot.reading is not None:
-            done = slot.reading
-        elif stale:
-            done = slot.reading = threading.Event()
-            threading.Thread(target=_refresh, args=(slot, done), daemon=True).start()
-        else:
-            done = threading.Event()
-            done.set()
-    if (slot.book is None or force) and wait > 0:
-        done.wait(wait)
-    with _guard:
-        return slot.book, slot.error
+        book, error = slot.book, slot.error
+    if book is not None:
+        problem = problem_of(book)
+        if problem:
+            return None, problem
+    return book, error
 
 
 #: Книга, положенная руками (`put`), - отдаётся при любом подключённом источнике.
@@ -520,7 +732,7 @@ ANY = ("*", "*")
 def put(workspace_id: uuid.UUID, book: Book) -> None:
     """Положить прочитанную книгу (тесты, сквозные прогоны без Google)."""
     with _guard:
-        _slots[workspace_id] = _Slot(source=ANY, book=book, at=time.monotonic())
+        _slots[workspace_id] = _Slot(source=ANY, book=book, at=time.monotonic(), header=book.header)
 
 
 def forget(workspace_id: uuid.UUID | None = None) -> None:
@@ -567,21 +779,31 @@ __all__ = [
     "BookError",
     "BookRow",
     "COLUMNS",
+    "FILE_COLUMNS",
     "LayoutBroken",
+    "Line",
     "Matcher",
     "Payment",
     "RowMatch",
     "build_book",
     "columns_for",
+    "columns_with",
     "current",
+    "derive",
     "layout_of",
     "date_of",
     "flag_of",
     "forget",
     "money_of",
     "month_of",
+    "parse",
+    "peek",
+    "problem_of",
     "put",
+    "require",
     "rows_of",
+    "sheet",
+    "source_key",
     "signature",
     "text_of",
     "with_company_names",

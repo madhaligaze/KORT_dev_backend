@@ -27,7 +27,7 @@ from app.finance.intake import forms as forms_module
 from app.finance.intake.forms import Form
 from app.finance.intake.header import core, text
 from app.finance.intake.recognize import Matcher, Reading, read_as
-from app.finance.intake.rows import has_value, is_empty, is_numbering, is_total
+from app.finance.intake.rows import has_value, is_empty, is_label_total, is_numbering, is_total
 from app.finance.intake.tables import Table
 from app.finance.intake.values import DateReading, decide_date_order
 from app.finance.layout import norm, squash
@@ -125,6 +125,19 @@ class Read:
         return any(column.key == key for column in self.columns)
 
 
+def total_rule(form: str) -> Any:
+    """Как узнать строку итога листа этой формы.
+
+    Платёж - строка выписки: итогом бывает и «Остаток на конец» без даты, слово
+    итога ищется во всей строке (`is_total`). Остальные формы - записи (договор,
+    участник, документ, сальдо): итог - только подпись «Итого»/«Всего» единственным
+    текстом строки (`is_label_total`), иначе договор с примечанием «в итоге» пропадал.
+    """
+    from app.finance.intake.forms import PAYMENT
+
+    return is_total if form == PAYMENT else is_label_total
+
+
 def read(table: Table, form: Form, layout: Layout | None = None) -> Read:
     """Строки листа ключами формы: каталог (со словарём компании) и поверх - ответ человека."""
     matcher = Matcher(form.fields)
@@ -161,10 +174,11 @@ def read(table: Table, form: Form, layout: Layout | None = None) -> Read:
     out.questions = [item for item in reading.questions if item.get("key") not in answered_keys]
     out.refusals = [item for item in reading.refusals if item.get("key") not in answered_keys]
     placed = [column for column in columns if column.key]
+    total = total_rule(form.key)
     dates: list[Any] = []
     for offset, cells in enumerate(table.rows[reading.body_start:]):
         line = reading.body_start + offset
-        if is_empty(cells) or (offset < 2 and is_numbering(cells)) or is_total(cells):
+        if is_empty(cells) or (offset < 2 and is_numbering(cells)) or total(cells):
             continue
         if sum(1 for column in placed if column.index < len(cells) and has_value(cells[column.index])) < min(2, len(placed)):
             continue

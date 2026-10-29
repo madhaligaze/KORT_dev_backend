@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Sequence
 
 from app.finance.layout import norm
@@ -54,6 +55,30 @@ def is_total(cells: Sequence[Any], *, dated: bool = False) -> bool:
     )
 
 
+#: Не подпись: заглушки формул и флажки (`#N/A`, «-», FALSE) рядом с «Итого» в строке итога.
+#: Длинное тире (\u2014) - так прочерк пишут в таблицах люди, разбор обязан его узнавать.
+_NOT_LABEL = frozenset({"-", "\u2014", "#n/a", "#н/д", "#value!", "#знач!", "#ref!", "#ссылка!", "false", "true", "ложь", "истина"})
+_NUMBER = re.compile(r"^[-+]?[\d\s.,']+(?:%|тг|₸|kzt)?$")
+#: Подпись итога - словом целиком: «Итого:», «Всего по ТОО», но не «ТОО Итоговый проект».
+_LABEL = re.compile(r"^(?:итого|итоги|итог|всего|total|subtotal)\b")
+
+
+def is_label_total(cells: Sequence[Any]) -> bool:
+    """Строка итога в таблице записей - договоров, «договор за месяц», участников, документов, сальдо.
+
+    Итог здесь - строка, где единственный текст - подпись «Итого»/«Всего»,
+    остальное - суммы. Слово итога где угодно в строке (`is_total`) годится
+    выписке, но не записи: у договора бывает примечание «в итоге закрыли как
+    разовую», «всего три платежа», клиент «ТОО Баланс» - и строка пропадала
+    молча: в сводной таблице на копии прода так выпадал договор с оплатой 10 000.
+    """
+    texts = [
+        text for text in (norm(cell) for cell in cells if isinstance(cell, str) and cell.strip())
+        if text not in _NOT_LABEL and not _NUMBER.match(text)
+    ]
+    return len(texts) == 1 and bool(_LABEL.match(texts[0]))
+
+
 def is_numbering(cells: Sequence[Any]) -> bool:
     """Строка «1 2 3 … 9» под шапкой - нумерация колонок, как в бланке.
 
@@ -77,4 +102,4 @@ def is_numbering(cells: Sequence[Any]) -> bool:
     return numbers[0] in (0, 1) and numbers == list(range(numbers[0], numbers[0] + len(numbers)))
 
 
-__all__ = ["TOTAL_WORDS", "has_value", "is_empty", "is_numbering", "is_total"]
+__all__ = ["TOTAL_WORDS", "has_value", "is_empty", "is_label_total", "is_numbering", "is_total"]

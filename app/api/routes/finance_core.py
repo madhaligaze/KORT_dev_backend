@@ -1562,6 +1562,34 @@ def intake_compare(
         heap.trim()
 
 
+@router.post("/intake/summary")
+def intake_summary(
+    file: UploadFile = File(...), answers: str = Form("{}"), entity: UUID | None = Form(default=None),
+    member: Member = Depends(editor),
+) -> dict[str, Any]:
+    """Таблица «договор за месяц» файлом - сводная компании: «Переход», «Оплачено (сводка)» и «Счета» читают её.
+
+    Вместо листа Google или впервые; новая версия таблицы - новой загрузкой
+    (`intake/compare.connect`).
+    """
+    from app.finance import heap
+    from app.finance.intake import compare as compare_module
+
+    data, name = _intake_file(file)
+    given = _intake_answers(answers)
+
+    def action(session, workspace, access):
+        out, _before = compare_module.connect(
+            session, workspace, access, _actor(member), data, name, today=contracts_service.today(), entity=entity, answers=given,
+        )
+        return out
+
+    try:
+        return _run(member, action)
+    finally:
+        heap.trim()
+
+
 @router.post("/intake/plan")
 def intake_plan(file: UploadFile = File(...), answers: str = Form("{}"), member: Member = Depends(editor)) -> dict[str, Any]:
     """Что таблица положит в модель по разметке человека - и где она расходится с KORT. Ничего не пишет."""

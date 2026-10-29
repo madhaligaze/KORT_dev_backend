@@ -30,7 +30,7 @@ from typing import Any, Sequence
 from app.finance.intake import forms as forms_module
 from app.finance.intake.forms import Field, Form
 from app.finance.intake.header import best_row, compose, core, text
-from app.finance.intake.rows import has_value, is_empty, is_numbering, is_total
+from app.finance.intake.rows import has_value, is_empty, is_numbering
 from app.finance.intake.tables import Table
 from app.finance.layout import norm, squash
 
@@ -339,7 +339,10 @@ def recognize(table: Table, file_name: str = "", *, catalog: Sequence[Form] | No
 
 def _count_rows(table: Table, reading: Reading, sheet: Sheet) -> None:
     """Строки данных, служебные и скрытые - под шапкой."""
+    from app.finance.intake.layout import total_rule
+
     placed = [column.index for column in reading.columns if column.key]
+    total = total_rule(reading.form.key)
     service = {"total": 0, "numbering": 0, "empty": 0}
     hidden: list[int] = []
     rows = 0
@@ -351,7 +354,7 @@ def _count_rows(table: Table, reading: Reading, sheet: Sheet) -> None:
         if offset < 2 and is_numbering(cells):
             service["numbering"] += 1
             continue
-        if is_total(cells):
+        if total(cells):
             service["total"] += 1
             continue
         filled = sum(1 for index in placed if index < len(cells) and has_value(cells[index]))

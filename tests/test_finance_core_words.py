@@ -16,6 +16,7 @@ from fastapi import FastAPI
 from app.finance import bills_bot, history
 from app.finance import service as finance_service
 from app.finance.contracts import bills as bills_module
+from app.finance.core import book as core_book
 from app.finance.contracts import service
 from app.finance.core import settings as core_settings
 from app.finance.db import finance_session
@@ -107,25 +108,19 @@ def app(finance_db, monkeypatch) -> FastAPI:
     monkeypatch.setattr(settings, "environment", "test")
     auth._ATTEMPTS.clear()
     audit_module._VIEWS.clear()
-    bills_module._slots.clear()
+    core_book.forget()
     return finance_app()
 
 
 def test_slova_tablicy_cherez_api(app: FastAPI, monkeypatch) -> None:
-    from app.finance.contracts import summary as summary_module
     from test_finance_access import BASE, register
 
+    # Читатель таблицы один на сверку, «Оплачено (сводка)» и «Счета» (`core/book._read`).
     monkeypatch.setattr(
-        summary_module, "_read",
-        lambda spreadsheet_id, tab, extra=None: summary_module.build_index(
-            [["Заказчик (Название Фирмы)", "№ Договора", "Сумма Факт Поступ."], ["ТОО Бета", "Д/1", "0"]],
-            title="Сводка", worksheet=tab, columns=summary_module.columns_for(extra),
-        ),
-    )
-    monkeypatch.setattr(
-        bills_module, "_read",
-        lambda spreadsheet_id, tab, extra=None: bills_module.build_board(
-            VALUES, title="Сводка", worksheet=tab, spreadsheet_id=spreadsheet_id, columns=bills_module.columns_for(extra)
+        core_book, "_read",
+        lambda spreadsheet_id, tab, extra=None: core_book.parse(
+            VALUES, title="Сводка", worksheet=tab, spreadsheet_id=spreadsheet_id,
+            columns=core_book.columns_with(bills_module.columns_for(extra), {"bill": "bill_state", "paid": "paid_state"}),
         ),
     )
     owner = register(app)

@@ -50,10 +50,9 @@ from typing import Any, Sequence
 
 from sqlalchemy.orm import Session
 
-from app.finance import google
 from app.finance.contracts.summary import read_money, source_of
 from app.finance.core.columns import column, with_company_names
-from app.finance.layout import Column, LayoutError, norm, resolve_layout
+from app.finance.layout import Column, norm
 
 log = logging.getLogger(__name__)
 
@@ -358,71 +357,93 @@ def columns_for(extra: dict[str, list[str]] | None) -> tuple[Column, ...]:
     return with_company_names(COLUMNS, extra, _CORE_KEYS) if extra else COLUMNS
 
 
-def build_board(
-    values: Sequence[Sequence[Any]], *, title: str, worksheet: str, spreadsheet_id: str = "",
-    columns: Sequence[Column] = COLUMNS,
-) -> Board:
-    """Разобрать значения листа. Шапка - первая строка, строка листа 2 - первая данных."""
-    if not values:
-        raise BillsError(f"Лист «{worksheet}» пуст")
-    try:
-        layout = resolve_layout(worksheet, columns, [str(cell) for cell in values[0]])
-    except LayoutError as exc:
-        raise BillsError(str(exc)) from exc
+#: Ключ «Счетов» в строках читателей общего разбора (`core/book.derive`).
+_DERIVED = "bills"
+#: Без чего «Счета» не читаются: колонка «Счет», клиент, номер, наше юрлицо.
+REQUIRED = ("bill_state", "customer", "number", "own")
+
+
+def board_of(book: Any) -> Board:
+    """«Счета» из общего разбора листа (`core/book.parse`) - прежними правилами строки.
+
+    Строка - с клиентом или номером; состояние - словами колонки «Счет»; ячейки -
+    как написаны в таблице (по ним ключ счёта, на котором стоят посты бота).
+    """
+    from app.finance.core import book as core_book
+
+    missing = core_book.require(book, REQUIRED)
+    if missing:
+        raise BillsError(missing)
     bills: list[Bill] = []
     done: list[Bill] = []
     count = 0
-    for offset, raw in enumerate(values[1:]):
-        row = [str(cell) for cell in raw]
-        customer = layout.cell(row, "customer").strip()
-        number = layout.cell(row, "number").strip()
+    for line in book.lines:
+        cell = line.get
+        customer = cell("customer").strip()
+        number = cell("number").strip()
         if not customer and not number:
             continue
         count += 1
-        text = layout.cell(row, "bill").strip()
+        text = cell("bill_state").strip()
         group = state_of(text)
-        amount_text = layout.cell(row, "amount").strip()
+        amount_text = cell("amount").strip()
         bill = Bill(
-            line=offset + 2,
+            line=line.line,
             group=DONE if group is None else group,
             text=text,
-            own=layout.cell(row, "own").strip(),
+            own=cell("own").strip(),
             customer=customer,
             number=number,
-            month=layout.cell(row, "month").strip(),
-            month_no=_int(layout.cell(row, "month_no")),
-            kind=layout.cell(row, "kind").strip(),
-            staff=layout.cell(row, "staff").strip(),
-            department=layout.cell(row, "department").strip(),
+            month=cell("month").strip(),
+            month_no=_int(cell("month_no")),
+            kind=cell("kind").strip(),
+            staff=cell("staff").strip(),
+            department=cell("department").strip(),
             amount=read_money(amount_text) if amount_text else None,
-            period_from=read_date(layout.cell(row, "period_from")),
-            period_to=read_date(layout.cell(row, "period_to")),
-            paid=_paid(layout.cell(row, "paid")),
-            status=layout.cell(row, "status").strip(),
-            note=layout.cell(row, "note").strip(),
-            bill_no=layout.cell(row, "bill_no").strip(),
-            bill_date=layout.cell(row, "bill_date").strip(),
-            bill_period=layout.cell(row, "bill_period").strip(),
-            onec_name=layout.cell(row, "onec_name").strip(),
-            signed_at=layout.cell(row, "signed_at").strip(),
+            period_from=read_date(cell("period_from")),
+            period_to=read_date(cell("period_to")),
+            paid=_paid(cell("paid_state")),
+            status=cell("status").strip(),
+            note=cell("note").strip(),
+            bill_no=cell("bill_no").strip(),
+            bill_date=cell("bill_date").strip(),
+            bill_period=cell("bill_period").strip(),
+            onec_name=cell("onec_name").strip(),
+            signed_at=cell("signed_at").strip(),
         )
         (done if group is None else bills).append(bill)
     if not count:
         # Пустой лист под шапкой - это сводка, которую формула ещё собирает, а не
         # «всё выставлено»: прежнее чтение остаётся, бот не правит пост в пустоту.
-        raise BillsError(f"В листе «{worksheet}» нет ни одной строки договора - таблица, похоже, ещё собирается")
+        raise BillsError(f"В листе «{book.worksheet}» нет ни одной строки договора - таблица, похоже, ещё собирается")
     bills.sort(key=_order)
     return Board(
-        read_at=datetime.now(timezone.utc),
-        title=title,
-        worksheet=worksheet,
-        spreadsheet_id=spreadsheet_id,
+        read_at=book.read_at,
+        title=book.title,
+        worksheet=book.worksheet,
+        spreadsheet_id=book.spreadsheet_id,
         bills=bills,
         rows=count,
-        drift=layout.describe_drift(),
+        drift=book.drift,
         issued={bill.key for bill in done},
         done=done,
     )
+
+
+def build_board(
+    values: Sequence[Sequence[Any]], *, title: str, worksheet: str, spreadsheet_id: str = "",
+    columns: Sequence[Column] = COLUMNS,
+) -> Board:
+    """Разобрать значения листа. Шапка - первая строка, строка листа 2 - первая данных."""
+    from app.finance.core import book as core_book
+
+    try:
+        book = core_book.parse(
+            values, title=title, worksheet=worksheet, spreadsheet_id=spreadsheet_id, columns=core_book.columns_with(columns, _CORE_KEYS),
+        )
+    except core_book.BookError as exc:
+        raise BillsError(str(exc)) from exc
+    return board_of(book)
 
 
 # ── Записанное из KORT ───────────────────────────────────────────────────────
@@ -457,9 +478,9 @@ def mark(workspace_id: uuid.UUID, key: str, values: dict[str, str]) -> None:
     )
     with _guard:
         _marks.setdefault(workspace_id, {})[key] = stamp
-        slot = _slots.get(workspace_id)
-        if slot is not None:
-            slot.at = 0.0  # следующее обращение перечитает сводку
+    from app.finance.core import book as core_book
+
+    core_book.expire(workspace_id)  # следующее обращение перечитает сводку
 
 
 def _group_by_date(period_from: date | None, today: date) -> str:
@@ -521,103 +542,39 @@ def view(workspace_id: uuid.UUID, board: Board) -> Board:
 
 @dataclass
 class _Slot:
-    #: Таблица, лист и подпись словаря колонок компании: новое название колонки - перечитать.
-    source: tuple[str, ...]
+    """«Счета» по общему чтению таблицы (`core/book.sheet`): строки и отказ."""
+
     board: Board | None = None
     error: str = ""
     at: float = 0.0
-    reading: threading.Event | None = None
-    extra: dict[str, list[str]] = field(default_factory=dict)
 
 
-_slots: dict[uuid.UUID, _Slot] = {}
 _guard = threading.Lock()
 
 
-def _read(spreadsheet_id: str, worksheet: str, extra: dict[str, list[str]] | None = None) -> Board:
-    if not google.is_configured():
-        raise BillsError("Не заданы креды Google - таблицу прочитать нечем")
-    try:
-        meta = google.spreadsheet_meta(spreadsheet_id)
-        values = google.fetch_tab_values(spreadsheet_id, worksheet, fresh=True)
-    except google.GoogleError as exc:
-        raise BillsError(str(exc)) from exc
-    return build_board(
-        values, title=meta.get("title", ""), worksheet=worksheet, spreadsheet_id=spreadsheet_id, columns=columns_for(extra)
-    )
-
-
-def _source_key(session: Session, workspace_id: uuid.UUID, source: Any) -> tuple[tuple[str, ...], dict[str, list[str]]]:
-    """Ключ чтения: таблица, лист и подпись словаря колонок компании - и сам словарь."""
+def _view(shared: Any) -> _Slot:
     from app.finance.core import book as core_book
-    from app.finance.core import settings as core_settings
 
-    extra = core_settings.book_columns(session, workspace_id)
-    return (source.spreadsheet_id, source.worksheet, core_book.signature(extra)), extra
-
-
-def _refresh(slot: _Slot, done: threading.Event) -> None:
+    error = shared.error
     try:
-        # Без своих названий колонок - прежний вызов в два аргумента (его подменяют тесты).
-        board = _read(*slot.source[:2], extra=slot.extra) if slot.extra else _read(*slot.source[:2])
-        with _guard:
-            slot.board, slot.error = board, ""
+        board = core_book.derive(shared, _DERIVED, board_of)
     except BillsError as exc:
-        with _guard:
-            slot.error = str(exc)
-    except Exception as exc:  # noqa: BLE001 - чтение книги не должно ронять раздел
-        log.exception("счета: таблица не прочиталась")
-        with _guard:
-            slot.error = f"Таблица не прочиталась: {exc}"
-    finally:
-        with _guard:
-            slot.at = time.monotonic()
-            slot.reading = None
-        done.set()
-
-
-def _start(
-    workspace_id: uuid.UUID, source: tuple[str, ...], *, force: bool = False, extra: dict[str, list[str]] | None = None
-) -> tuple[_Slot, threading.Event]:
-    """Слот компании и событие текущего чтения (начатого сейчас или раньше)."""
-    with _guard:
-        slot = _slots.get(workspace_id)
-        if slot is None or slot.source != source:
-            slot = _slots[workspace_id] = _Slot(source=source, extra=dict(extra or {}))
-        age = time.monotonic() - slot.at
-        # Отказ Google не повторяется на каждый запрос: раз в минуту, иначе
-        # ошибка съела бы квоту всего аккаунта.
-        stale = age >= (ERROR_RETRY if slot.board is None and slot.error else CACHE_TTL) or (
-            slot.board is None and not slot.error
-        )
-        if force and age >= FORCE_GAP:
-            stale = True
-        if slot.reading is not None:
-            return slot, slot.reading
-        if not stale:
-            done = threading.Event()
-            done.set()
-            return slot, done
-        done = slot.reading = threading.Event()
-    threading.Thread(target=_refresh, args=(slot, done), daemon=True).start()
-    return slot, done
+        board, error = None, str(exc)
+    return _Slot(board=board, error=error, at=shared.at)
 
 
 def get(session: Session, workspace_id: uuid.UUID, *, wait: float = FIRST_READ_WAIT, force: bool = False) -> _Slot | None:
     """Книга компании: прочитанная, при необходимости - перечитанная.
 
-    Первое чтение ждём до `wait` секунд; «Обновить» (`force`) - тоже, чтобы
-    человек увидел свежее, а не то, что было до нажатия. `None` - книга-сводка
-    не подключена.
+    Чтение и разбор таблицы - общие со сверкой ядра и «Оплачено (сводка)»
+    (`core/book.sheet`). Первое чтение ждём до `wait` секунд; «Обновить»
+    (`force`) - тоже, чтобы человек увидел свежее, а не то, что было до
+    нажатия. `None` - книга-сводка не подключена.
     """
-    source = source_of(session, workspace_id)
-    if source is None:
-        return None
-    key, extra = _source_key(session, workspace_id, source)
-    slot, done = _start(workspace_id, key, force=force, extra=extra)
-    if (slot.board is None or force) and wait > 0:
-        done.wait(wait)
-    return slot
+    from app.finance.core import book as core_book
+
+    shared = core_book.sheet(session, workspace_id, wait=wait, force=force)
+    return _view(shared) if shared is not None else None
 
 
 def worded(board: Board, words: dict[str, dict[str, str]]) -> Board:
@@ -675,9 +632,11 @@ def current(session: Session, workspace_id: uuid.UUID, **kwargs: Any) -> tuple[B
 
 
 def forget(workspace_id: uuid.UUID) -> None:
+    from app.finance.core import book as core_book
+
     with _guard:
-        _slots.pop(workspace_id, None)
         _marks.pop(workspace_id, None)
+    core_book.forget(workspace_id)
 
 
 # ── Наружу ───────────────────────────────────────────────────────────────────
@@ -719,7 +678,8 @@ def board_out(session: Session, workspace_id: uuid.UUID, *, force: bool = False)
         "source": {
             "title": (board.title if board else "") or source.title,
             "worksheet": source.worksheet,
-            "url": f"https://docs.google.com/spreadsheets/d/{source.spreadsheet_id}/edit",
+            "kind": source.kind or "google",
+            "url": "" if source.kind == "file" else f"https://docs.google.com/spreadsheets/d/{source.spreadsheet_id}/edit",
             "read_at": board.read_at.isoformat() if board else None,
             "drift": board.drift if board else "",
             "error": error,
@@ -737,10 +697,8 @@ def badge(session: Session, workspace_id: uuid.UUID) -> dict[str, int] | None:
     source = source_of(session, workspace_id)
     if source is None:
         return None
-    key, extra = _source_key(session, workspace_id, source)
-    slot, _ = _start(workspace_id, key, extra=extra)
-    with _guard:
-        board = slot.board
+    slot = get(session, workspace_id, wait=0)
+    board = slot.board if slot is not None else None
     if board is None:
         return None
     counts = view(workspace_id, prepared(session, workspace_id, board)).counts()
@@ -761,6 +719,7 @@ __all__ = [
     "badge",
     "bill_id",
     "bill_key",
+    "board_of",
     "board_out",
     "build_board",
     "columns_for",

@@ -21,7 +21,7 @@ from decimal import Decimal
 from typing import Any
 
 from app.finance.intake import forms, recognize, tables
-from app.finance.intake.rows import has_value, is_total
+from app.finance.intake.rows import has_value, is_label_total
 from app.finance.intake.values import parse_money
 from app.finance.layout import norm
 
@@ -205,7 +205,7 @@ def parse(table: tables.Table, file_name: str = "") -> Osv:
         numbers = [index for index in (at("opening_debit"), at("opening_credit"), at("turnover_debit"),
                                        at("turnover_credit"), at("closing_debit"), at("closing_credit")) if index is not None]
         filled = any(index < len(cells) and has_value(cells[index]) for index in numbers)
-        if is_total(cells):
+        if is_label_total(cells):
             out.opening_total = _money(cells, at("opening_debit")) - _money(cells, at("opening_credit"))
             out.closing_total = _money(cells, at("closing_debit")) - _money(cells, at("closing_credit"))
             continue

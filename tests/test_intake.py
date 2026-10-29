@@ -88,6 +88,34 @@ def test_itog_restra_strozhe_vypiski() -> None:
     assert not rows.is_numbering([1, 3, 4])
 
 
+def test_slovo_itoga_v_primechanii_ne_delaet_dogovor_itogom() -> None:
+    """Сводная BBC, НО/113: примечание «в итоге закрыли как разовую» - строка договора, а не итог.
+
+    Слово итога где угодно в строке годится выписке («Остаток на конец» без
+    даты), но у записей итог - только подпись единственным текстом строки:
+    договор с примечанием пропадал из «Сравнить», реестра и сводной файлом молча.
+    """
+    from app.finance.intake import layout
+
+    assert not rows.is_label_total(["ТОО Альфа", "№1", "в итоге закрыли как разовую", 10000])
+    assert not rows.is_label_total(["ТОО Баланс", "Д-1", "всего три платежа", 5000])
+    assert not rows.is_label_total(["Итоговый Консалтинг", "123456789012"])
+    assert rows.is_label_total(["", "Итого:", None, 150000, "#N/A", "-"])
+    book = openpyxl.Workbook()
+    sheet = book.active
+    sheet.append(["Месяц", "Наше ТОО", "Клиент", "№ договора", "Сумма", "Примечание"])
+    sheet.append(["ИЮЛЬ 2026", "СВ", "ТОО Альфа", "А-1", 10000, "в итоге закрыли как разовую"])
+    sheet.append(["ИЮЛЬ 2026", "СВ", "ТОО Баланс", "Б-2", 5000, "всего три платежа"])
+    sheet.append(["Итого", None, None, None, 15000, None])
+    buffer = io.BytesIO()
+    book.save(buffer)
+    [table] = tables.read(buffer.getvalue(), "x.xlsx")
+    [found] = recognize.recognize_file([table], "x.xlsx")
+    assert found.form == forms.CONTRACT_MONTH and found.rows == 2 and found.service == {"total": 1}
+    read = layout.read(table, found.reading.form)
+    assert [row.values["customer"] for row in read.rows] == ["ТОО Альфа", "ТОО Баланс"]
+
+
 def test_skrytye_stroki_i_obedineniya_chitayutsya() -> None:
     book = openpyxl.Workbook()
     sheet = book.active

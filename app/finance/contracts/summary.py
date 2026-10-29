@@ -31,13 +31,16 @@
 Суммы не хранятся: книгу читает сервер и держит ответ в памяти
 (`CACHE_TTL`), как лист дашборда. Квота Google - 60 чтений в минуту на
 аккаунт, поэтому чтение одно на компанию за раз и не чаще срока кэша.
+
+С 29.10.2026 чтение и разбор листа - общие со сверкой ядра и «Счетами»
+(`core/book.sheet`, `core/book.parse`): здесь из тех же строк листа (`Line`)
+собираются строки «Оплачено» (`index_of`). Таблица бывает и файлом,
+положенным в KORT (`connect_file`), - читается так же.
 """
 from __future__ import annotations
 
 import hashlib
 import logging
-import threading
-import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -48,8 +51,7 @@ import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
 from app.finance.core.columns import column, with_company_names
-from app.finance.layout import Column, LayoutError, resolve_layout
-from app.finance import google
+from app.finance.layout import Column
 from app.finance.contracts.fields import number_key, party_key
 from app.finance.contracts.models import SummarySource
 
@@ -211,23 +213,33 @@ def read_money(text: Any) -> Decimal:
     return -value if negative else value
 
 
-def build_index(
-    values: Sequence[Sequence[Any]], *, title: str, worksheet: str, columns: Sequence[Column] = COLUMNS
-) -> Index:
-    """Разобрать значения листа сводки. Шапка - первая строка."""
-    if not values:
-        raise SummaryError(f"Лист «{worksheet}» пуст")
-    try:
-        layout = resolve_layout(worksheet, columns, [str(cell) for cell in values[0]])
-    except LayoutError as exc:
-        raise SummaryLayoutError(str(exc)) from exc
+def source_of(session: Session, workspace_id: uuid.UUID) -> SummarySource | None:
+    return session.get(SummarySource, workspace_id)
+
+
+#: Ключ «Оплачено (сводка)» в строках читателей общего разбора (`core/book.derive`).
+_DERIVED = "summary"
+#: Без чего «Оплачено (сводка)» не читается: номер, клиент и поступления.
+REQUIRED = ("customer", "number", "paid")
+
+
+def index_of(book: Any) -> Index:
+    """«Оплачено (сводка)» из общего разбора листа (`core/book.parse`) - прежними правилами строки.
+
+    Строка - с номером и клиентом; поступление - числом, прочерк и пусто - ноль;
+    наше юрлицо, месяц и отдел - как написаны в таблице.
+    """
+    from app.finance.core import book as core_book
+
+    missing = core_book.require(book, REQUIRED)
+    if missing:
+        raise SummaryLayoutError(missing)
     by_number: dict[str, list[Row]] = {}
     digest = hashlib.sha1()
     count = 0
-    for raw in values[1:]:
-        row = [str(cell) for cell in raw]
-        number = layout.cell(row, "number").strip()
-        customer = layout.cell(row, "customer").strip()
+    for line in book.lines:
+        number = line.get("number").strip()
+        customer = line.get("customer").strip()
         key = number_key(number)
         if not key or not customer:
             continue
@@ -235,150 +247,91 @@ def build_index(
             customer=customer,
             customer_key=party_key(customer),
             number=number,
-            own=layout.cell(row, "own").strip(),
-            paid=read_money(layout.cell(row, "paid")),
-            month=layout.cell(row, "month").strip(),
-            department=layout.cell(row, "department").strip(),
+            own=line.get("own").strip(),
+            paid=read_money(line.get("paid")),
+            month=line.get("month").strip(),
+            department=line.get("department").strip(),
         )
         by_number.setdefault(key, []).append(item)
         digest.update(f"{key}|{item.customer_key}|{item.own}|{item.paid}|{item.month}\n".encode())
         count += 1
     return Index(
         rev=digest.hexdigest()[:16],
-        read_at=datetime.now(timezone.utc),
-        title=title,
-        worksheet=worksheet,
+        read_at=book.read_at,
+        title=book.title,
+        worksheet=book.worksheet,
         by_number=by_number,
         rows=count,
-        drift=layout.describe_drift(),
+        drift=book.drift,
     )
 
 
-# ── Кэш ─────────────────────────────────────────────────────────────────────
+def build_index(
+    values: Sequence[Sequence[Any]], *, title: str, worksheet: str, columns: Sequence[Column] = COLUMNS
+) -> Index:
+    """Разобрать значения листа сводки. Шапка - первая строка."""
+    from app.finance.core import book as core_book
+
+    try:
+        book = core_book.parse(values, title=title, worksheet=worksheet, columns=core_book.columns_with(columns))
+    except core_book.LayoutBroken as exc:
+        raise SummaryLayoutError(str(exc)) from exc
+    except core_book.BookError as exc:
+        raise SummaryError(str(exc)) from exc
+    return index_of(book)
+
+
+# ── Чтение: общее со сверкой и «Счетами» ────────────────────────────────────
 
 
 @dataclass
 class _Slot:
-    #: Таблица, лист и подпись словаря колонок компании: новое название колонки - перечитать.
-    source: tuple[str, ...]
+    """«Оплачено (сводка)» по общему чтению таблицы (`core/book.sheet`): строки и отказ."""
+
     index: Index | None = None
     error: str = ""
     at: float = 0.0
-    reading: threading.Event | None = None
-    extra: dict[str, list[str]] = field(default_factory=dict)
 
 
-_slots: dict[uuid.UUID, _Slot] = {}
-_guard = threading.Lock()
-
-
-def source_of(session: Session, workspace_id: uuid.UUID) -> SummarySource | None:
-    return session.get(SummarySource, workspace_id)
-
-
-def _read(spreadsheet_id: str, worksheet: str, extra: dict[str, list[str]] | None = None) -> Index:
-    if not google.is_configured():
-        raise SummaryError("Не заданы креды Google - сводку прочитать нечем")
-    try:
-        meta = google.spreadsheet_meta(spreadsheet_id)
-        values = google.fetch_tab_values(spreadsheet_id, worksheet, fresh=True)
-    except google.GoogleError as exc:
-        raise SummaryError(str(exc)) from exc
-    return build_index(values, title=meta.get("title", ""), worksheet=worksheet, columns=columns_for(extra))
-
-
-def _read_with(spreadsheet_id: str, worksheet: str, extra: dict[str, list[str]]) -> Index:
-    # Без своих названий колонок - прежний вызов в два аргумента (его подменяют тесты).
-    return _read(spreadsheet_id, worksheet, extra) if extra else _read(spreadsheet_id, worksheet)
-
-
-def _key(session: Session, workspace_id: uuid.UUID, source: SummarySource) -> tuple[tuple[str, ...], dict[str, list[str]]]:
-    """Ключ чтения: таблица, лист и подпись словаря колонок компании - и сам словарь."""
+def _view(shared: Any) -> _Slot:
     from app.finance.core import book as core_book
-    from app.finance.core import settings as core_settings
 
-    extra = core_settings.book_columns(session, workspace_id)
-    return (source.spreadsheet_id, source.worksheet, core_book.signature(extra)), extra
-
-
-def _refresh(workspace_id: uuid.UUID, slot: _Slot, done: threading.Event) -> None:
+    error = shared.error
     try:
-        index = _read_with(slot.source[0], slot.source[1], slot.extra)
-        with _guard:
-            slot.index, slot.error = index, ""
+        index = core_book.derive(shared, _DERIVED, index_of)
     except SummaryError as exc:
-        with _guard:
-            slot.error = str(exc)
-    except Exception as exc:  # noqa: BLE001 - чтение книги не должно ронять реестр
-        log.exception("сводка не прочиталась")
-        with _guard:
-            slot.error = f"Сводка не прочиталась: {exc}"
-    finally:
-        with _guard:
-            slot.at = time.monotonic()
-            slot.reading = None
-        done.set()
-
-
-def _start(
-    workspace_id: uuid.UUID, source: tuple[str, ...], extra: dict[str, list[str]] | None = None
-) -> tuple[_Slot, threading.Event]:
-    """Слот компании и событие текущего чтения (начатого сейчас или раньше)."""
-    with _guard:
-        slot = _slots.get(workspace_id)
-        if slot is None or slot.source != source:
-            slot = _slots[workspace_id] = _Slot(source=source, extra=dict(extra or {}))
-        age = time.monotonic() - slot.at
-        # Отказ Google (нет доступа, квота) не повторяется на каждый запрос:
-        # раз в минуту, иначе ошибка съела бы квоту всего аккаунта.
-        stale = age >= (ERROR_RETRY if slot.index is None and slot.error else CACHE_TTL) or (
-            slot.index is None and not slot.error
-        )
-        if slot.reading is not None:
-            return slot, slot.reading
-        if not stale:
-            done = threading.Event()
-            done.set()
-            return slot, done
-        done = slot.reading = threading.Event()
-    threading.Thread(target=_refresh, args=(workspace_id, slot, done), daemon=True).start()
-    return slot, done
+        index, error = None, str(exc)
+    return _Slot(index=index, error=error, at=shared.at)
 
 
 def get(session: Session, workspace_id: uuid.UUID, *, wait: float = FIRST_READ_WAIT, force: bool = False) -> _Slot | None:
     """Сводка компании: прочитанная, при необходимости - перечитанная.
 
-    Первое чтение ждём до `wait` секунд; дальше устаревшая сводка отдаётся
-    сразу, а свежая читается в фоне. `None` - сводка не подключена.
+    Чтение и разбор таблицы - общие со сверкой ядра и «Счетами» (`core/book.sheet`):
+    первое чтение ждём до `wait` секунд, дальше устаревшее отдаётся сразу, а
+    свежее читается в фоне. `None` - сводка не подключена.
     """
-    source = source_of(session, workspace_id)
-    if source is None:
-        return None
-    key, extra = _key(session, workspace_id, source)
-    if force:
-        with _guard:
-            slot = _slots.get(workspace_id)
-            if slot is not None and slot.reading is None:
-                slot.at = 0.0
-    slot, done = _start(workspace_id, key, extra)
-    if slot.index is None and wait > 0:
-        done.wait(wait)
-    return slot
+    from app.finance.core import book as core_book
+
+    shared = core_book.sheet(session, workspace_id, wait=wait, force=force)
+    return _view(shared) if shared is not None else None
 
 
 def peek(workspace_id: uuid.UUID) -> Index | None:
     """Уже прочитанная сводка - без похода в Google (сборка реестра не ждёт сеть)."""
-    with _guard:
-        slot = _slots.get(workspace_id)
-        return slot.index if slot is not None else None
+    from app.finance.core import book as core_book
+
+    shared = core_book.peek(workspace_id)
+    return _view(shared).index if shared is not None else None
 
 
 def forget(workspace_id: uuid.UUID) -> None:
-    with _guard:
-        _slots.pop(workspace_id, None)
+    from app.finance.core import book as core_book
+
+    core_book.forget(workspace_id)
 
 
-#: Чаще этого «Обновить» книгу не перечитывает: квота Google общая на аккаунт.
+#: Чаще этого «Обновить» книгу не перечитывает: квота Google общая на аккаунт (`core/book.FORCE_GAP`).
 FORCE_GAP = 30.0
 
 
@@ -392,11 +345,6 @@ def contracts_out(session: Session, workspace: Any, access: Any, *, force: bool 
     from app.finance.contracts.models import Contract
     from app.finance.contracts.service import Registry, people_of, visible_to
 
-    if force:
-        with _guard:
-            slot = _slots.get(workspace.id)
-            if slot is not None and time.monotonic() - slot.at < FORCE_GAP:
-                force = False
     source = source_of(session, workspace.id)
     # Без сводной - оплаты KORT (`Registry.summary_of`): у компании без таблицы
     # «Оплачено» и «Остаток» видов иначе были бы пусты всегда.
@@ -467,27 +415,69 @@ def connect(
     if not spreadsheet_id or not tab:
         raise SummaryError("Нужны ссылка на таблицу и название листа")
     extra = core_settings.book_columns(session, workspace_id)
-    index: Index | None = None
-    problem = ""
+    book = None
+    unread = ""
     try:
-        index = _read_with(spreadsheet_id, tab, extra)
-    except SummaryLayoutError as exc:
-        problem = str(exc)
+        book = core_book._read(spreadsheet_id, tab, extra)
+    except core_book.LayoutBroken as exc:
+        unread = str(exc)
+    except core_book.BookError as exc:
+        raise SummaryError(str(exc)) from exc
+    index = _connected(book)
+    # Отказ «Оплачено» (нет колонки поступлений) - его, а не чтения: «Счетам» и сверке лист читается.
+    problem = unread or (core_book.require(book, REQUIRED) if book is not None and index is None else "")
     source = session.get(SummarySource, workspace_id)
     if source is None:
         source = SummarySource(workspace_id=workspace_id, spreadsheet_id=spreadsheet_id, worksheet=tab)
         session.add(source)
-    source.spreadsheet_id, source.worksheet = spreadsheet_id, tab
-    if index is not None:
-        source.title = index.title
+    source.kind, source.spreadsheet_id, source.worksheet = "google", spreadsheet_id, tab
+    source.file_name, source.digest, source.values = "", "", None
+    if book is not None:
+        source.title = book.title
     source.updated_by, source.updated_at = user_id, datetime.now(timezone.utc)
     session.flush()
-    with _guard:
-        _slots[workspace_id] = _Slot(
-            source=(spreadsheet_id, tab, core_book.signature(extra)), index=index, error=problem, at=time.monotonic(),
-            extra=dict(extra),
-        )
+    key, extra = core_book.source_key(session, workspace_id, source)
+    core_book.prime(workspace_id, key, extra, book, unread)
     return source, index, problem
+
+
+def _connected(book: Any) -> Index | None:
+    if book is None:
+        return None
+    try:
+        return index_of(book)
+    except SummaryLayoutError:
+        return None
+
+
+def connect_file(
+    session: Session, workspace_id: uuid.UUID, *, values: list[list[str]], file_name: str, worksheet: str, user_id: uuid.UUID | None,
+) -> tuple[SummarySource, str]:
+    """Сводная таблица файлом: строки - в базу, читатели берут их оттуда (`core/book.sheet`).
+
+    Компания, которая ведёт сводную в Excel, получает то же, что с листом
+    Google: «Оплачено (сводка)», «Счета», сверку и «Переход». Новая версия -
+    новой загрузкой: читается то, что положили последним. Возвращает источник и
+    отказ словами, если сверка ядра такую таблицу не читает (нет «Нашего юрлица»).
+    """
+    from app.finance.core import book as core_book
+
+    if len(values) < 2:
+        raise SummaryError(f"В «{file_name}» нет строк договоров - класть нечего")
+    digest = hashlib.sha1(repr(values).encode("utf-8")).hexdigest()[:16]
+    source = session.get(SummarySource, workspace_id)
+    if source is None:
+        source = SummarySource(workspace_id=workspace_id, spreadsheet_id="", worksheet=worksheet)
+        session.add(source)
+    source.kind, source.spreadsheet_id, source.worksheet = "file", "", worksheet
+    source.file_name, source.title, source.digest, source.values = file_name, file_name, digest, values
+    source.updated_by, source.updated_at = user_id, datetime.now(timezone.utc)
+    session.flush()
+    core_book.forget(workspace_id)
+    slot = core_book.sheet(session, workspace_id, wait=0)
+    book = slot.book if slot is not None else None
+    problem = (slot.error if slot is not None else "") or (core_book.problem_of(book) if book is not None else "")
+    return source, problem
 
 
 def disconnect(session: Session, workspace_id: uuid.UUID) -> None:
@@ -495,27 +485,61 @@ def disconnect(session: Session, workspace_id: uuid.UUID) -> None:
     forget(workspace_id)
 
 
-def status(session: Session, workspace_id: uuid.UUID) -> dict[str, Any] | None:
-    """Подключённая сводка и что о ней известно - без чтения книги."""
+_STATE = ("kind", "spreadsheet_id", "worksheet", "title", "file_name", "digest", "values")
+
+
+def state_of(session: Session, workspace_id: uuid.UUID) -> dict[str, Any] | None:
+    """Что подключено сводной сейчас - целиком, чтобы «Вернуть» положило это обратно (`restore`)."""
     source = source_of(session, workspace_id)
     if source is None:
         return None
-    with _guard:
-        slot = _slots.get(workspace_id)
-    if slot is not None and slot.source[:2] != (source.spreadsheet_id, source.worksheet):
-        slot = None
-    return source_out(source, slot)
+    return {key: getattr(source, key) for key in _STATE}
+
+
+def restore(session: Session, workspace_id: uuid.UUID, before: dict[str, Any] | None, user_id: uuid.UUID | None) -> None:
+    """Сводная - как была до подключения файла (`state_of`); не было никакой - отключить."""
+    if not before:
+        disconnect(session, workspace_id)
+        return
+    source = session.get(SummarySource, workspace_id)
+    if source is None:
+        source = SummarySource(workspace_id=workspace_id, spreadsheet_id="", worksheet="")
+        session.add(source)
+    source.kind = before.get("kind") or "google"
+    source.spreadsheet_id, source.worksheet = before.get("spreadsheet_id") or "", before.get("worksheet") or ""
+    source.title, source.file_name, source.digest = before.get("title") or "", before.get("file_name") or "", before.get("digest") or ""
+    source.values = before.get("values")
+    source.updated_by, source.updated_at = user_id, datetime.now(timezone.utc)
+    session.flush()
+    forget(workspace_id)
+
+
+def status(session: Session, workspace_id: uuid.UUID) -> dict[str, Any] | None:
+    """Подключённая сводка и что о ней известно - без чтения книги."""
+    from app.finance.core import book as core_book
+
+    source = source_of(session, workspace_id)
+    if source is None:
+        return None
+    shared = core_book.peek(workspace_id)
+    key, _extra = core_book.source_key(session, workspace_id, source)
+    if shared is not None and shared.source != core_book.ANY and shared.source[:3] != key[:3]:
+        shared = None
+    return source_out(source, _view(shared) if shared is not None else None)
 
 
 def source_out(source: SummarySource | None, slot: _Slot | None) -> dict[str, Any] | None:
     if source is None:
         return None
     index = slot.index if slot is not None else None
+    file = getattr(source, "kind", "google") == "file"
     return {
+        "kind": "file" if file else "google",
         "spreadsheet_id": source.spreadsheet_id,
         "worksheet": source.worksheet,
+        "file_name": source.file_name if file else "",
         "title": (index.title if index else "") or source.title,
-        "url": f"https://docs.google.com/spreadsheets/d/{source.spreadsheet_id}/edit",
+        "url": "" if file else f"https://docs.google.com/spreadsheets/d/{source.spreadsheet_id}/edit",
         "read_at": index.read_at.isoformat() if index else None,
         "rows": index.rows if index else 0,
         "rev": index.rev if index else "",
@@ -534,13 +558,17 @@ __all__ = [
     "build_index",
     "columns_for",
     "connect",
+    "connect_file",
     "contracts_out",
     "disconnect",
     "get",
+    "index_of",
     "peek",
     "read_money",
+    "restore",
     "source_of",
     "source_out",
     "spreadsheet_id_of",
+    "state_of",
     "status",
 ]

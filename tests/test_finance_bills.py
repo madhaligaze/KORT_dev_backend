@@ -41,6 +41,7 @@ from app.finance import auth, bills_bot
 from app.finance.config import finance_settings
 from app.finance.contracts import bill_book, bills
 from app.finance.contracts.models import BillNotice
+from app.finance.core import book as core_book
 from app.finance.db import finance_session
 from app.finance.support_bot import TelegramError
 
@@ -411,11 +412,11 @@ def finance_db(tmp_path, monkeypatch):
     monkeypatch.setattr(finance_settings, "bills_every", "3")
     monkeypatch.setattr(finance_settings, "app_url", "https://kort.cards")
     auth._ATTEMPTS.clear()
-    bills._slots.clear()
+    core_book.forget()
     bills._marks.clear()
     bill_book.forget()
     yield engine
-    bills._slots.clear()
+    core_book.forget()
     bills._marks.clear()
     bill_book.forget()
     auth._ATTEMPTS.clear()
@@ -444,21 +445,17 @@ def register(app: FastAPI) -> TestClient:
 
 @pytest.fixture
 def book(monkeypatch):
-    """Книга в памяти: тест правит `book["values"]` - «в книге поставили галочку»."""
-    from app.finance.contracts import summary
+    """Книга в памяти: тест правит `book["values"]` - «в книге поставили галочку».
 
+    Читатель таблицы один на сверку, «Оплачено (сводка)» и «Счета» (`core/book._read`):
+    подменяется он, и все трое видят один лист.
+    """
     state = {"values": [list(line) for line in SHEET]}
     monkeypatch.setattr(
-        summary, "_read",
-        lambda spreadsheet_id, tab, extra=None: summary.build_index(
-            state["values"], title="Осн.Общая сводка BBC 2026", worksheet=tab, columns=summary.columns_for(extra)
-        ),
-    )
-    monkeypatch.setattr(
-        bills, "_read",
-        lambda spreadsheet_id, tab, extra=None: bills.build_board(
+        core_book, "_read",
+        lambda spreadsheet_id, tab, extra=None: core_book.parse(
             state["values"], title="Осн.Общая сводка BBC 2026", worksheet=tab, spreadsheet_id=spreadsheet_id,
-            columns=bills.columns_for(extra),
+            columns=core_book.columns_with(bills.columns_for(extra), {"bill": "bill_state", "paid": "paid_state"}),
         ),
     )
     return state
@@ -474,12 +471,12 @@ def connect(owner: TestClient) -> None:
 
 def fresh() -> None:
     """Книгу перечитать сразу: бот берёт прочитанную, свежая доедет к следующему проходу."""
-    with bills._guard:
-        slots = list(bills._slots.values())
+    with core_book._guard:
+        slots = [slot for slot in core_book._slots.values() if slot.source != core_book.ANY]
     for slot in slots:
-        board = bills._read(*slot.source[:2], extra=slot.extra)
-        with bills._guard:
-            slot.board, slot.at = board, time.monotonic()
+        book = core_book._read(slot.source[1], slot.source[2], slot.extra)
+        with core_book._guard:
+            slot.book, slot.error, slot.at = book, "", time.monotonic()
 
 
 def issue_all(values: list[list[str]]) -> None:

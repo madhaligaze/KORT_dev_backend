@@ -427,6 +427,47 @@ def _table_create(ctx: Ctx, p: TableCreate) -> Done:
     return Done(title=f"из таблицы «{p.name}» заведено договоров: {len(created)}", result={"created": created}, contracts=created)
 
 
+class TableConnect(_Params):
+    """Таблица «договор за месяц» файлом - сводная компании (вместо листа Google или впервые)."""
+
+    name: str = Field(min_length=1, max_length=255)
+    data: str = Field(min_length=1, max_length=FILE_CHARS)
+    entity: uuid.UUID | None = None
+    answers: dict[str, Any] = Field(default_factory=dict)
+
+
+def _table_connect(ctx: Ctx, p: TableConnect) -> Done:
+    from app.finance.contracts.service import today
+    from app.finance.intake import compare
+
+    out, before = compare.connect(
+        ctx.session, ctx.workspace, ctx.access, _actor(ctx), _file(p.name, p.data), p.name, today=today(), entity=p.entity,
+        answers=p.answers,
+    )
+    return Done(title=f"сводная таблица компании - файл «{p.name}»", result=out, steps=[Step("entry_summary", {"before": before})])
+
+
+class LinkSwitch(_Params):
+    """«Переход»: звено нашего юрлица - из KORT или снова из таблицы."""
+
+    link: Literal["bills", "payments"]
+    entity: uuid.UUID
+    source: Literal["kort", "book"]
+
+
+def _link_switch(ctx: Ctx, p: LinkSwitch) -> Done:
+    from app.finance.core import switch
+
+    before = switch.sources(ctx.session, ctx.workspace.id).get(p.link, {}).get(str(p.entity), "book")
+    out = switch.set_source(ctx.session, ctx.workspace, ctx.access, _actor(ctx), link=p.link, entity_id=p.entity, source=p.source)
+    switch.forget(ctx.workspace.id)
+    words = {"kort": "из KORT", "book": "снова из таблицы"}
+    return Done(
+        title=f"{switch.LINK_TITLES[p.link]} юрлица - {words[p.source]}", result={"sources": out},
+        steps=[Step("entry_link", {"link": p.link, "entity_id": str(p.entity), "before": before})],
+    )
+
+
 class StatementApply(_Params):
     name: str = Field(min_length=1, max_length=255)
     data: str = Field(min_length=1, max_length=FILE_CHARS)
@@ -548,6 +589,9 @@ ENTRY_COMMANDS: tuple[Command, ...] = (
     Command("document.remove", "Снять документ месяца", "contracts", DocumentRemove, _document_remove),
     Command("table.apply", "Таблица Excel любой формы: договоры, сальдо, помесячные", "contracts", TableApply, _table_apply),
     Command("table.create", "Договоры из таблицы «договор за месяц», которых нет в KORT", "contracts", TableCreate, _table_create),
+    Command("table.connect", "Таблица «договор за месяц» файлом - сводная компании", "contracts", TableConnect, _table_connect,
+            setup=True),
+    Command("link.switch", "«Переход»: звено юрлица из KORT или снова из таблицы", "contracts", LinkSwitch, _link_switch, setup=True),
     Command("statement.apply", "Выписка банка", "import", StatementApply, _statement_apply),
     Command("onec.files", "1С файлами: журналы, контрагенты, ОСВ", "contracts", OnecFiles, _onec_files, setup=True),
 )

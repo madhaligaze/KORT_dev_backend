@@ -57,6 +57,8 @@ VAT_MODES = ("included", "on_top", "none")
 #: Смысл даты окончания. Одна колонка файла «дата расторжения / дата
 #: исполнения разового» держит два смысла; какой - хранится явно.
 END_KINDS = ("terminated", "fulfilled", "unknown")
+#: Откуда сводная таблица компании: лист Google или таблица файлом (`SummarySource.kind`).
+SUMMARY_KINDS = ("google", "file")
 #: Системный смысл значения «хозяйственный смысл» - что договор делает с
 #: нашим юрлицом. Порог НДС считает только `revenue`.
 ECONOMIC_ROLES = ("revenue", "expense", "financing", "intra_group")
@@ -607,7 +609,7 @@ class ContractPayment(FinanceBase):
 
 
 class SummarySource(FinanceBase):
-    """Книга Google, из которой берётся «Оплачено (сводка)» договоров.
+    """Сводная таблица компании (лист Google или файл): из неё «Оплачено (сводка)», «Счета» и сверка ядра.
 
     Это сводная таблица компании, куда сходятся таблицы всех юрлиц: колонка
     «поступило за месяц» там - факт оплаты. Книга
@@ -618,14 +620,23 @@ class SummarySource(FinanceBase):
     """
 
     __tablename__ = "contract_summary_sources"
+    __table_args__ = (sa.CheckConstraint(_in("kind", SUMMARY_KINDS), name="summary_source_kind"),)
 
     workspace_id: Mapped[uuid.UUID] = mapped_column(
         sa.Uuid, sa.ForeignKey("workspaces.id", ondelete="CASCADE"), primary_key=True
     )
+    #: `google` - лист Google по расписанию; `file` - таблица файлом, положенная в
+    #: KORT (компания ведёт сводную в Excel): её строки - в `values`, новая версия -
+    #: новой загрузкой (с 30.10.2026, `core/book.sheet`).
+    kind: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("'google'"))
     spreadsheet_id: Mapped[str] = mapped_column(sa.Text)
     worksheet: Mapped[str] = mapped_column(sa.Text)
     #: Название книги на момент подключения - для подписи «откуда цифры».
     title: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("''"))
+    #: Таблица файлом: имя файла, отпечаток строк и сами строки под названиями колонок ядра.
+    file_name: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("''"))
+    digest: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("''"))
+    values: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     updated_by: Mapped[uuid.UUID | None] = mapped_column(
         sa.Uuid, sa.ForeignKey("users.id", ondelete="SET NULL")
     )

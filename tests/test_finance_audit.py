@@ -18,6 +18,7 @@ import json
 import uuid
 from typing import Any
 
+import openpyxl
 import pytest
 import sqlalchemy as sa
 from fastapi import FastAPI
@@ -543,45 +544,35 @@ def test_kazhdyy_izmenyayushchiy_marshrut_pishet_sobytie(app: FastAPI, monkeypat
                      json={"title": "Юристы", "blocks": [{"filter": rule_filter}]}).json()["id"]
     walk.call(owner, "PATCH", "/contracts/setup/views/{view_id}", view_id=view, json={"title": "Юристы ЮО"})
 
-    # ── сводка оплат: книга Google подменена - сеть в тесте не нужна ────
-    from app.finance.contracts import summary as summary_module
+    # ── сводка оплат и счета: книга Google подменена - сеть в тесте не нужна ────
+    # Читатель таблицы один на сверку, «Оплачено (сводка)» и «Счета» (`core/book._read`).
+    from app.finance.contracts import bill_book
+    from app.finance.core import book as core_book
+    from bill_book_fake import fake_api
 
     monkeypatch.setattr(
-        summary_module,
+        core_book,
         "_read",
-        lambda spreadsheet_id, tab, extra=None: summary_module.build_index(
-            [["Заказчик (Название Фирмы)", "№ Договора", "Сумма Факт Поступ."], ["ТОО Альфа", "№ 1", "1000"]],
+        lambda spreadsheet_id, tab, extra=None: core_book.parse(
+            [
+                ["Наша Фирма", "Заказчик (Название Фирмы)", "№ Договора", "Сумма Факт Поступ.", "Техн. 1", "Счет", "Период с (нач.)"],
+                ["", "ТОО Альфа", "№ 1", "1000", "", "TRUE", ""],
+                ["BBCL", "ТОО KENESARY AGRO", "№ЮО/44", "", "ОКТЯБРЬ 2026", "Сегодня день выставления", "22.10.2026"],
+            ],
             title="Сводка",
             worksheet=tab,
-            columns=summary_module.columns_for(extra),
+            spreadsheet_id=spreadsheet_id,
+            columns=core_book.columns_for(extra),
         ),
     )
     walk.call(owner, "POST", "/contracts/setup/summary",
               json={"link": "https://docs.google.com/spreadsheets/d/abc123/edit", "worksheet": "Сводка"})
 
     # ── карточка счёта пишет в книгу юрлица: книги - в памяти ───────────
-    from app.finance.contracts import bill_book
-    from app.finance.contracts import bills as bills_module
-    from bill_book_fake import fake_api
-
-    monkeypatch.setattr(
-        bills_module,
-        "_read",
-        lambda spreadsheet_id, tab, extra=None: bills_module.build_board(
-            [
-                ["Наша Фирма", "Заказчик (Название Фирмы)", "№ Договора", "Техн. 1", "Счет", "Период с (нач.)"],
-                ["BBCL", "ТОО KENESARY AGRO", "№ЮО/44", "ОКТЯБРЬ 2026", "Сегодня день выставления", "22.10.2026"],
-            ],
-            title="Сводка",
-            worksheet=tab,
-            columns=bills_module.columns_for(extra),
-        ),
-    )
     books = fake_api()
     books.summary_id = "abc123"
     monkeypatch.setattr(bill_book, "_api", books)
     bill_book.forget()
-    bills_module._slots.clear()  # чтение до подмены (без кредов Google) держалось бы минуту
     listed = owner.get(f"{BASE}/bills").json()
     assert len(listed["items"]) == 1, "ошибка: " + str(listed["source"]["error"])
     [bill] = listed["items"]
@@ -591,7 +582,6 @@ def test_kazhdyy_izmenyayushchiy_marshrut_pishet_sobytie(app: FastAPI, monkeypat
     bill_book.forget()
 
     # ── ядро: участники, режим наших юрлиц, налоговые годы ──────────────
-    from app.finance.core import book as core_book
 
     def customer_of(name: str, number: str) -> str:
         created = owner.post(f"{BASE}/contracts", json=contract_values(name, number))
@@ -751,6 +741,14 @@ def test_kazhdyy_izmenyayushchiy_marshrut_pishet_sobytie(app: FastAPI, monkeypat
     walk.call(owner, "POST", "/core/start/{step}", step="contracts")
     walk.call(owner, "POST", "/core/start/{step}", step="since")
     core_book.forget()
+
+    # Сводная файлом - вместо листа Google: подключение пишет событие настройки.
+    summary_file = openpyxl.Workbook()
+    summary_file.active.append(["Месяц", "Наше ТОО", "Клиент", "№ договора", "Сумма", "Поступило за месяц"])
+    summary_file.active.append(["ОКТЯБРЬ 2026", "BBCL", "ТОО Альфа", "№ 1", 1000, 1000])
+    buffer = io.BytesIO()
+    summary_file.save(buffer)
+    walk.call(owner, "POST", "/core/intake/summary", files={"file": ("сводная.xlsx", buffer.getvalue(), XLSX)})
 
     walk.call(owner, "DELETE", "/contracts/setup/summary")
 

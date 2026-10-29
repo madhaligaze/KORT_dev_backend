@@ -7,15 +7,11 @@
 там нет ни настоящей параллельности, ни `SELECT … FOR UPDATE`. Прогон двух
 окон на стенде показал, что без блокировки строки оба запроса читали старый
 номер поля, оба проходили проверку, и правка первого пропадала молча. Ловить
-это можно только на Postgres, поэтому набор пропускается без него - как
-`test_migrations.py`.
-
-    TEST_DATABASE_URL=postgresql+psycopg://postgres@127.0.0.1:5434/pdf_converter_dev \\
-        uv run pytest tests/test_finance_contracts_pg.py
+это можно только на Postgres: сервер поднимается сам, временный
+(`conftest.postgres_server`), или берётся `TEST_DATABASE_URL`.
 """
 from __future__ import annotations
 
-import os
 import threading
 import time
 import uuid
@@ -29,28 +25,17 @@ from app.finance.db import finance_session
 FULL = service.Access(view=True, edit=True, setup=True)
 
 
-def _base_url() -> str | None:
-    for name in ("TEST_DATABASE_URL", "DATABASE_URL"):
-        value = os.environ.get(name, "").strip()
-        if value.startswith("postgresql"):
-            return value
-    return None
-
-
 @pytest.fixture
-def pg(monkeypatch):
-    base = _base_url()
-    if base is None:
-        pytest.skip("нужен Postgres: задайте TEST_DATABASE_URL")
+def pg(monkeypatch, postgres_server):
     import sqlalchemy as sa
 
     from app.finance import db as finance_db_module
 
-    admin = sa.create_engine(base.rsplit("/", 1)[0] + "/postgres", isolation_level="AUTOCOMMIT", future=True)
+    admin = sa.create_engine(postgres_server + "/postgres", isolation_level="AUTOCOMMIT", future=True)
     name = f"contracts_pg_{uuid.uuid4().hex[:10]}"
     with admin.connect() as connection:
         connection.execute(sa.text(f'CREATE DATABASE "{name}"'))
-    engine = sa.create_engine(base.rsplit("/", 1)[0] + f"/{name}", future=True, pool_size=5)
+    engine = sa.create_engine(postgres_server + f"/{name}", future=True, pool_size=5)
     monkeypatch.setattr(finance_db_module, "get_engine", lambda: engine)
     monkeypatch.setattr(finance_db_module, "_session_factory", None)
     monkeypatch.setattr(finance_db_module, "_initialized", False)

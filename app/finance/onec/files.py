@@ -41,7 +41,7 @@ from app.finance.contracts.fields import party_key
 from app.finance import packs
 from app.finance.intake import forms, recognize, tables
 from app.finance.intake.header import text as cell_text
-from app.finance.intake.rows import has_value, is_empty, is_total
+from app.finance.intake.rows import has_value, is_empty, is_label_total, is_total
 from app.finance.intake.values import decide_date_order, parse_date, parse_money
 from app.finance.layout import norm
 from app.finance.models import Workspace
@@ -195,7 +195,7 @@ def _parties(table: tables.Table, reading: recognize.Reading, into: dict[str, di
             return _clean(cells[index]) if index is not None and index < len(cells) else ""
 
         name = cell("name")
-        if not name or is_total(cells):
+        if not name or is_label_total(cells):
             continue
         number = packs.digits(cell("bin"))
         into[name] = {

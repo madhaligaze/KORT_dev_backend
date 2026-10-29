@@ -287,10 +287,12 @@ def test_oplacheno_iz_kort(space, audit, monkeypatch):
         ["BBC", "Альфаком", "№1", "50 000", "ОКТЯБРЬ 2026"],
         ["BBC", "Бетаком", "№2", "80 000", "ОКТЯБРЬ 2026"],
     ]
+    from app.finance.core import book as core_book
+
     monkeypatch.setattr(
-        summary_module, "_read",
-        lambda spreadsheet_id, tab, extra=None: summary_module.build_index(
-            values, title="Сводка", worksheet=tab, columns=summary_module.columns_for(extra)
+        core_book, "_read",
+        lambda spreadsheet_id, tab, extra=None: core_book.parse(
+            values, title="Сводка", worksheet=tab, spreadsheet_id=spreadsheet_id, columns=core_book.columns_for(extra)
         ),
     )
     with finance_session() as session:

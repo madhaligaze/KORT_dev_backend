@@ -86,10 +86,13 @@ def test_odin_slovar_dlya_vseh_chitateley_tablicy(finance_db, monkeypatch):
 
     header = ["Наша Фирма", "Клиент", "Контракт", "Оплачено", "Состояние счёта", "Период с"]
     values = [header, ["BBC", "ТОО Альфаком", "№ОКР/1", "50 000", "Просрочка более 5 дней", "01.10.2026"]]
+    from app.finance.core import book as core_book
+
+    # Читатель таблицы один на сверку, «Оплачено (сводка)» и «Счета» (`core/book._read`).
     monkeypatch.setattr(
-        summary_module, "_read",
-        lambda spreadsheet_id, tab, extra=None: summary_module.build_index(
-            values, title="Сводка компании", worksheet=tab, columns=summary_module.columns_for(extra)
+        core_book, "_read",
+        lambda spreadsheet_id, tab, extra=None: core_book.parse(
+            values, title="Сводка компании", worksheet=tab, spreadsheet_id=spreadsheet_id, columns=core_book.columns_for(extra)
         ),
     )
     token = history.CONTEXT.set(history.AuditContext(user_id=OWNER.user_id))

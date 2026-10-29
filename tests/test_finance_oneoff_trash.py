@@ -10,7 +10,6 @@
 """
 from __future__ import annotations
 
-import time
 import uuid
 from datetime import timedelta
 from decimal import Decimal
@@ -22,6 +21,7 @@ from app.finance import trash
 from app.finance.contracts import export as export_module
 from app.finance.contracts import service, setup, summary, views
 from app.finance.contracts.models import Contract
+from app.finance.core import book as core_book
 from app.finance.db import finance_session
 
 import company_layer
@@ -49,6 +49,13 @@ def _row(customer: str, number: str, paid: str, own: str = "BBC", month: str = "
     row = [""] * len(HEADER)
     row[3], row[5], row[8], row[13], row[16], row[29] = month, own, customer, "ЮО", number, paid
     return row
+
+
+def _put(workspace_id: uuid.UUID, values: list[list[str]]) -> summary.Index:
+    """Сводка «прочитана» (шапка копии прода): общий разбор листа лежит у компании, «Оплачено (сводка)» строится по нему."""
+    book = core_book.parse(values, title="Сводка", worksheet="Сводка все ЮР лица", columns=core_book.columns_for(company_layer.COLUMNS))
+    core_book.put(workspace_id, book)
+    return summary.index_of(book)
 
 
 @pytest.fixture
@@ -214,11 +221,9 @@ def test_razovye_iz_shablona_i_otbirayut(space, monkeypatch):
         assert [view.title for view in sheets] == ["Все", "до 2 мес", "2-3 мес", "3-6 мес", "6+ мес", "Остатки"]
 
         # Сводка «прочитана»: Альфа оплатила 150 000 из 150 000, Гамма - 40 000 из 100 000.
-        index = summary.build_index(
-            [HEADER, _row("ТОО Альфа", "№ЮО/1", "150000", own="BBCL"), _row("ТОО Гамма", "№ЮО/3", "40000", own="BBCL")],
-            title="Сводка", worksheet="Сводка все ЮР лица",
-        )
-        summary._slots[workspace.id] = summary._Slot(source=("x", "y"), index=index, at=time.monotonic())
+        index = _put(workspace.id, [
+            HEADER, _row("ТОО Альфа", "№ЮО/1", "150000", own="BBCL"), _row("ТОО Гамма", "№ЮО/3", "40000", own="BBCL"),
+        ])
         try:
             listed = service.list_all(session, workspace, FULL)
         finally:
@@ -334,15 +339,11 @@ def test_razovye_otdela_summa_i_ostatok_dolej(space):
         keys = [sheet.key for sheet in registry.views if sheet.book == book]
 
         # Сводка: Акжол заплатил 174 000 из 348 000, Альфа - 50 000 из 150 000.
-        index = summary.build_index(
-            [
-                HEADER,
-                _row("ТОО Акжол", "№ОКР/59", "174000", own="BBCL"),
-                _row("ТОО Альфа", "№ЮО/1", "50000", own="BBCL"),
-            ],
-            title="Сводка", worksheet="Сводка все ЮР лица",
-        )
-        summary._slots[workspace.id] = summary._Slot(source=("x", "y"), index=index, at=time.monotonic())
+        _put(workspace.id, [
+            HEADER,
+            _row("ТОО Акжол", "№ОКР/59", "174000", own="BBCL"),
+            _row("ТОО Альфа", "№ЮО/1", "50000", own="BBCL"),
+        ])
         try:
             listed = {item["values"]["number"]: item for item in service.list_all(session, workspace, FULL)["contracts"]}
             data = export_module.build(session, workspace, FULL, OWNER, keys)
