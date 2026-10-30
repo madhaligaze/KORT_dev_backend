@@ -72,6 +72,16 @@ def describe(ctx: Ctx) -> dict[str, Any]:
             key: {**value, "resource": views_module.SOURCES[key].resource, "open": ctx.viewer.sees(views_module.SOURCES[key].resource), "params": SOURCE_PARAMS[key]}
             for key, value in listing["sources"].items()
         },
+        "calendar": {
+            "open": ctx.viewer.sees("reports.cash"),
+            "params": {
+                "from": {"title": "С какого дня (по умолчанию - понедельник этой недели)"},
+                "to": {"title": "По какой день"},
+                "days": {"title": "Дней в окне (по умолчанию 35)"},
+                "scenario": {"values": ["terms", "habit", "cash"], "default": "terms", "title": "Сценарий"},
+                "exclude": {"title": "Строки, которые не считать в остатке (начала ключей строк)"},
+            },
+        },
         "views": listing["views"],
         "templates": listing["templates"],
         "commands": [

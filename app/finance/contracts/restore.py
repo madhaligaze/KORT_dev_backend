@@ -771,6 +771,10 @@ def _restore_step(session, workspace, access, actor, point, kind, payload, done,
         from app.finance.core import views as views_module
 
         views_module.undo(session, workspace, actor, kind, payload, done, skipped)
+    elif kind.startswith("cash_"):
+        from app.finance.core import cash_plans
+
+        cash_plans.undo(session, workspace, access, actor, kind, payload, done, skipped)
     elif kind.startswith("entry_"):
         from app.finance.core import entry
 

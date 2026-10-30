@@ -30,12 +30,24 @@
 ЭСФ выписывается в течение 15 календарных дней после даты оборота (НК РК).
 
 С 1 марта 2024 года вся страна живёт в одном поясе, UTC+5.
+
+Праздники
+─────────
+Закон «О праздниках в РК»: национальные и государственные праздники -
+нерабочие дни (1-2 января, 8 марта, 21-23 марта, 1, 7 и 9 мая, 6 июля, 30
+августа, 25 октября, 16 декабря); совпал с выходным - выходной переносится на
+следующий рабочий день (ТК РК). Религиозные праздники (7 января, первый день
+Курбан айта) - нерабочие без переноса; дату Курбан айта ежегодно объявляет
+правительство, здесь - известные годы. Переносы постановлением правительства
+(«мост» между праздником и выходным) пакет не знает: их компания вписывает
+себе сама (`core/cash_plans.set_calendar`).
 """
 from __future__ import annotations
 
 import re
-from datetime import timedelta, timezone
+from datetime import date, timedelta, timezone
 from decimal import Decimal
+from functools import lru_cache
 
 from app.finance import packs
 
@@ -99,6 +111,26 @@ YEARS = {
     2026: packs.TaxNumbers(Decimal("4325"), 10000, Decimal("16")),
 }
 
+#: Национальные и государственные праздники (месяц, день) - переносятся с выходного.
+_STATE_HOLIDAYS = ((1, 1), (1, 2), (3, 8), (3, 21), (3, 22), (3, 23), (5, 1), (5, 7), (5, 9), (7, 6), (8, 30), (10, 25), (12, 16))
+#: Религиозные: Рождество (7 января) и первый день Курбан айта - без переноса.
+_KURBAN = {2024: date(2024, 6, 16), 2025: date(2025, 6, 6), 2026: date(2026, 5, 27), 2027: date(2027, 5, 16)}
+
+
+@lru_cache(maxsize=16)
+def holidays(year: int) -> frozenset[date]:
+    """Нерабочие праздничные дни года с переносом выходных."""
+    days = {date(year, month, day) for month, day in _STATE_HOLIDAYS}
+    off = set(days) | {date(year, 1, 7)} | ({_KURBAN[year]} if year in _KURBAN else set())
+    for day in sorted(days):
+        if day.weekday() >= 5:
+            moved = day + timedelta(days=1)
+            while moved.weekday() >= 5 or moved in off:
+                moved += timedelta(days=1)
+            off.add(moved)
+    return frozenset(off)
+
+
 COUNTRY = packs.Country(
     code="KZ",
     title="Казахстан",
@@ -111,4 +143,5 @@ COUNTRY = packs.Country(
     tz=timezone(timedelta(hours=5)),
     currency="KZT",
     currency_sign="₸",
+    holidays=holidays,
 )

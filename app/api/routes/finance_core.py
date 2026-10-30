@@ -997,6 +997,52 @@ def revenue_view(
     return _run(member, action)
 
 
+# ── Платёжный календарь ──────────────────────────────────────────────────────
+
+
+@router.get("/calendar")
+def calendar_view(
+    date_from: str | None = Query(default=None, alias="from", pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    date_to: str | None = Query(default=None, alias="to", pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    days: int | None = Query(default=None, ge=1, le=400),
+    scenario: str = Query(default="terms", pattern="^(terms|habit|cash)$"),
+    exclude: list[str] = Query(default=[]),
+    member: Member = Depends(require_access("reports.cash")),
+) -> dict[str, Any]:
+    """Платёжный календарь: остаток наших юрлиц по дням, ожидания строками, без даты, разрывы с подсказками."""
+    from datetime import date
+
+    from app.finance.core import cash_calendar
+
+    def action(session, workspace, access):
+        _debts_access(access)
+        # Пока звено оплат юрлица - таблица, неоплаченные месяцы - её строки: без неё календарь у такого юрлица пуст.
+        book, error = book_module.current(session, workspace.id, wait=book_module.FIRST_READ_WAIT)
+        out = cash_calendar.build(
+            session, workspace, access, today=contracts_service.today(),
+            start=date.fromisoformat(date_from) if date_from else None, end=date.fromisoformat(date_to) if date_to else None,
+            days=days, scenario=scenario, exclude=exclude, book=book,
+        )
+        out["book_error"] = error
+        return out
+
+    return _run(member, action)
+
+
+@router.get("/calendar/plans")
+def calendar_plans(member: Member = Depends(require_access("reports.cash"))) -> dict[str, Any]:
+    """Плановые платежи и обещания компании - то, что человек сказал календарю."""
+    from app.finance.core import cash_plans
+
+    def action(session, workspace, access):
+        _debts_access(access)
+        names = cash_plans._own_entities(session, workspace.id)
+        return {"plans": [cash_plans.out(plan, names) for plan in cash_plans.active(session, workspace.id)],
+                "settings": cash_plans.settings_of(session, workspace).out()}
+
+    return _run(member, action)
+
+
 # ── Словарь колонок сводной таблицы (фаза 9, R14) ────────────────────────────
 
 

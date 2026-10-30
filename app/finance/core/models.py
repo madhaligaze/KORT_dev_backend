@@ -400,6 +400,104 @@ class CoreSettings(FinanceBase):
     )
 
 
+#: Ожидание платёжного календаря (`core/cash_plans.py`): плановый платёж или
+#: обещание клиента по долгу договора.
+CASH_PLAN_KINDS = ("payment", "promise")
+CASH_DIRECTIONS = ("in", "out")
+#: Откуда ожидание: руками, из таблицы (строка листа), из журнала (принятое
+#: предложение повторяющегося платежа).
+CASH_PLAN_SOURCES = ("manual", "table", "history")
+
+
+class CashPlan(FinanceBase):
+    """Ожидание денег, которого нет в данных: решение или слово человека.
+
+    Платёжный календарь (`core/cash_calendar.py`) почти весь выводится: остаток
+    - из счетов и журнала, поступления по договорам - из начислений и оплат.
+    Здесь только то, чего не вывести: плановый платёж (аренда офиса, налоги,
+    займ от учредителя - приход или расход, `payment`) и обещание клиента
+    заплатить долг договора к дате (`promise`, сумма пусто - весь долг).
+
+    Сделан ли платёж, не хранится: план и факт сводятся при чтении (юрлицо,
+    направление, сумма, дата рядом). Хранится только решение человека, если
+    сведение ошиблось: `operation_id` - «оплачено этой операцией», `cancelled_at`
+    - «не будет». Из таблицы ожидание приходит с ключом строки: повторная
+    загрузка того же листа находит своё ожидание, а не заводит второе.
+    """
+
+    __tablename__ = "cash_plans"
+    __table_args__ = (
+        sa.CheckConstraint(_in("kind", CASH_PLAN_KINDS), name="cash_plan_kind"),
+        sa.CheckConstraint(_in("direction", CASH_DIRECTIONS), name="cash_plan_direction"),
+        sa.CheckConstraint(_in("source", CASH_PLAN_SOURCES), name="cash_plan_source"),
+        sa.CheckConstraint("amount IS NULL OR amount >= 0", name="cash_plan_amount_sign"),
+        sa.Index("ix_cash_plans_workspace_day", "workspace_id", "day"),
+        sa.Index("ix_cash_plans_contract", "workspace_id", "contract_id"),
+        sa.Index(
+            "uq_cash_plans_source_key",
+            "workspace_id",
+            "source_key",
+            unique=True,
+            postgresql_where=sa.text("source_key <> ''"),
+            sqlite_where=sa.text("source_key <> ''"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(sa.Uuid, primary_key=True, default=_uuid)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        sa.Uuid, sa.ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
+    )
+    kind: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("'payment'"))
+    direction: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("'out'"))
+    #: Наше юрлицо, чьи деньги; пусто - у компании одно юрлицо или оно неизвестно.
+    entity_id: Mapped[uuid.UUID | None] = mapped_column(
+        sa.Uuid, sa.ForeignKey("group_entities.counterparty_id", ondelete="SET NULL")
+    )
+    #: Ожидаемый день; пусто - без даты (в остаток не идёт).
+    day: Mapped[date | None] = mapped_column(sa.Date)
+    #: Сумма; у обещания пусто - весь долг договора на день обещания.
+    amount: Mapped[Decimal | None] = mapped_column(MONEY)
+    #: Строка календаря словами компании («Аренда офисов»); пусто - по статье.
+    line: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("''"))
+    category_id: Mapped[uuid.UUID | None] = mapped_column(
+        sa.Uuid, sa.ForeignKey("categories.id", ondelete="SET NULL")
+    )
+    counterparty_id: Mapped[uuid.UUID | None] = mapped_column(
+        sa.Uuid, sa.ForeignKey("counterparties.id", ondelete="SET NULL")
+    )
+    #: Получатель или плательщик словами, когда это не участник («Сотрудники - аванс»).
+    party: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("''"))
+    #: Статья словами источника («ФОТ за октябрь (остаток)»).
+    title: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("''"))
+    contract_id: Mapped[uuid.UUID | None] = mapped_column(
+        sa.Uuid, sa.ForeignKey("contracts.id", ondelete="CASCADE")
+    )
+    #: Итоги переговоров, комментарий.
+    note: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("''"))
+    source: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("'manual'"))
+    source_key: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("''"))
+    #: Откуда строка словами: имя файла и листа, «журнал: 4 из 4 месяцев».
+    source_name: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("''"))
+    #: Решение человека: оплачено этой операцией (сведение ошиблось или не нашло).
+    operation_id: Mapped[uuid.UUID | None] = mapped_column(
+        sa.Uuid, sa.ForeignKey("operations.id", ondelete="SET NULL")
+    )
+    cancelled_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True))
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        sa.Uuid, sa.ForeignKey("users.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        sa.DateTime(timezone=True), server_default=sa.func.now()
+    )
+    updated_by: Mapped[uuid.UUID | None] = mapped_column(
+        sa.Uuid, sa.ForeignKey("users.id", ondelete="SET NULL")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        sa.DateTime(timezone=True), server_default=sa.func.now()
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True))
+
+
 #: Откуда строки вида: договоры листами, «Долги», «Не выставлены» (`core/views.py`).
 VIEW_SOURCES = ("contracts", "debts", "unbilled")
 #: Кому вид стоит в колонке разделов: всем, кто видит его данные; только

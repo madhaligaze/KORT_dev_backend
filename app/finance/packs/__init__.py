@@ -21,9 +21,9 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from datetime import tzinfo
+from datetime import date, timedelta, tzinfo
 from decimal import Decimal
-from typing import Any, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 # ── Номер участника ──────────────────────────────────────────────────────────
 
@@ -111,6 +111,27 @@ class Country:
     tz: tzinfo
     currency: str
     currency_sign: str
+    #: Выходные дни недели (`date.weekday()`: 5 - суббота, 6 - воскресенье).
+    weekend: frozenset[int] = frozenset({5, 6})
+    #: Год → нерабочие праздничные дни страны, с переносами по закону. Пусто -
+    #: праздников пакет не знает, нерабочие - только выходные.
+    holidays: Callable[[int], frozenset[date]] | None = None
+
+    def days_off(self, years: Iterable[int], extra: Iterable[date] = (), working: Iterable[date] = ()) -> frozenset[date]:
+        """Праздничные нерабочие дни лет: пакета, плюс свои компании (`extra`), минус её рабочие (`working`)."""
+        out: set[date] = set()
+        if self.holidays is not None:
+            for year in years:
+                out |= self.holidays(year)
+        return frozenset((out | set(extra)) - set(working))
+
+    def workday(self, day: date, off: frozenset[date] = frozenset()) -> date:
+        """Ближайший рабочий день с `day` включительно: платёж на выходной уходит на следующий рабочий."""
+        for _ in range(60):
+            if day.weekday() not in self.weekend and day not in off:
+                return day
+            day += timedelta(days=1)
+        return day
 
 
 # ── Отрасль ──────────────────────────────────────────────────────────────────

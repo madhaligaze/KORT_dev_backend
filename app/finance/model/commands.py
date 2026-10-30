@@ -309,12 +309,14 @@ CONTRACT_COMMANDS: tuple[Command, ...] = (
 
 
 def _catalog() -> dict[str, Command]:
+    from app.finance.model.cash import CASH_COMMANDS
     from app.finance.model.entry import ENTRY_COMMANDS
 
-    return {item.name: item for item in (*CONTRACT_COMMANDS, *ENTRY_COMMANDS)}
+    return {item.name: item for item in (*CONTRACT_COMMANDS, *ENTRY_COMMANDS, *CASH_COMMANDS)}
 
 
-#: Все команды: договоры и виды - здесь, ручной ввод, деньги и файлы - `entry.py`.
+#: Все команды: договоры и виды - здесь, ручной ввод, деньги и файлы - `entry.py`,
+#: платёжный календарь - `cash.py`.
 COMMANDS: dict[str, Command] = _catalog()
 #: Виды открыты тому, кому открыт их источник, - право проверяет `core/views.py`.
 VIEW_COMMANDS = frozenset({"view.save", "view.update", "view.remove"})

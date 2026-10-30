@@ -38,7 +38,7 @@
 """
 from __future__ import annotations
 
-VERSION = "1.3"
+VERSION = "1.4"
 MAJOR = int(VERSION.split(".")[0])
 #: Заголовок версии: в каждом ответе вызовов, и его же может прислать клиент.
 HEADER = "X-Kort-Model"
