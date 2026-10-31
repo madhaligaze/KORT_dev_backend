@@ -86,7 +86,9 @@ def question_of(ctx: Ctx, raw: dict[str, Any]) -> tuple[View, dict[str, Any], da
         return view, asked, day
     source = str(raw.get("source") or "")
     if source not in views_module.SOURCES:
-        raise FinanceError("Источник вопроса - contracts, debts, unbilled, calendar, questions, attention, arrived или documents")
+        raise FinanceError(
+            "Источник вопроса - contracts, debts, unbilled, calendar, questions, attention, arrived, documents, participants или payments"
+        )
     if not ctx.viewer.sees(views_module.SOURCES[source].resource):
         raise PermissionError(f"Источник «{views_module.SOURCES[source].title}» вам не открыт")
     spec = views_module.SOURCES[source]
@@ -95,7 +97,11 @@ def question_of(ctx: Ctx, raw: dict[str, Any]) -> tuple[View, dict[str, Any], da
         title=str(raw.get("title") or spec.title)[:120],
         source=source,
         filter=_clean_filter(raw.get("filter")),
-        measures=views_module._clean_list(raw.get("measures"), [item.key for item in views_module.MEASURES if item.type != "share"], "Меры"),
+        measures=views_module._clean_list(
+            raw.get("measures"),
+            [*(item.key for item in views_module.MEASURES if item.type != "share"), *views_module.formula_keys(ctx.session, ctx.workspace.id)],
+            "Меры",
+        ),
         groups=views_module._clean_list(raw.get("groups"), spec.groups, "Группировки"),
         forms=[],
         params=views_module._clean_params(source, raw.get("params"), departments),
@@ -165,6 +171,11 @@ def ask(ctx: Ctx, raw: dict[str, Any], *, force: bool = False, wait: float | Non
         from app.finance.model import questions
 
         return questions.SOURCES[str(raw["source"])](ctx, raw)
+    if raw.get("source") in ("participants", "payments"):
+        # Участники и оплаты списком (`model/lists.py`).
+        from app.finance.model import lists
+
+        return lists.SOURCES[str(raw["source"])](ctx, raw)
     view, asked, day = question_of(ctx, raw)
     if view.source == "contracts":
         body = contracts(ctx, view, asked, day)
@@ -187,8 +198,13 @@ def ask(ctx: Ctx, raw: dict[str, Any], *, force: bool = False, wait: float | Non
 def contracts(ctx: Ctx, view: View, asked: dict[str, Any], day: date, *, members: dict | None = None) -> dict[str, Any]:
     wanted = members if members is not None else ({} if "people" in (view.groups or []) else None)
     found = views_module.ask(ctx.session, ctx.workspace, ctx.access, view, day=day, members=wanted)
+    from app.finance.core import formulas as formulas_module
+
     hidden = ctx.access.hidden
-    measures = [key for key in (view.measures or []) if key in views_module.COLUMN_MEASURES and key not in hidden]
+    company = {item.key: item for item in formulas_module.of(ctx.session, ctx.workspace.id)}
+    measures = [
+        key for key in (view.measures or []) if (key in views_module.COLUMN_MEASURES and key not in hidden) or key in company
+    ]
     columns = [
         {"key": key, "title": title, "type": kind}
         for key, title, kind in CONTRACT_COLUMNS
@@ -197,7 +213,9 @@ def contracts(ctx: Ctx, view: View, asked: dict[str, Any], day: date, *, members
         and not (key == "status" and "status" in hidden)
     ]
     columns += [
-        {"key": key, "title": views_module.MEASURE_BY_KEY[key].title, "type": views_module.MEASURE_BY_KEY[key].type}
+        {"key": key, "title": company[key].title, "type": company[key].type, "formula": company[key].text}
+        if key in company
+        else {"key": key, "title": views_module.MEASURE_BY_KEY[key].title, "type": views_module.MEASURE_BY_KEY[key].type}
         for key in measures
     ]
     on = day.isoformat()
@@ -215,6 +233,8 @@ def contracts(ctx: Ctx, view: View, asked: dict[str, Any], day: date, *, members
                 links[key] = refs.make("paid", c=row["id"], d=on, f=fraction)
             elif key == "summary_remaining" and values[key] is not None:
                 links[key] = refs.make("left", c=row["id"], d=on, f=fraction)
+            elif key in company and values[key] is not None:
+                links[key] = refs.make("formula", c=row["id"], d=on, f=fraction, m=key)
         rows.append(
             {
                 "id": row["id"],

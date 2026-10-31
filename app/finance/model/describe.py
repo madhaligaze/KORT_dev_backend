@@ -83,6 +83,8 @@ def describe(ctx: Ctx) -> dict[str, Any]:
             },
         },
         "home": _home(ctx),
+        # Формулы компании - меры вида договоров: язык и что заведено (`core/formulas.py`).
+        "formulas": _formulas(ctx),
         "views": listing["views"],
         "templates": listing["templates"],
         "commands": [
@@ -103,6 +105,18 @@ def _today() -> str:
     return today().isoformat()
 
 
+def _formulas(ctx: Ctx) -> dict[str, Any]:
+    from app.finance.core import formulas
+
+    return {
+        "items": [item.out() for item in formulas.of(ctx.session, ctx.workspace.id)],
+        "variables": [{"name": name, "measure": key, "title": title} for name, (key, title) in formulas.VARIABLES.items()],
+        "functions": list(formulas.FUNCTIONS),
+        "types": [{"key": key, "title": title} for key, title in formulas.TYPES.items()],
+        "max": formulas.MAX,
+    }
+
+
 def _home(ctx: Ctx) -> dict[str, Any]:
     """Главный экран: какие виды вопросов и пункты угроз открыты спрашивающему - оболочка спрашивает их порознь."""
     from app.finance.model import questions
@@ -118,6 +132,9 @@ def _home(ctx: Ctx) -> dict[str, Any]:
         "attention": [key for key in questions.ATTENTION_ITEMS if questions._visible_item(ctx, key)],
         "arrived": bool(ctx.access.view),
         "documents": {"open": bool(ctx.access.view), "views": list(questions.DOCUMENT_VIEWS)},
+        # Списки - участники и оплаты (`model/lists.py`).
+        "participants": bool(ctx.access.view),
+        "payments": {"open": bool(ctx.access.view), "without": bool(ctx.access.setup)},
     }
 
 

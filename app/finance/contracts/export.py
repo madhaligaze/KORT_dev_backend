@@ -88,6 +88,28 @@ WIDTH_CAP = {"index": 8.0, "date": 12.0, "money": 18.0, "link": 22.0, "text": 42
 _LINK = re.compile(r"^https?://\S+$")
 
 
+def _formula(
+    registry: Registry, contract: Contract, key: str, people: Sequence[uuid.UUID], share: shares_module.BookShare | None,
+) -> float | None:
+    """Ячейка формулы компании (`core/formulas.py`): из тех же суммы, оплачено, остатка и срока, что выгрузка пишет рядом."""
+    from app.finance.core import formulas
+
+    known = getattr(registry, "_formulas", None)
+    if known is None:
+        known = {item.key: item for item in formulas.of(registry.session, registry.workspace.id)}
+        registry._formulas = known  # type: ignore[attr-defined]
+    found = known.get(key)
+    if found is None:
+        return None
+    values: dict[str, Decimal | None] = {}
+    for name, (measure, _title) in formulas.VARIABLES.items():
+        raw = _text(registry, contract, measure, people, share)
+        values[name] = Decimal(str(raw)) if isinstance(raw, (int, float, Decimal)) else None
+    value = formulas.evaluate(found.text, values)
+    shown = formulas.shown(found, value)
+    return float(shown) if shown is not None else None
+
+
 def _text(
     registry: Registry,
     contract: Contract,
@@ -140,6 +162,8 @@ def _text(
         return float(contract.amount - match.paid) if contract.amount is not None else None
     if key == "age_months":
         return age_months(contract.signed_at)
+    if key.startswith("f_"):
+        return _formula(registry, contract, key, people, share)
     if key in DATE_KEYS:
         return getattr(contract, key)
     if key in ("billing", "end_kind", "vat_mode"):

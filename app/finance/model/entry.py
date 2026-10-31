@@ -636,6 +636,37 @@ def _onec_files(ctx: Ctx, p: OnecFiles) -> Done:
     return Done(title=f"1С файлами: {names}", result=out)
 
 
+class FormulaSave(_Params):
+    #: Пусто - новая формула; ключ - правка прежней (`describe` → `formulas`).
+    key: str | None = Field(default=None, max_length=50)
+    title: str = Field(min_length=1, max_length=80)
+    #: Арифметика над amount, paid, remaining, age: «paid / amount * 100».
+    text: str = Field(min_length=1, max_length=200)
+    type: Literal["money", "number", "percent"] = "number"
+    digits: int = Field(default=0, ge=0, le=4)
+
+
+def _formula_save(ctx: Ctx, p: FormulaSave) -> Done:
+    from app.finance.core import formulas
+
+    made, before = formulas.save(
+        ctx.session, ctx.workspace, ctx.access, _actor(ctx), key=p.key, title=p.title, text=p.text, type=p.type, digits=p.digits,
+    )
+    return Done(title=f"формула «{made.title}»", result=made.out(), steps=[Step("entry_formula", {"before": before})])
+
+
+class FormulaRemove(_Params):
+    key: str = Field(min_length=1, max_length=50)
+
+
+def _formula_remove(ctx: Ctx, p: FormulaRemove) -> Done:
+    from app.finance.core import formulas
+
+    gone, before = formulas.remove(ctx.session, ctx.workspace, ctx.access, _actor(ctx), p.key)
+    return Done(title=f"формула «{gone.title}» убрана", result={"key": gone.key, "removed": True},
+                steps=[Step("entry_formula", {"before": before})])
+
+
 ENTRY_COMMANDS: tuple[Command, ...] = (
     Command("participant.create", "Новый участник (клиент, поставщик)", "contracts", ParticipantCreate, _participant_create),
     Command("participant.update", "Участник: полное имя, БИН, написание", "contracts", ParticipantUpdate, _participant_update),
@@ -665,6 +696,9 @@ ENTRY_COMMANDS: tuple[Command, ...] = (
     Command("link.switch", "«Переход»: звено юрлица из KORT или снова из таблицы", "contracts", LinkSwitch, _link_switch, setup=True),
     Command("statement.apply", "Выписка банка", "import", StatementApply, _statement_apply),
     Command("onec.files", "1С файлами: журналы, контрагенты, ОСВ", "contracts", OnecFiles, _onec_files, setup=True),
+    Command("formula.save", "Формула компании: мера из суммы, оплачено, остатка и срока", "contracts", FormulaSave, _formula_save,
+            setup=True),
+    Command("formula.remove", "Убрать формулу компании", "contracts", FormulaRemove, _formula_remove, setup=True),
 )
 
 

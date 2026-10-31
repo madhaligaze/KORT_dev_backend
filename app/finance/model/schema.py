@@ -30,12 +30,15 @@ class AskIn(_In):
     """Сохранённый вид (`view`) или вопрос без сохранения (`source` и остальное)."""
 
     view: str | None = Field(default=None, max_length=64, description="Ключ вида; реестр - пустая строка")
-    source: Literal["contracts", "debts", "unbilled", "calendar", "questions", "attention", "arrived", "documents"] | None = Field(
+    source: Literal[
+        "contracts", "debts", "unbilled", "calendar", "questions", "attention", "arrived", "documents", "participants", "payments",
+    ] | None = Field(
         default=None,
         description=(
             "calendar - платёжный календарь: params from, to, days, scenario, exclude (describe → calendar); "
             "questions - что ждёт решения (params.kind); attention - что под угрозой (params.item); "
-            "arrived - что пришло (params.since); documents - дела по АВР и ЭСФ (params.view) - describe → home"
+            "arrived - что пришло (params.since); documents - дела по АВР и ЭСФ (params.view) - describe → home; "
+            "participants - участники (params.q, show); payments - оплаты за период (params.since, until, state, contract, party)"
         ),
     )
     title: str | None = Field(default=None, max_length=120)

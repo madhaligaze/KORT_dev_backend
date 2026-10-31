@@ -326,7 +326,7 @@ class Registry:
         # листов, но не полями договора (`core/views.MEASURES`).
         from app.finance.core.views import measure_fields
 
-        for key, measure in measure_fields().items():
+        for key, measure in measure_fields(session, workspace.id).items():
             self.field_by_key.setdefault(key, measure)
         values = session.scalars(
             sa.select(ListValue).where(ListValue.workspace_id == workspace.id)

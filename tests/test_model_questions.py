@@ -221,7 +221,7 @@ def test_prava_voprosov_i_zakrytye_varianty(owner: TestClient) -> None:
     _one(owner, "contract.create", values={**values, "customer": "Бергауф Астана", "number": "Б-2"})
 
     described = _ok(owner.get(f"{MODEL}/describe"))
-    assert described["version"] == "1.5"
+    assert described["version"] == "1.6"
     assert described["home"]["questions"] == ["payments", "bins", "twins", "reconcile"]
     assert {"participant.merge", "participant.distinct", "participant.bin_reject"} <= {item["name"] for item in described["commands"]}
 
@@ -287,3 +287,24 @@ def test_pod_ugrozoy_porozn_i_dokumenty(owner: TestClient) -> None:
     unsigned = _ask(owner, "documents", view="unsigned")
     assert unsigned["counts"]["unsigned"] == 1 and unsigned["rows"][0]["contract"]["number"] == "Д-1"
     assert sum(unsigned["counts"].values()) == acts["count"]
+
+
+def test_uchastniki_i_oplaty_spiskom(owner: TestClient) -> None:
+    """Чтение того, что пишется: участники и оплаты - вызовом «спросить», а не маршрутами экранов."""
+    entity, first, _second = _company(owner)
+    _one(owner, "payment.record", day="2026-10-05", amount="100000", contract=first, month="2026-10", key="p-1")
+    _one(owner, "payment.record", day="2026-10-06", amount="25000", entity=entity["id"], party="ТОО Клиент Два", key="p-2")
+
+    found = _ask(owner, "participants", q="Клиент Два")
+    assert [row["name"] for row in found["rows"]] == ["ТОО Клиент Два"] and found["rows"][0]["contracts"] == 2
+    assert {row["name"] for row in _ask(owner, "participants", show="own")["rows"]} == {"ТОО Решить"}
+
+    paid = _ask(owner, "payments", since="2026-10-01", until="2026-10-31")
+    assert paid["totals"] == {"payments": 2, "shown": 2, "amount": "125000.00"}
+    by_day = {row["day"]: row for row in paid["rows"]}
+    assert by_day["2026-10-05"]["contract"]["number"] == "Д-1" and by_day["2026-10-05"]["source_title"] == "KORT"
+    assert by_day["2026-10-06"]["contract"] is None and by_day["2026-10-06"]["party"] == "ТОО Клиент Два"
+    assert [row["day"] for row in _ask(owner, "payments", since="2026-10-01", until="2026-10-31", state="without")["rows"]] == ["2026-10-06"]
+    assert _ask(owner, "payments", since="2026-10-01", until="2026-10-31", contract=first)["totals"]["payments"] == 1
+    described = _ok(owner.get(f"{MODEL}/describe"))
+    assert described["home"]["payments"] == {"open": True, "without": True} and described["home"]["participants"]

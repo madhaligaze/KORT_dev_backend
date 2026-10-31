@@ -134,8 +134,15 @@ class MeasureField:
     archived_at: None = None
 
 
-def measure_fields() -> dict[str, MeasureField]:
-    return {item.key: MeasureField(item.key, item.type, item.title) for item in MEASURES if item.key in COLUMN_MEASURES}
+def measure_fields(session: Session | None = None, workspace_id: uuid.UUID | None = None) -> dict[str, MeasureField]:
+    """Меры колонками листа; с компанией - и её формулы (`core/formulas.py`): «проценты» для листа - число."""
+    out = {item.key: MeasureField(item.key, item.type, item.title) for item in MEASURES if item.key in COLUMN_MEASURES}
+    if session is not None and workspace_id is not None:
+        from app.finance.core import formulas
+
+        for item in formulas.of(session, workspace_id):
+            out[item.key] = MeasureField(item.key, "money" if item.type == "money" else "number", item.title)
+    return out
 
 
 # ── Шаблоны ──────────────────────────────────────────────────────────────────
@@ -368,6 +375,12 @@ def _departments(session: Session, workspace_id: uuid.UUID) -> dict[uuid.UUID, D
     }
 
 
+def _formulas(session: Session, workspace_id: uuid.UUID) -> list[Any]:
+    from app.finance.core import formulas
+
+    return formulas.of(session, workspace_id)
+
+
 def listing(session: Session, workspace: Workspace, viewer: Viewer) -> dict[str, Any]:
     """Виды, которые человек видит, с отметкой «в колонке»; шаблоны и каталоги - для настройки."""
     ensure(session, workspace)
@@ -386,7 +399,8 @@ def listing(session: Session, workspace: Workspace, viewer: Viewer) -> dict[str,
             for item in templates_of(workspace).values()
             if viewer.sees(SOURCES[item.source].resource)
         ],
-        "measures": [{"key": item.key, "title": item.title, "type": item.type, "note": item.note} for item in MEASURES],
+        "measures": [{"key": item.key, "title": item.title, "type": item.type, "note": item.note} for item in MEASURES]
+        + [{"key": item.key, "title": item.title, "type": item.type, "note": item.text, "formula": True} for item in _formulas(session, workspace.id)],
         "sources": {
             key: {
                 "title": source.title,
@@ -712,7 +726,7 @@ def create(
         draft.title = str(data["title"]).strip()
     if not draft.title:
         raise FinanceError("Назовите вид")
-    _apply_fields(draft, data, departments)
+    _apply_fields(draft, data, departments, formula_keys(session, workspace.id))
     # Вид компании - в колонке у всех; отдела и свой - у владельца.
     draft.pin = str(data["pin"]) if data.get("pin") in VIEW_PINS else ("all" if owner_department is None and owner_user is None else "owner")
 
@@ -782,7 +796,16 @@ def _add_sheets(session: Session, workspace: Workspace, book: str, sheets: list[
     session.flush()
 
 
-def _apply_fields(draft: Any, data: Mapping[str, Any], departments: Mapping[uuid.UUID, Department]) -> None:
+def formula_keys(session: Session, workspace_id: uuid.UUID) -> tuple[str, ...]:
+    """Формулы компании (`core/formulas.py`) - тоже меры вида договоров."""
+    from app.finance.core import formulas
+
+    return tuple(item.key for item in formulas.of(session, workspace_id))
+
+
+def _apply_fields(
+    draft: Any, data: Mapping[str, Any], departments: Mapping[uuid.UUID, Department], formulas: Iterable[str] = (),
+) -> None:
     """Отбор, меры, группировки, формы и параметры из запроса - с проверкой по источнику."""
     source = SOURCES[draft.source]
     if "filter" in data:
@@ -795,7 +818,7 @@ def _apply_fields(draft: Any, data: Mapping[str, Any], departments: Mapping[uuid
     if "measures" in data:
         if draft.source != "contracts":
             raise FinanceError("Меры есть только у вида договоров")
-        draft.measures = _clean_list(data.get("measures"), MEASURE_BY_KEY, "Меры")
+        draft.measures = _clean_list(data.get("measures"), (*MEASURE_BY_KEY, *formulas), "Меры")
     if "groups" in data:
         draft.groups = _clean_list(data.get("groups"), source.groups, "Группировки")
     if "forms" in data:
@@ -833,7 +856,7 @@ def update(
         department_id, user_id = _owner(data.get("owner"), viewer, departments)
         _check_owner(viewer, department_id, user_id)
         view.owner_department_id, view.owner_user_id = department_id, user_id
-    _apply_fields(view, data, departments)
+    _apply_fields(view, data, departments, formula_keys(session, workspace.id))
     if "pin" in data:
         if data.get("pin") not in VIEW_PINS:
             raise FinanceError("Закрепление - всем, владельцу или никому")
@@ -1069,6 +1092,10 @@ def ask(
         "status": "status" not in access.hidden,
     }
     department = share_department(view)
+    # Формулы компании, которые вид спрашивает: считаются из мер строки (`core/formulas.py`).
+    from app.finance.core import formulas as formulas_module
+
+    asked_formulas = [item for item in formulas_module.of(session, workspace.id) if item.key in (view.measures or [])]
     money_open = "amount" not in access.hidden
     paid_open = "summary_paid" not in access.hidden and money_open
     people_shares = shares_module.all_visible(session, workspace, access).get("contracts", {}) if "people" in (view.groups or []) else {}
@@ -1112,6 +1139,10 @@ def ask(
             "age_months": facts["age_months"],
             "month": month,
         }
+        if asked_formulas:
+            numbers = formulas_module.values_of(measures)
+            for formula in asked_formulas:
+                measures[formula.key] = formulas_module.shown(formula, formulas_module.evaluate(formula.text, numbers))
         if match is not None and match.source == "kort":
             measures["paid_source"] = "kort"
         elif found:

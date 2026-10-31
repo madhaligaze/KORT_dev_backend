@@ -24,6 +24,7 @@
 """
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import date
 from decimal import Decimal
@@ -250,6 +251,48 @@ def _left(ctx: Ctx, ref: str, data: dict[str, Any]) -> dict[str, Any]:
             _part("оплачено", paid_part, "-", ref=refs.make("paid", d=data.get("d"), **link)),
         ],
     )
+
+
+def _formula(ctx: Ctx, ref: str, data: dict[str, Any]) -> dict[str, Any]:
+    """Формула компании у договора: её меры с их ссылками и то, что из них вышло (`core/formulas.py`)."""
+    from app.finance.contracts.service import age_months
+    from app.finance.core import formulas
+
+    found = next((item for item in formulas.of(ctx.session, ctx.workspace.id) if item.key == data.get("m")), None)
+    if found is None:
+        raise FinanceError("Такой формулы у компании больше нет")
+    contract, registry = _contract(ctx, data.get("c"))
+    day = _day(data.get("d"))
+    fraction = _fraction(data.get("f")) or Decimal(1)
+    hidden = ctx.access.hidden
+    amount = contract.amount * fraction if contract.amount is not None and "amount" not in hidden else None
+    paid = None
+    if not {"amount", "summary_paid"} & hidden:
+        whole, _parts, _source = _paid_parts(ctx, contract, registry, day)
+        paid = whole * fraction if whole is not None else None
+    remaining = amount - paid if amount is not None and paid is not None else None
+    values = {"amount": amount, "paid": paid, "remaining": remaining, "age": Decimal(age_months(contract.signed_at, day) or 0)}
+    link = {"c": data.get("c"), "f": data.get("f")}
+    ref_of = {
+        "amount": refs.make("amount", **link),
+        "paid": refs.make("paid", d=data.get("d"), **link),
+        "remaining": refs.make("left", d=data.get("d"), **link),
+    }
+    used = formulas.names(found.text)
+    parts = [
+        {"title": formulas.VARIABLES[name][1], "name": name,
+         "value": _money(values[name]) if name != "age" else format(values[name], "f"),
+         "sign": "=", **({"ref": ref_of[name]} if name in ref_of and values[name] is not None else {})}
+        for name in formulas.VARIABLES if name in used
+    ]
+    value = formulas.shown(found, formulas.evaluate(found.text, values))
+    words = found.text
+    for name, (_key, title) in formulas.VARIABLES.items():
+        words = re.sub(rf"\b{name}\b", title, words)
+    return {
+        "version": VERSION, "ref": ref, "title": f"{found.title} {_label(contract)}", "value": value, "formula": words,
+        "parts": parts, "check": value, "exact": value is not None, "type": found.type,
+    }
 
 
 # ── Вид договоров: части листа, сотрудники, возраст, итог колонки ────────────
@@ -592,6 +635,7 @@ def _bill(ctx: Ctx, ref: str, data: dict[str, Any]) -> dict[str, Any]:
 
 
 HANDLERS = {
+    "formula": _formula,
     "amount": _amount,
     "paid": _paid,
     "left": _left,

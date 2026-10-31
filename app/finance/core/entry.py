@@ -423,6 +423,12 @@ def undo(session: Session, workspace: Workspace, access: Access, actor: Actor, k
         done.append(f"выписка убрана: {len(rows)} операций")
     elif kind == "entry_party":
         undo_party(session, workspace, payload, done, skipped)
+    elif kind == "entry_formula":
+        from app.finance.core import formulas
+
+        _require_setup(access)
+        formulas.restore(session, workspace, actor, payload.get("before") or [])
+        done.append("формулы компании - как были")
     else:
         skipped.append("шаг, который эта версия KORT вернуть не умеет")
 

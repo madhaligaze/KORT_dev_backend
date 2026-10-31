@@ -45,6 +45,7 @@ from app.finance.contracts.models import (
     ListValue,
 )
 from app.finance.contracts.service import Access, Registry, today
+from app.finance.core import formulas as core_formulas
 from app.finance.core import views as core_views
 from app.finance.models import POSITION_STEP, Account, Counterparty, Workspace
 from app.finance.service import FinanceError
@@ -143,6 +144,12 @@ def schema(session: Session, workspace: Workspace, access: Access) -> dict[str, 
             {"key": item.key, "title": item.title, "type": item.type}
             for item in core_views.MEASURES
             if item.key in core_views.COLUMN_MEASURES and item.key not in access.hidden
+        ]
+        # Формулы компании - меры колонкой листа, только чтение; значения - вызовом «спросить».
+        + [
+            {"key": item.key, "title": item.title, "type": "money" if item.type == "money" else "number",
+             "formula": item.text, "kind": item.type, "digits": item.digits}
+            for item in core_formulas.of(session, workspace.id)
         ],
         # Откуда «Оплачено (сводка)»: книга, лист, когда прочитана. Без
         # похода в Google - схему перечитывают на каждую настройку.
