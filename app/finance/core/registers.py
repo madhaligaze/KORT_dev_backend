@@ -60,7 +60,8 @@ from app.finance.models import Workspace
 
 #: Версия расчёта итогов: правка правил начислений или разнесения - поднять,
 #: и регистры всех компаний пересчитаются при первом чтении.
-REVISION = 1
+#: 2 - месяц до начала учёта, названный оплатой (`core/payments.py`, 01.11.2026).
+REVISION = 2
 _ZERO = Decimal("0")
 _FAR = date(1900, 1, 1)
 _CHUNK = 500
@@ -145,14 +146,18 @@ class Settlement:
         received: dict[str, Decimal] = defaultdict(lambda: _ZERO)
         for payment in money.payments:
             received[month_key(payment.paid_at)] += payment.amount
+        # Сверх сальдо за период до учёта («Старые (…)», «за май» при учёте с июня) -
+        # не аванс и не оплата месяцев учёта: иначе «долг» договора расходился с его
+        # месяцами (полигон, О9: август не оплачен, а долг 0 и аванс 130 000).
+        before = sum((part.amount for part in money.over if part.by == "old"), _ZERO)
         return cls(
             contract_id=money.contract_id,
             since=money.since,
             opening=money.opening,
             accrues=money.accrues,
             lines=lines,
-            over=sum((part.amount for part in money.over if part.payment.source != "opening"), _ZERO),
-            paid=sum((payment.amount for payment in money.payments), _ZERO),
+            over=sum((part.amount for part in money.over if part.payment.source != "opening" and part.by != "old"), _ZERO),
+            paid=sum((payment.amount for payment in money.payments), _ZERO) - before,
             attributed={key: value for key, value in attributed.items() if value},
             received={key: value for key, value in received.items() if value},
         )

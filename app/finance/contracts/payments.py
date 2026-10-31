@@ -398,6 +398,36 @@ def _paid_for(operation: Any) -> tuple[int, int]:
     return (day.year - 1 if month > day.month + 1 else day.year), month
 
 
+#: Месяц, перед которым число, - дата («от 15 сентября 2026»), а не «за какой месяц».
+_DAY_BEFORE = re.compile(r"\d{1,2}\s*$")
+
+
+def months_named(comment: str, paid_at: date) -> tuple[str, str] | None:
+    """За какие месяцы платёж словами назначения: первый и последний ключ месяца или `None`.
+
+    «Оплата по договору 01/2026 за услуги сентябрь 2026» → сентябрь;
+    «за сентябрь-октябрь 2026» → сентябрь и октябрь. Месяц после числа - дата
+    («счёт от 15 сентября 2026»), не период. Без года - ближайший к платежу,
+    как в `_paid_for`. Подсказка слабее периода из источника: журнал берёт
+    её, только когда своего периода у операции нет (`core/journal.py`).
+    Больше года между месяцами - не период, а перечень дат: подсказки нет.
+    """
+    text = norm(comment or "")
+    keys: list[str] = []
+    for match in _MONTH_NAMED.finditer(text):
+        if _DAY_BEFORE.search(text[: match.start()]):
+            continue
+        month = next(index for index, stem in enumerate(_MONTH_STEMS, start=1) if match.group(1).startswith(stem))
+        year = int(match.group(2)) if match.group(2) else (paid_at.year - 1 if month > paid_at.month + 1 else paid_at.year)
+        keys.append(f"{year:04d}-{month:02d}")
+    if not keys:
+        return None
+    first, last = min(keys), max(keys)
+    if (int(last[:4]) * 12 + int(last[5:])) - (int(first[:4]) * 12 + int(first[5:])) > 11:
+        return None
+    return first, last
+
+
 def _pair_twins(
     result: Allocation, operations: list[Any], manual: dict[uuid.UUID, uuid.UUID | None], sides: list[Side], by_party: set[uuid.UUID]
 ) -> None:

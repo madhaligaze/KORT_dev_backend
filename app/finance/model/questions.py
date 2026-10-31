@@ -18,6 +18,9 @@
 * `arrived` - что пришло: факты журнала, впервые записанные с дня `since`.
 * `documents` - дела по АВР и ЭСФ списком: не подписан, без ЭСФ после срока,
   месяц начислен - АВР нет.
+* `start` - первые шаги компании: наше юрлицо с БИН, договоры, деньги
+  (выписка, 1С или сводная таблица). Пока шаги не пройдены, пустые пункты
+  угроз говорят «считать не из чего», а не «всё хорошо».
 
 Вопросы файла (порядок частей даты, скрытая строка реестра, сумма с даты)
 остаются в загрузке: без ответа файл не положить, и команда спрашивает
@@ -362,7 +365,10 @@ def _cash(ctx: Ctx, day: date) -> dict[str, Any] | None:
         "note": "", "open": {"source": "calendar"},
     }
     if not gaps:
-        item["empty"] = "Разрывов в окне календаря нет"
+        state = _company(ctx)
+        item["empty"] = (
+            "Разрывов в окне календаря нет" if state["contracts"] or state["money"] else "Договоров и денег ещё нет - считать не из чего"
+        )
         return item
     first = gaps[0]
     item["amount"] = first["deficit"]
@@ -399,6 +405,7 @@ def _debts(ctx: Ctx, day: date) -> dict[str, Any] | None:
 
 
 def _unbilled(ctx: Ctx, day: date) -> dict[str, Any] | None:
+    from app.finance.core import today as today_module
     from app.finance.model import ask as ask_module
 
     if not ctx.can("invoices"):
@@ -411,7 +418,7 @@ def _unbilled(ctx: Ctx, day: date) -> dict[str, Any] | None:
         "lines": [], "empty": "", "note": answer.get("error") or "", "open": {"source": "unbilled"},
     }
     if not rows:
-        item["empty"] = "Все счета выставлены"
+        item["empty"] = "Все счета выставлены" if _company(ctx)["contracts"] else today_module.NO_CONTRACTS
     return item
 
 
@@ -425,11 +432,11 @@ def _acts(ctx: Ctx, day: date) -> dict[str, Any] | None:
     count = len(work["unsigned"]) + len(work["no_esf"]) + len(work["missing"])
     item: dict[str, Any] = {
         "key": "acts", "title": "АВР и ЭСФ", "amount": None, "count": count, "unit": "дел", "lines": [], "empty": "",
-        "note": "сводная таблица ещё читается - АВР только KORT и 1С" if book is None else "",
+        "note": today_module.acts_note(ctx.session, ctx.workspace, book),
         "open": {"source": "documents", "params": {"view": "missing"}},
     }
     if not count:
-        item["empty"] = "Акты подписаны, ЭСФ выписаны, у каждого месяца есть АВР"
+        item["empty"] = today_module.acts_empty(ctx.session, ctx.workspace)
         return item
     esf_days = packs.country_of(ctx.workspace).esf_days
     item["lines"] = [
@@ -654,12 +661,97 @@ def documents(ctx: Ctx, raw: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# ── Первые шаги ──────────────────────────────────────────────────────────────
+
+
+def _plural(count: int, one: str, few: str, many: str) -> str:
+    tail = count % 100
+    if 11 <= tail <= 14:
+        return many
+    tail %= 10
+    if tail == 1:
+        return one
+    return few if 2 <= tail <= 4 else many
+
+
+def _company(ctx: Ctx) -> dict[str, Any]:
+    """Что у компании уже есть: наши юрлица, договоры, откуда деньги."""
+    from app.finance.contracts.models import Contract, GroupEntity
+    from app.finance.core import today as today_module
+    from app.finance.models import Counterparty, Operation
+    from app.finance.onec.models import OnecBase
+
+    session, workspace_id = ctx.session, ctx.workspace.id
+    entities = [
+        {"id": str(party_id), "name": name, "bin": entity_bin or party_bin or ""}
+        for party_id, name, entity_bin, party_bin in session.execute(
+            sa.select(GroupEntity.counterparty_id, Counterparty.name, GroupEntity.bin, Counterparty.bin)
+            .join(Counterparty, Counterparty.id == GroupEntity.counterparty_id)
+            .where(GroupEntity.workspace_id == workspace_id, GroupEntity.archived_at.is_(None))
+            .order_by(GroupEntity.position, Counterparty.name)
+        )
+    ]
+    contracts = session.scalar(
+        sa.select(sa.func.count()).select_from(Contract).where(Contract.workspace_id == workspace_id, Contract.deleted_at.is_(None))
+    ) or 0
+    money: list[str] = []
+    if session.scalar(sa.select(Operation.id).where(Operation.workspace_id == workspace_id, Operation.deleted_at.is_(None)).limit(1)):
+        money.append("выписки банка")
+    if session.scalar(sa.select(OnecBase.id).where(OnecBase.workspace_id == workspace_id).limit(1)):
+        money.append("1С")
+    if today_module.has_summary(session, ctx.workspace):
+        money.append("сводная таблица")
+    return {"entities": entities, "contracts": contracts, "money": money}
+
+
+def start(ctx: Ctx, raw: dict[str, Any]) -> dict[str, Any]:
+    """Первые шаги: без юрлица, договоров и денег KORT считать не из чего.
+
+    Пустая компания видела на «Сегодня» «Вопросов нет» и «Акты подписаны»,
+    а «Первые шаги» лежали в «Ещё» (проход новичка 31.10). Шаг пройден по
+    данным, а не по отметке: завели договор - шаг закрыт, где бы его ни
+    завели. Шаги видит тот, кто настраивает компанию.
+    """
+    state = _company(ctx)
+    entities, contracts, money = state["entities"], state["contracts"], state["money"]
+    without_bin = next((item for item in entities if not item["bin"]), None)
+    if not entities:
+        entity_text = "Наших юрлиц ещё нет"
+    elif without_bin is not None:
+        entity_text = f"{without_bin['name']} - БИН не указан"
+    else:
+        entity_text = ", ".join(item["name"] for item in entities[:3]) + (f" и ещё {len(entities) - 3}" if len(entities) > 3 else "")
+    rows = [
+        {
+            "key": "entity", "title": "Наше юрлицо", "done": bool(entities) and without_bin is None, "text": entity_text,
+            "entity": without_bin["id"] if without_bin else (entities[0]["id"] if entities else None),
+        },
+        {
+            "key": "contracts", "title": "Договоры", "done": contracts > 0,
+            "text": f"{contracts} {_plural(contracts, 'договор', 'договора', 'договоров')}" if contracts else "Договоров ещё нет",
+        },
+        {
+            "key": "money", "title": "Деньги", "done": bool(money),
+            "text": "Из " + ", ".join(money) if money else "Оплат ещё нет",
+        },
+    ]
+    return {
+        "version": VERSION,
+        "question": {"source": "start", "params": {}},
+        "as_of": today().isoformat(),
+        "source": "start",
+        "rows": rows if ctx.access.setup else [],
+        "done": all(row["done"] for row in rows) or not ctx.access.setup,
+    }
+
+
 SOURCES: dict[str, Callable[[Ctx, dict[str, Any]], dict[str, Any]]] = {
     "questions": questions,
     "attention": attention,
     "arrived": arrived,
     "documents": documents,
+    "start": start,
 }
 
 
-__all__ = ["ATTENTION_ITEMS", "DOCUMENT_VIEWS", "QUESTION_KINDS", "SOURCES", "arrived", "attention", "documents", "questions"]
+__all__ = ["ATTENTION_ITEMS", "DOCUMENT_VIEWS", "QUESTION_KINDS", "SOURCES", "arrived", "attention", "documents", "questions", "start"]

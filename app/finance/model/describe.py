@@ -131,6 +131,8 @@ def _home(ctx: Ctx) -> dict[str, Any]:
         "questions": [key for key in questions.QUESTION_KINDS if kinds[key]],
         "attention": [key for key in questions.ATTENTION_ITEMS if questions._visible_item(ctx, key)],
         "arrived": bool(ctx.access.view),
+        # Первые шаги - наше юрлицо, договоры, деньги (`model/questions.start`).
+        "start": bool(ctx.access.setup),
         "documents": {"open": bool(ctx.access.view), "views": list(questions.DOCUMENT_VIEWS)},
         # Списки - участники и оплаты (`model/lists.py`).
         "participants": bool(ctx.access.view),

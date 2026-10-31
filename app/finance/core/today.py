@@ -17,6 +17,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any, Callable
 
+import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
 from app.finance.contracts.service import Access
@@ -37,6 +38,32 @@ def _card(key: str, title: str, *, go: dict[str, Any], **values: Any) -> dict[st
     return {"key": key, "title": title, "go": go, "lines": [], "amount": None, "count": None, "unit": "", "empty": "", "note": "", **values}
 
 
+# ── Что у компании уже есть ──────────────────────────────────────────────────
+#
+# «Делать нечего» и «считать не из чего» - разные ответы. Пустая компания
+# видела «Акты подписаны, ЭСФ выписаны» и «Режимы записаны», не заведя ни
+# одного договора и юрлица (проход новичка 31.10): спокойная карточка без
+# данных - неправда, и с неё человек не узнаёт, с чего начать.
+
+#: Карточка, которой не из чего считать: договоров ещё нет.
+NO_CONTRACTS = "Договоров ещё нет"
+
+
+def has_contracts(session: Session, workspace: Workspace) -> bool:
+    from app.finance.contracts.models import Contract
+
+    return session.scalar(
+        sa.select(Contract.id).where(Contract.workspace_id == workspace.id, Contract.deleted_at.is_(None)).limit(1)
+    ) is not None
+
+
+def has_summary(session: Session, workspace: Workspace) -> bool:
+    """Подключена ли сводная таблица компании - Google или файлом."""
+    from app.finance.contracts.models import SummarySource
+
+    return session.scalar(sa.select(SummarySource.workspace_id).where(SummarySource.workspace_id == workspace.id).limit(1)) is not None
+
+
 def debts_card(session: Session, workspace: Workspace, access: Access, *, today: date) -> dict[str, Any]:
     """Нам должны: неоплаченное, старше 90 дней и самые большие должники."""
     from app.finance.core.debts import Debts
@@ -52,7 +79,13 @@ def debts_card(session: Session, workspace: Workspace, access: Access, *, today:
         amount=totals["owed"], count=sum(1 for item in debts.items.values() if item.owed > 0), unit="договоров",
     )
     if not Decimal(totals["owed"]):
-        card["empty"] = "Долгов по договорам нет"
+        if not has_contracts(session, workspace):
+            card["empty"] = NO_CONTRACTS
+        elif debts.since is None:
+            # Ни одной оплаты: долг - начислено минус оплачено, а оплаченного KORT не знает.
+            card["empty"] = "Оплат в KORT ещё нет - долг посчитается с выпиской банка или 1С"
+        else:
+            card["empty"] = "Долгов по договорам нет"
         return card
     card["lines"] = [
         {"label": "больше 90 дней", "amount": totals["aging"].get("d90plus"), "count": len(old)},
@@ -106,6 +139,15 @@ def acts_work(session: Session, workspace: Workspace, access: Access, *, today: 
     return acts.worklists(contracts, accrued), contracts, book
 
 
+def acts_note(session: Session, workspace: Workspace, book: Any) -> str:
+    """Оговорка про таблицу - только когда она подключена: у компании без таблицы читать нечего."""
+    return "сводная таблица ещё читается - АВР только KORT и 1С" if book is None and has_summary(session, workspace) else ""
+
+
+def acts_empty(session: Session, workspace: Workspace) -> str:
+    return "Акты подписаны, ЭСФ выписаны, у каждого месяца есть АВР" if has_contracts(session, workspace) else NO_CONTRACTS
+
+
 def acts_card(session: Session, workspace: Workspace, access: Access, *, today: date) -> dict[str, Any]:
     """АВР: не подписаны, без ЭСФ после срока, месяц начислен - акта нет."""
     work, _contracts, book = acts_work(session, workspace, access, today=today)
@@ -115,10 +157,9 @@ def acts_card(session: Session, workspace: Workspace, access: Access, *, today: 
         go={"section": "shadow", "session": {"core.shadow.what": "acts", "core.shadow.acts.view": "missing"}},
         count=count, unit="дел",
     )
-    if book is None:
-        card["note"] = "сводная таблица ещё читается - АВР только KORT и 1С"
+    card["note"] = acts_note(session, workspace, book)
     if not count:
-        card["empty"] = "Акты подписаны, ЭСФ выписаны, у каждого месяца есть АВР"
+        card["empty"] = acts_empty(session, workspace)
         return card
     card["lines"] = [
         {"label": "месяц начислен - АВР нет", "count": len(work["missing"]), "go": {"core.shadow.acts.view": "missing"}},
@@ -161,7 +202,13 @@ def vat_card(session: Session, workspace: Workspace, access: Access, *, today: d
     if unknown:
         lines.insert(0, {"label": "режим НДС не записан", "count": len(unknown), "names": [item.code or item.name for item in unknown][:6]})
     if not lines:
-        card["empty"] = "Режимы записаны, до порога далеко"
+        if not years:
+            card["empty"] = "Наших юрлиц ещё нет"
+        elif any(item.status == "unknown" for item in years.values()):
+            # Режим не записан, но и оборота нет: до порога далеко, а «режимы записаны» - неправда.
+            card["empty"] = "До порога далеко"
+        else:
+            card["empty"] = "Режимы записаны, до порога далеко"
         return card
     card["lines"] = lines[:6]
     return card

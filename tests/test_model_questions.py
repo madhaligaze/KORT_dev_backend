@@ -221,7 +221,7 @@ def test_prava_voprosov_i_zakrytye_varianty(owner: TestClient) -> None:
     _one(owner, "contract.create", values={**values, "customer": "Бергауф Астана", "number": "Б-2"})
 
     described = _ok(owner.get(f"{MODEL}/describe"))
-    assert described["version"] == "1.6"
+    assert described["version"] == "1.7"
     assert described["home"]["questions"] == ["payments", "bins", "twins", "reconcile"]
     assert {"participant.merge", "participant.distinct", "participant.bin_reject"} <= {item["name"] for item in described["commands"]}
 

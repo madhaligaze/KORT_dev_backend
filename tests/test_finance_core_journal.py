@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
@@ -223,7 +223,9 @@ def test_perevod_budushchim_chislom_provodit_razneseniye(space):
         journal.ensure(session, space["workspace"])
         assert _by_key(session, space, f"op:{operation_id}")[0].contract_id is None, "BBC Legal - не исполнитель договора"
     with finance_session() as session:
-        changes.transfer(session, _ws(session, space), FULL, OWNER, [vat.Move(space["alfa"], legal, date(2026, 11, 1))])
+        # Перевод - впереди от настоящего сегодня: прибитое «01.11.2026» стало сегодняшним 01.11.2026.
+        ahead = (date.today().replace(day=1) + timedelta(days=62)).replace(day=1)
+        changes.transfer(session, _ws(session, space), FULL, OWNER, [vat.Move(space["alfa"], legal, ahead)])
     with finance_session() as session:
         assert service.get_contract(session, _ws(session, space), space["alfa"]).executor_id == space["bbc"], "перевод - впереди"
         journal.ensure(session, space["workspace"])

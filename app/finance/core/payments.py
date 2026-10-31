@@ -68,6 +68,8 @@ _ZERO = Decimal("0")
 AHEAD_MONTHS = 24
 #: Месяц входящего сальдо в разнесении - раньше любого месяца.
 OPENING = "opening"
+#: Период оплаты, названной за месяц раньше начала учёта: гасит только входящее сальдо.
+BEFORE = "до начала учёта"
 #: Сколько договоров юрлица с той же суммой ещё кандидаты «та же сумма»; больше - не довод.
 SAME_SUM_MAX = 3
 
@@ -79,6 +81,15 @@ def _money(value: Decimal | None) -> str | None:
 def _shift(key: str, by: int) -> str:
     index = int(key[:4]) * 12 + int(key[5:7]) - 1 + by
     return f"{index // 12:04d}-{index % 12 + 1:02d}"
+
+
+def _months_from(first: str, last: str) -> list[str]:
+    """Ключи месяцев от первого до последнего включительно (не больше двух лет)."""
+    out, key = [], first
+    while key <= last and len(out) < 24:
+        out.append(key)
+        key = _shift(key, 1)
+    return out
 
 
 @dataclass(frozen=True)
@@ -100,6 +111,8 @@ class Payment:
     account: str = ""
     #: Период словами источника, когда это не месяц («Старые (…)»): не за месяцы учёта.
     label: str = ""
+    #: «За какой месяц» - словами назначения платежа, а не периодом источника.
+    named: bool = False
 
     def out(self) -> dict[str, Any]:
         return {
@@ -192,7 +205,9 @@ class ContractMoney:
             (bucket.accrued for key, bucket in self.buckets.items() if key != OPENING and bucket.starts <= day),
             _ZERO,
         )
-        return owed - sum((payment.amount for payment in self.payments if payment.paid_at <= day), _ZERO)
+        # Сверх сальдо за период до учёта («Старые (…)», «за май» при учёте с июня) - не долг месяцев учёта.
+        before = sum((part.amount for part in self.over if part.by == "old" and part.payment.paid_at <= day), _ZERO)
+        return owed - sum((payment.amount for payment in self.payments if payment.paid_at <= day), _ZERO) + before
 
     def out(self, *, today: date) -> dict[str, Any]:
         months = [bucket.out() for key, bucket in sorted(self.buckets.items()) if key != OPENING]
@@ -401,6 +416,7 @@ class Money:
             contract_ref=data.get("contract_ref") or "",
             account=self.accounts.get(uuid.UUID(account), "") if account else "",
             label=data.get("label") or "",
+            named=bool(data.get("named")),
         )
 
     def _from_onec(self, fact: Fact) -> Payment:
@@ -474,10 +490,29 @@ class Money:
                 )
             last = max([self.today, *(payment.paid_at for payment in payments)])
             until = month_start(_shift(month_key(last), AHEAD_MONTHS))
+            first = month_key(self.since)
+            # Начало учёта не задано человеком - оно от первой оплаты, и входящего
+            # сальдо нет: что было до неё, KORT не знает. Кроме месяцев, которые
+            # назвала сама оплата: «за сентябрь», пришедшая 15 октября, говорит о
+            # сентябре. Его начисление - в расчёт договора, и оплата гасит его, а
+            # не октябрь; октябрь остаётся долгом. Промежуточные месяцы не
+            # тянутся: о них оплата молчит. С началом, заданным человеком,
+            # месяц до него - оплата входящего сальдо, как раньше.
+            named: set[str] = set()
+            if self.settings.since is None and opening is None:
+                for payment in payments:
+                    if payment.hint is not None and payment.hint[0] < first:
+                        named.update(_months_from(payment.hint[0], min(payment.hint[1], _shift(first, -1))))
             accruals = (ledger or Ledger(self.session, self.workspace.id, [contract])).accruals(
-                contract, since=self.since, until=until
+                contract, since=month_start(min(named)) if named else self.since, until=until
             )
+            early = {
+                accrual.month for accrual in accruals
+                if accrual.month < first and accrual.month in named and not accrual.skipped and accrual.amount
+            }
             for accrual in accruals:
+                if accrual.month < first and accrual.month not in early:
+                    continue
                 amount = _ZERO if accrual.skipped else (accrual.amount or _ZERO)
                 bucket = buckets.setdefault(
                     accrual.month, Bucket(accrual.month, _ZERO, due=accrual.period_from, executor=accrual.executor_id)
@@ -488,12 +523,21 @@ class Money:
                 first_month = next((key for key in sorted(buckets) if key != OPENING), None)
                 buckets[OPENING].executor = buckets[first_month].executor if first_month else contract.executor_id
             accrues = any(bucket.accrued > 0 for key, bucket in buckets.items() if key != OPENING)
-            first = month_key(self.since)
             # «За май», когда учёт с июня, - оплата входящего сальдо: её гасит порядок.
-            placed = [
-                payment if payment.hint is None or payment.hint[1] >= first else replace(payment, hint=None)
-                for payment in payments
-            ]
+            # Кроме месяца, который KORT знает из самой оплаты (`early` выше).
+            placed: list[Payment] = []
+            for payment in payments:
+                if payment.hint is None or payment.hint[1] >= first or any(key in early for key in _months_from(*payment.hint)):
+                    placed.append(payment)
+                elif payment.named:
+                    # «Оплата за май» словами назначения, когда учёт с июня: платёж
+                    # за период до учёта - гасит входящее сальдо, а сверх него
+                    # остаётся «до учёта», как «Старые (…)». Порядком он уезжал
+                    # в первый свободный месяц учёта и закрывал чужой долг
+                    # (полигон, О9: «за май» 03.06 гасил неоплаченный август).
+                    placed.append(replace(payment, hint=None, label=payment.label or BEFORE))
+                else:
+                    placed.append(replace(payment, hint=None))
             over = allocate_months(credit + placed, buckets)
             if not accrues:
                 # Начислений KORT не считает: оплата - в месяце платежа, а не «сверх».

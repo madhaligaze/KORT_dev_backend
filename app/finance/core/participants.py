@@ -193,6 +193,11 @@ def _own_entities(session: Session, workspace: Workspace) -> dict[uuid.UUID, Gro
     }
 
 
+def has_legal_form(name: str) -> bool:
+    """Начинается ли имя с организационной формы: «ТОО «Ромашка»», «ИП Сериков», «Акционерное общество …»."""
+    return bool(_FORM.match(_expand(name)))
+
+
 #: Организационная форма внутри названия счёта: «Kaspi Юр. ТОО "Тумар Офис"»,
 #: «Депозит TOO "…"» (латиницей - так тоже пишут).
 _FORM_INSIDE = re.compile(r"(?:^|[\s.,(])(тоо|too|ип|ао|llp|ооо)(?=[\s\"«“'])", re.IGNORECASE)

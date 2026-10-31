@@ -327,10 +327,18 @@ def _journal_drafts(session: Session, workspace: Any, operations: set[uuid.UUID]
             # Списание без договора - не оплата: зарплата, налоги, переводы.
             continue
         account = operation.account_to_id if operation.kind == "income" else operation.account_from_id
+        months = _months(operation.period_start, operation.period_end, operation.accrued_at)
+        named = None
+        if months is None and not operation.period_label:
+            # У строки выписки своего периода нет - месяц словами назначения
+            # («за услуги сентябрь 2026»). Без него оплата за сентябрь гасила
+            # октябрь, а сентябрь числился закрытым (проход новичка 31.10).
+            named = contract_payments.months_named(operation.comment or "", operation.paid_at)
+            months = list(named) if named else None
         data = {
             "direction": "in" if operation.kind == "income" else "out",
             "account": account, "how": found[1] if found else None,
-            "months": _months(operation.period_start, operation.period_end, operation.accrued_at),
+            "months": months, "named": True if named else None,
             "label": operation.period_label, "comment": operation.comment, "contract_ref": operation.contract_ref,
             "open": sorted(str(item) for item in candidates) if candidates else None,
             "third": True if operation.id in allocation.third else None,

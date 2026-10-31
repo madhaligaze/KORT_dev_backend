@@ -137,7 +137,12 @@ def test_platelshchik_ne_idet_k_porogu_i_dovod_iz_naznacheniy(space):
         assert Decimal(rows["BBCL"]["remaining"]) == threshold - Decimal("6000000"), "до порога - оборот до даты постановки"
 
 
-def test_perevod_klientov_predprosmotr_zapis_i_vozvrat(space):
+def test_perevod_klientov_predprosmotr_zapis_i_vozvrat(space, monkeypatch):
+    # «Впереди» - от дня теста, а не от настоящего: 01.11.2026 перестало быть будущим ровно 01.11.2026.
+    from app.finance.contracts import amendments
+
+    for module in (changes, amendments, service):
+        monkeypatch.setattr(module, "today", lambda: TODAY)
     token = history.CONTEXT.set(history.AuditContext(user_id=OWNER.user_id))
     try:
         with finance_session() as session:

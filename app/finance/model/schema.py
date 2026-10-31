@@ -31,13 +31,13 @@ class AskIn(_In):
 
     view: str | None = Field(default=None, max_length=64, description="Ключ вида; реестр - пустая строка")
     source: Literal[
-        "contracts", "debts", "unbilled", "calendar", "questions", "attention", "arrived", "documents", "participants", "payments",
+        "contracts", "debts", "unbilled", "calendar", "questions", "attention", "arrived", "documents", "start", "participants", "payments",
     ] | None = Field(
         default=None,
         description=(
             "calendar - платёжный календарь: params from, to, days, scenario, exclude (describe → calendar); "
             "questions - что ждёт решения (params.kind); attention - что под угрозой (params.item); "
-            "arrived - что пришло (params.since); documents - дела по АВР и ЭСФ (params.view) - describe → home; "
+            "arrived - что пришло (params.since); documents - дела по АВР и ЭСФ (params.view); start - первые шаги компании - describe → home; "
             "participants - участники (params.q, show); payments - оплаты за период (params.since, until, state, contract, party)"
         ),
     )

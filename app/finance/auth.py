@@ -418,6 +418,16 @@ def register(
     )
     session.flush()
     people.ensure_employee(session, workspace.id, user)
+    from app.finance.core import participants
+
+    if participants.has_legal_form(title):
+        # «ТОО «Ромашка»» в поле «Компания» - юрлицо, а не название группы: оно
+        # сразу наше. Иначе первый же договор просил завести его второй раз
+        # («+ Завести «ТОО «Ромашка»» нашим юрлицом»), а «Сегодня» молчало о
+        # НДС. «ГК Ромашка» без формы - не юрлицо, его юрлица заводит человек.
+        from app.finance.contracts import setup as contracts_setup
+
+        contracts_setup.add_entity(session, workspace, name=title)
 
     token, record = _open_session(
         session, user=user, workspace_id=workspace.id, user_agent=user_agent, ip=ip

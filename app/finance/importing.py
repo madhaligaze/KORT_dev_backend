@@ -696,6 +696,7 @@ class StatementInfo:
             "account_number": self.account_number,
             "card_number": "",
             "owner": self.owner,
+            "owner_bin": self.owner_bin,
             "bank_name": self.bank,
             "account": account,
         }

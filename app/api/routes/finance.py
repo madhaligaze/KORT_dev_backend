@@ -2279,12 +2279,13 @@ def _preview_response(
             name: str(entity.counterparty_id)
             for name, entity in participants.entities_of_accounts(session, workspace, preview.accounts_missing).items()
         }
+    bank = service.reconcile_statement(session, workspace, preview)
     return {
         "batch_id": str(batch.id),
         "file_name": preview.file_name,
         "header_line": preview.header_line,
         "counts": preview.counts,
-        "question": preview.question,
+        "question": _statement_account(session, workspace, preview.question, bank),
         "date_order": preview.date_reading.order,
         "date_evidence": preview.date_reading.evidence,
         "mapping": preview.mapping,
@@ -2294,7 +2295,7 @@ def _preview_response(
         "entities": entities,
         "accounts_suggested": preview.accounts_suggested,
         # Сверка с остатками, которые напечатал банк, - PDF или таблицей.
-        "bank": service.reconcile_statement(session, workspace, preview),
+        "bank": bank,
         "rules_applied": rule_hits,
         "rows": [
             {
@@ -2306,6 +2307,54 @@ def _preview_response(
             }
             for row in preview.rows
         ],
+    }
+
+
+def _statement_account(session: Any, workspace: Any, question: dict[str, Any] | None, bank: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Новый счёт из шапки выписки - сразу с юрлицом и остатком, которые напечатал банк.
+
+    Счёт без юрлица оплаты на него не относил ни к одному договору нашего
+    ТОО, а «Деньги вперёд» держали его в «без юрлица». Остаток на начало
+    периода экран предлагал мелкой строкой, похожей на подпись, и его не
+    записывали: календарь считал деньги с нуля (проход новичка 31.10:
+    898 500 при банке 1 398 500). Новый счёт рождается этой выпиской, и
+    её остаток на первый день - его начальный остаток, а не догадка.
+    Юрлицо - по БИН владельца из шапки, иначе по имени целиком
+    (`participants.entities_of_accounts`); ни одного или два - решает человек.
+    """
+    create = (question or {}).get("create") if (question or {}).get("kind") == "account" else None
+    if not create or not create.get("number") or not bank:
+        return question
+    from app.finance.contracts.models import GroupEntity
+    from app.finance.core import participants
+
+    owner_bin = str(bank.get("owner_bin") or "").strip()
+    entity_id: UUID | None = None
+    if owner_bin:
+        hits = {
+            party_id
+            for party_id, entity_bin, party_bin in session.execute(
+                sa.select(GroupEntity.counterparty_id, GroupEntity.bin, Counterparty.bin)
+                .join(Counterparty, Counterparty.id == GroupEntity.counterparty_id)
+                .where(GroupEntity.workspace_id == workspace.id, GroupEntity.archived_at.is_(None))
+            )
+            if owner_bin in (entity_bin, party_bin)
+        }
+        entity_id = next(iter(hits)) if len(hits) == 1 else None
+    if entity_id is None and bank.get("owner"):
+        found = participants.entities_of_accounts(session, workspace, [str(bank["owner"])])
+        entity_id = next(iter(found.values())).counterparty_id if found else None
+    owner = session.get(Counterparty, entity_id) if entity_id is not None else None
+    opening = bank.get("opening_balance") if bank.get("period_start") else None
+    return {
+        **question,
+        "create": {
+            **create,
+            "group_entity_id": str(entity_id) if entity_id is not None else None,
+            "owner": owner.name if owner is not None else "",
+            "starting_balance": opening,
+            "period_start": bank.get("period_start") if opening is not None else None,
+        },
     }
 
 

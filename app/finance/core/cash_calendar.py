@@ -638,8 +638,8 @@ class Calendar:
         for account_id, start_balance in self.session.execute(
             sa.select(Account.id, Account.starting_balance).where(Account.workspace_id == self.workspace.id)
         ):
-            if account_id in self.accounts:
-                opening[self.accounts[account_id]] += Decimal(str(start_balance or 0))
+            if account_id in self.accounts and start_balance:
+                opening[self.accounts[account_id]] += Decimal(str(start_balance))
         fact_lines: dict[tuple[uuid.UUID | None, str, int], Decimal] = defaultdict(lambda: _ZERO)
         last_fact = min(self.today, self.end)
         for row in facts:
@@ -657,7 +657,10 @@ class Calendar:
                 elif row.paid_at <= last_fact:
                     board(entity)
                     fact_lines[(entity, "in" if signed > 0 else "out", index_of[row.paid_at])] += abs(signed)
-        for entity in set(opening) | set(self.accounts.values()) | {item.entity for item in self.items}:
+        # Счёт без юрлица - колонка, только если на нём что-то есть: пустые «Банковский
+        # счёт» и «Касса» новой компании давали «без юрлица» из одних нулей.
+        owned = {entity for entity in self.accounts.values() if entity is not None}
+        for entity in set(opening) | owned | {item.entity for item in self.items}:
             board(entity)
         for entity, target in boards.items():
             target.fact_in = [fact_lines.get((entity, "in", position), _ZERO) for position in range(len(days))]
