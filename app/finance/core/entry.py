@@ -421,8 +421,56 @@ def undo(session: Session, workspace: Workspace, access: Access, actor: Actor, k
             operation.version += 1
         session.flush()
         done.append(f"выписка убрана: {len(rows)} операций")
+    elif kind == "entry_party":
+        undo_party(session, workspace, payload, done, skipped)
     else:
         skipped.append("шаг, который эта версия KORT вернуть не умеет")
+
+
+def party_state(party: Counterparty) -> dict[str, Any]:
+    """Что команда участника может поменять - для шага `entry_party`: БИН, вид лица, полное имя, пометки."""
+    return {
+        "id": str(party.id),
+        "bin": party.bin or "",
+        "kind": party.kind or "",
+        "full_name": party.full_name or "",
+        "details": dict(party.details or {}),
+    }
+
+
+def undo_party(session: Session, workspace: Workspace, payload: dict[str, Any], done: list[str], skipped: list[str]) -> None:
+    """Вернуть участника, как был до команды: БИН, полное имя, «не тот номер», «это разные»; новые написания - убрать."""
+    from app.finance.contracts.models import Contract, CounterpartyName
+    from app.finance.core import participants
+
+    for item in payload.get("parties") or []:
+        party = session.get(Counterparty, uuid.UUID(item["id"]))
+        if party is None or party.workspace_id != workspace.id or party.merged_into_id is not None:
+            skipped.append("участник сведён или удалён - вернуть нечего")
+            continue
+        bin_changed = (party.bin or "") != item.get("bin", "")
+        if bin_changed and item.get("bin") and participants.owner_of_bin(session, workspace, item["bin"], but=party.id) is not None:
+            skipped.append(f"«{party.name}»: БИН {item['bin']} уже у другого участника")
+            continue
+        party.bin, party.kind = item.get("bin", ""), item.get("kind", "")
+        party.full_name = item.get("full_name", "")
+        party.details = dict(item.get("details") or {})
+        entity = session.get(GroupEntity, party.id)
+        if entity is not None:
+            entity.bin = party.bin
+        if bin_changed:
+            # БИН решает, чья оплата: договоры стороны - с новым номером, журнал проведёт их заново.
+            participants._touch(
+                session, workspace,
+                session.scalars(sa.select(Contract.id).where(sa.or_(Contract.customer_id == party.id, Contract.executor_id == party.id))),
+            )
+        done.append(f"«{party.name}» - как был")
+    for raw in payload.get("aliases") or []:
+        alias = session.get(CounterpartyName, uuid.UUID(raw))
+        if alias is not None and alias.workspace_id == workspace.id:
+            session.delete(alias)
+            done.append(f"написание «{alias.name}» убрано")
+    session.flush()
 
 
 __all__ = [
@@ -431,10 +479,12 @@ __all__ = [
     "add_account",
     "add_entity",
     "delete_payment",
+    "party_state",
     "payment_state",
     "record_payment",
     "start",
     "undo",
+    "undo_party",
     "update_payment",
     "use_source",
 ]

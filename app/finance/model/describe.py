@@ -82,6 +82,7 @@ def describe(ctx: Ctx) -> dict[str, Any]:
                 "exclude": {"title": "Строки, которые не считать в остатке (начала ключей строк)"},
             },
         },
+        "home": _home(ctx),
         "views": listing["views"],
         "templates": listing["templates"],
         "commands": [
@@ -100,6 +101,24 @@ def _today() -> str:
     from app.finance.contracts.service import today
 
     return today().isoformat()
+
+
+def _home(ctx: Ctx) -> dict[str, Any]:
+    """Главный экран: какие виды вопросов и пункты угроз открыты спрашивающему - оболочка спрашивает их порознь."""
+    from app.finance.model import questions
+
+    kinds = {
+        "payments": ctx.access.setup,
+        "bins": ctx.access.view,
+        "twins": ctx.access.view,
+        "reconcile": ctx.access.setup,
+    }
+    return {
+        "questions": [key for key in questions.QUESTION_KINDS if kinds[key]],
+        "attention": [key for key in questions.ATTENTION_ITEMS if questions._visible_item(ctx, key)],
+        "arrived": bool(ctx.access.view),
+        "documents": {"open": bool(ctx.access.view), "views": list(questions.DOCUMENT_VIEWS)},
+    }
 
 
 __all__ = ["SOURCE_PARAMS", "describe"]

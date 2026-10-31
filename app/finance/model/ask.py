@@ -86,7 +86,7 @@ def question_of(ctx: Ctx, raw: dict[str, Any]) -> tuple[View, dict[str, Any], da
         return view, asked, day
     source = str(raw.get("source") or "")
     if source not in views_module.SOURCES:
-        raise FinanceError("Источник вопроса - contracts, debts, unbilled или calendar")
+        raise FinanceError("Источник вопроса - contracts, debts, unbilled, calendar, questions, attention, arrived или documents")
     if not ctx.viewer.sees(views_module.SOURCES[source].resource):
         raise PermissionError(f"Источник «{views_module.SOURCES[source].title}» вам не открыт")
     spec = views_module.SOURCES[source]
@@ -160,6 +160,11 @@ def ask(ctx: Ctx, raw: dict[str, Any], *, force: bool = False, wait: float | Non
         from app.finance.model import cash
 
         return cash.ask(ctx, raw)
+    if raw.get("source") in ("questions", "attention", "arrived", "documents"):
+        # Главный экран и дела по АВР - свои ответы (`model/questions.py`).
+        from app.finance.model import questions
+
+        return questions.SOURCES[str(raw["source"])](ctx, raw)
     view, asked, day = question_of(ctx, raw)
     if view.source == "contracts":
         body = contracts(ctx, view, asked, day)

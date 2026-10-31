@@ -61,3 +61,60 @@ def test_poligon_celikom_dohodit_do_pravdy(polygon, finance_db) -> None:
         for stop in result.of(kind):
             assert stop.case, stop
             assert next(case for case in CASES if case.id == stop.case).expect == kind, stop
+
+
+def test_poligon_ochered_resheniy_po_katalogu(polygon, finance_db, monkeypatch) -> None:
+    """Очередь «решить» (этап 3): вопросы оплат полигона - случаи каталога, по одному на случай.
+
+    Оплаты холдинга за дочку (У7) - один вопрос на плательщика, а не по вопросу
+    на каждую: человек отвечает один раз. Ответы - вариантами очереди (их
+    команды и параметры, «другой договор» - с договором правды), и после них
+    долги на 25.10 - правда до тенге, а очередь пуста.
+    """
+    import uuid
+
+    from app.finance.contracts import service
+    from app.finance.model import apply as apply_module
+    from app.finance.model import questions
+    from app.finance.model.context import system
+    from app.finance.models import Operation
+
+    world, files = polygon
+    monkeypatch.setattr(questions, "today", lambda: whole.TODAY)
+    monkeypatch.setattr(service, "today", lambda: whole.TODAY)
+    with finance_session() as session:
+        workspace = finance_service.ensure_workspace(session)
+        robot = whole.Robot(session, workspace, world, files)
+        for name in whole.STEPS:
+            if name != "payments":
+                getattr(robot, name)()
+        ctx = system(session, workspace)
+        rows = questions.questions(ctx, {"params": {"kind": "payments"}})["rows"]
+
+        cases: Counter[str] = Counter()
+        for row in rows:
+            operations = [session.get(Operation, uuid.UUID(item["id"])) for item in row["objects"] if item["type"] == "operation"]
+            case = whole._payment_case(world, operations[0], (OFFER,) if row["suggested"] else (ASK,))
+            cases[case] += 1
+            if case == "У7":
+                assert row["count"] > 1, "оплаты холдинга - одним вопросом"
+                assert {whole._payment_case(world, item, (ASK,)) for item in operations} == {"У7"}
+            if row["suggested"]:
+                option = next(item for item in row["options"] if item["key"] == row["suggested"])
+                extra = {}
+            else:
+                truth = whole._truth_contract(session, workspace, world, operations[0], robot.by_code)
+                assert truth is not None, row["text"]
+                option = next((item for item in row["options"] if item["key"] == f"link:{truth}"), None)
+                extra = {}
+                if option is None:
+                    option = next(item for item in row["options"] if item["key"] == "pick")
+                    extra = {"contract": str(truth)}
+            assert option["open"]
+            apply_module.apply(ctx, [{"command": item["command"], "params": {**item["params"], **extra}} for item in option["commands"]])
+        assert cases == Counter({"У7": 1, "О4": 1, "О5": 1, "О11": 1, "О2": 1, "О6": 1}), cases
+        assert questions.questions(ctx, {"params": {"kind": "payments"}})["rows"] == []
+
+        robot.owed()
+        for code, truth in world.owed().items():
+            assert robot.result.owed.get(code, 0) == truth, code

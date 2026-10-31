@@ -726,7 +726,7 @@ def restore_point(
 STEP_KINDS = (
     "core_status", "core_adjust", "view_created", "view_state", "view_removed",
     "entry_operation", "entry_decision", "entry_document", "entry_opening", "entry_since", "entry_source", "entry_import",
-    "entry_summary", "entry_link",
+    "entry_summary", "entry_link", "entry_party",
 )
 
 

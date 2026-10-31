@@ -92,10 +92,14 @@ class ParticipantUpdate(_Params):
 
 
 def _participant_update(ctx: Ctx, p: ParticipantUpdate) -> Done:
+    from app.finance.core import entry as core_entry
     from app.finance.core import participants
 
     actor = _actor(ctx)
     given = p.model_dump(exclude_unset=True)
+    party = participants._party(ctx.session, ctx.workspace, p.id)
+    before = core_entry.party_state(party)
+    aliases_before = {item["id"] for item in participants.aliases_of(ctx.session, p.id)}
     out: dict[str, Any] = {"id": str(p.id)}
     if "full_name" in given:
         out.update(participants.update(ctx.session, ctx.workspace, ctx.access, actor, p.id, {"full_name": p.full_name or ""}))
@@ -105,7 +109,71 @@ def _participant_update(ctx: Ctx, p: ParticipantUpdate) -> Done:
         out.update(participants.add_alias(ctx.session, ctx.workspace, ctx.access, actor, p.id, p.alias))
     if len(out) == 1:
         raise CommandError("Нечего менять: full_name, bin или alias")
-    return Done(title="участник изменён", result=out)
+    added = [item["id"] for item in participants.aliases_of(ctx.session, p.id) if item["id"] not in aliases_before]
+    title = f"«{party.name}»: БИН {party.bin}" if "bin" in given and party.bin else f"участник «{party.name}» изменён"
+    return Done(title=title, result=out, steps=[Step("entry_party", {"parties": [before], "aliases": added})])
+
+
+class BinReject(_Params):
+    id: uuid.UUID
+    #: Номера, которые «не его»: этому участнику KORT их больше не предложит.
+    bins: list[str] = Field(min_length=1, max_length=10)
+
+
+def _participant_bin_reject(ctx: Ctx, p: BinReject) -> Done:
+    from app.finance.core import entry as core_entry
+    from app.finance.core import participants
+
+    actor = _actor(ctx)
+    party = participants._party(ctx.session, ctx.workspace, p.id)
+    before = core_entry.party_state(party)
+    for number in p.bins:
+        participants.reject_bin(ctx.session, ctx.workspace, ctx.access, actor, p.id, number)
+    return Done(
+        title=f"«{party.name}»: {', '.join(p.bins)} - не его номер",
+        result={"id": str(p.id), "rejected": list(p.bins)},
+        steps=[Step("entry_party", {"parties": [before]})],
+    )
+
+
+class ParticipantMerge(_Params):
+    #: Кто остаётся: его имя, БИН и карточка.
+    keep: uuid.UUID
+    #: Кто сводится в него: договоры, оплаты и написания переезжают.
+    drop: list[uuid.UUID] = Field(min_length=1, max_length=20)
+
+
+def _participant_merge(ctx: Ctx, p: ParticipantMerge) -> Done:
+    from app.finance.core import participants
+
+    actor = _actor(ctx)
+    if p.keep in p.drop:
+        raise CommandError("Участник не сводится сам в себя")
+    titles: list[str] = []
+    for drop in dict.fromkeys(p.drop):
+        # Точку «свели участников» ставит сведение само - пачка вливает её шагом.
+        titles.append(participants.merge(ctx.session, ctx.workspace, ctx.access, actor, keep=p.keep, drop=drop)["title"])
+    return Done(title="; ".join(titles), result={"keep": str(p.keep), "merged": [str(item) for item in dict.fromkeys(p.drop)]})
+
+
+class ParticipantDistinct(_Params):
+    ids: list[uuid.UUID] = Field(min_length=2, max_length=20)
+
+
+def _participant_distinct(ctx: Ctx, p: ParticipantDistinct) -> Done:
+    from app.finance.core import entry as core_entry
+    from app.finance.core import participants
+
+    ids = list(dict.fromkeys(p.ids))
+    if len(ids) < 2:
+        raise CommandError("Разными бывают хотя бы два участника")
+    before = [core_entry.party_state(participants._party(ctx.session, ctx.workspace, item)) for item in ids]
+    participants.mark_distinct(ctx.session, ctx.workspace, ctx.access, _actor(ctx), ids)
+    return Done(
+        title="это разные участники",
+        result={"ids": [str(item) for item in ids]},
+        steps=[Step("entry_party", {"parties": before})],
+    )
 
 
 class EntityCreate(_Params):
@@ -571,6 +639,9 @@ def _onec_files(ctx: Ctx, p: OnecFiles) -> Done:
 ENTRY_COMMANDS: tuple[Command, ...] = (
     Command("participant.create", "Новый участник (клиент, поставщик)", "contracts", ParticipantCreate, _participant_create),
     Command("participant.update", "Участник: полное имя, БИН, написание", "contracts", ParticipantUpdate, _participant_update),
+    Command("participant.bin_reject", "Участник: «не его номер» - больше не предлагать", "contracts", BinReject, _participant_bin_reject),
+    Command("participant.merge", "Свести участников в одного", "contracts", ParticipantMerge, _participant_merge, setup=True),
+    Command("participant.distinct", "Участники разные - не предлагать свести", "contracts", ParticipantDistinct, _participant_distinct),
     Command("entity.create", "Наше юрлицо", "contracts", EntityCreate, _entity_create, setup=True),
     Command("account.create", "Счёт нашего юрлица", "dictionaries", AccountCreate, _account_create),
     Command("accounting.start", "Начало учёта оплат", "contracts", AccountingStart, _accounting_start, setup=True),

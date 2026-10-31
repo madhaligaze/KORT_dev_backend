@@ -184,6 +184,10 @@ def _diff(before: dict[str, dict[str, Any]], after: dict[str, dict[str, Any]]) -
         if added or ended or changed:
             entry["facts"] = {"added": added, "ended": ended, "changed": changed}
         if len(entry) > 1:
+            # Номер - подпись строки предложения: «Д-1: долг 100 000 → 0» без второго запроса.
+            number = values_now.get("number") or values_was.get("number")
+            if number:
+                entry["number"] = number
             out.append(entry)
     return out
 
