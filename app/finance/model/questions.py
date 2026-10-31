@@ -44,6 +44,9 @@ from app.finance.model.context import Ctx
 from app.finance.service import FinanceError
 
 QUESTION_KINDS = ("payments", "bins", "twins", "reconcile")
+#: Сколько вопросов одного вида отдавать: остальные - числом (`kinds.<вид>.count`) и списком в своём разделе.
+#: Копия прода: тысячи старых поступлений без договора - очередь в тысячу строк не читается.
+LIMIT = 30
 ATTENTION_ITEMS = ("cash", "vat", "debts", "unbilled", "acts")
 DOCUMENT_VIEWS = ("missing", "unsigned", "no_esf")
 
@@ -63,6 +66,8 @@ FACT_TITLES = {
 SOURCE_TITLES = {"kort": "KORT", "journal": "выписки", "1c": "1С", "book": "таблица"}
 #: Сколько последних фактов отдавать в «пришло» списком.
 LATEST = 30
+#: Что «приходит»: события источников и людей; сальдо и решения по оплатам - нет.
+ARRIVED_KINDS = ("payment", "bill", "act", "esf", "agreement", "adjustment")
 
 
 def _money(value: Any) -> str | None:
@@ -314,12 +319,16 @@ def questions(ctx: Ctx, raw: dict[str, Any]) -> dict[str, Any]:
     kind = str(params.get("kind") or "")
     if kind and kind not in QUESTIONS:
         raise FinanceError("Вид вопросов - " + ", ".join(QUESTION_KINDS))
+    try:
+        limit = max(1, min(500, int(params.get("limit") or LIMIT)))
+    except (TypeError, ValueError) as exc:
+        raise FinanceError("Сколько вопросов - число от 1 до 500") from exc
     rows: list[dict[str, Any]] = []
     kinds: dict[str, Any] = {}
     for key in ([kind] if kind else QUESTION_KINDS):
         found, extra = QUESTIONS[key](ctx, day)
-        rows.extend(found)
-        kinds[key] = {"count": len(found), **extra}
+        rows.extend(found[:limit])
+        kinds[key] = {"count": len(found), "shown": min(len(found), limit), **extra}
     return {
         "version": VERSION,
         "question": {"source": "questions", "params": {"kind": kind} if kind else {}},
@@ -479,18 +488,23 @@ def _visible_item(ctx: Ctx, key: str) -> bool:
 
 
 def arrived(ctx: Ctx, raw: dict[str, Any]) -> dict[str, Any]:
-    """Факты журнала, впервые записанные с дня `since` (по умолчанию - неделя): оплаты, документы 1С, правки людей.
+    """Что пришло с дня `since` (по умолчанию - неделя): оплаты, счета, АВР, ЭСФ, соглашения, поправки.
 
-    Новый факт - ключ, у которого нет ни одной версии раньше `since`: оплата,
-    которую сегодня отнесли к другому договору, - не «пришла», она пришла
-    тогда, когда её впервые записали. Человек без права «Оплаты» видит факты
-    своих договоров; оплаты без договора - владелец и администратор.
+    День прихода - когда запись появилась в своём хранилище, а не когда её
+    провели в журнал фактов: журнал проводится заново при выкладке и при
+    правке договора, и по дню записи факта «пришедшим» выглядело бы всё
+    прошлое (копия прода: 3 945 оплат «за месяц» сразу после проведения).
+    Оплата - день записи строки выписки или оплаты руками; документ и поправка
+    KORT, соглашение - день, когда их завели; документ 1С - его дата: своего
+    дня появления у снимка 1С нет, а онлайн-база приходит в тот же день.
+    Сальдо и решения людей - не «пришло». Человек без права настройки видит
+    факты своих договоров; оплаты без договора - владелец и администратор.
     """
-    from app.finance.contracts.models import Contract
+    from app.finance.contracts.models import Contract, ContractAmendment
     from app.finance.core import journal
-    from app.finance.core.models import Fact
+    from app.finance.core.models import Document, Fact
     from app.finance.core.shadow import _visible
-    from app.finance.models import Counterparty
+    from app.finance.models import Counterparty, Operation
 
     params = dict(raw.get("params") or {})
     day = _day(raw.get("as_of"), today())
@@ -499,25 +513,41 @@ def arrived(ctx: Ctx, raw: dict[str, Any]) -> dict[str, Any]:
         raise PermissionError("Договоры вам не открыты")
     journal.ensure(ctx.session, ctx.workspace.id)
     start = datetime.combine(since, time.min, tzinfo=timezone.utc)
-    facts = list(ctx.session.scalars(
+    workspace_id = ctx.workspace.id
+    new_ops = {str(item) for item in ctx.session.scalars(
+        sa.select(Operation.id).where(Operation.workspace_id == workspace_id, Operation.created_at >= start)
+    )}
+    new_docs = {str(item) for item in ctx.session.scalars(
+        sa.select(Document.id).where(Document.workspace_id == workspace_id, Document.created_at >= start)
+    )}
+    new_amends = {str(item) for item in ctx.session.scalars(
+        sa.select(ContractAmendment.id).where(ContractAmendment.workspace_id == workspace_id, ContractAmendment.created_at >= start)
+    )}
+
+    def came(fact: Fact) -> bool:
+        prefix, _, rest = fact.key.partition(":")
+        ident = rest.split(":")[0]
+        if prefix == "op":
+            return ident in new_ops
+        if prefix == "doc":
+            return ident in new_docs
+        if prefix == "amend":
+            return ident in new_amends
+        if prefix == "1c":
+            return fact.day is not None and fact.day >= since
+        return False
+
+    facts = ctx.session.scalars(
         sa.select(Fact).where(
-            Fact.workspace_id == ctx.workspace.id, Fact.ended_seq.is_(None), Fact.void.is_(False), Fact.recorded_at >= start,
+            Fact.workspace_id == workspace_id, Fact.ended_seq.is_(None), Fact.void.is_(False), Fact.kind.in_(ARRIVED_KINDS),
         )
-    ))
-    older: set[str] = set()
-    keys = [fact.key for fact in facts if fact.replaces is not None]
-    for index in range(0, len(keys), 500):
-        older.update(ctx.session.scalars(
-            sa.select(Fact.key).where(
-                Fact.workspace_id == ctx.workspace.id, Fact.key.in_(keys[index:index + 500]), Fact.recorded_at < start,
-            ).distinct()
-        ))
+    )
     visible: set[uuid.UUID] | None = None
     if not ctx.access.setup:
         visible = {item.id for item in _visible(ctx.session, ctx.workspace, ctx.access)}
     fresh = [
         fact for fact in facts
-        if fact.key not in older and (visible is None or (fact.contract_id is not None and fact.contract_id in visible))
+        if came(fact) and (visible is None or (fact.contract_id is not None and fact.contract_id in visible))
     ]
     groups: dict[tuple[str, str], dict[str, Any]] = {}
     payments = {"count": 0, "amount": Decimal("0"), "placed": 0, "without": 0}
@@ -533,7 +563,7 @@ def arrived(ctx: Ctx, raw: dict[str, Any]) -> dict[str, Any]:
             payments["count"] += 1
             payments["amount"] += fact.amount or Decimal("0")
             payments["placed" if fact.contract_id else "without"] += 1
-    latest = sorted(fresh, key=lambda fact: (fact.recorded_at, fact.day or date.min), reverse=True)[:LATEST]
+    latest = sorted(fresh, key=lambda fact: (fact.day or date.min, fact.recorded_at), reverse=True)[:LATEST]
     contract_ids = {fact.contract_id for fact in latest if fact.contract_id}
     numbers = dict(ctx.session.execute(sa.select(Contract.id, Contract.number).where(Contract.id.in_(contract_ids))).all()) if contract_ids else {}
     party_ids = {fact.party_id for fact in latest if fact.party_id}
