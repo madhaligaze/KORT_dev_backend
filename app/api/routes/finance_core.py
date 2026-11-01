@@ -470,6 +470,7 @@ def contract_months(contract_id: UUID, member: Member = Depends(viewer)) -> dict
 
     def action(session, workspace, access):
         from app.finance.core import acts as acts_module
+        from app.finance.core import documents as documents_module
         from app.finance.core import payments as payments_module
 
         contract = _opened_contract(session, workspace, access, contract_id)
@@ -487,6 +488,8 @@ def contract_months(contract_id: UUID, member: Member = Depends(viewer)) -> dict
         # АВР месяца - KORT, 1С, книга; сумма - только с правом на деньги книги.
         acts = acts_module.Acts(session, workspace, access, book, today=today, only=contract)
         out["acts"] = acts.contract(contract.id, money=money)
+        # Счёт, АВР и ЭСФ месяца, записанные в KORT: цикл месяца ведётся в строке месяца.
+        out["docs"] = documents_module.of_contract(session, workspace.id, contract.id)
         return out
 
     return _run(member, action)
@@ -986,10 +989,8 @@ def debts_view(
             book, error = book_module.current(session, workspace.id, wait=book_module.FIRST_READ_WAIT)
         out = debts_module.Debts(session, workspace, access, day=day, basis=basis, book=book, side=side, rule=rule).out(group)
         out["book"] = _book_out(book) if book is not None else None
-        out["error"] = (
-            "" if basis == "accruals" or book is not None
-            else f"{error or 'Сводная таблица компании не подключена'} - АВР только KORT и 1С"
-        )
+        # Таблицы нет - это не ошибка: АВР компании и так только KORT и 1С. Оговорка - когда таблица не прочиталась.
+        out["error"] = "" if basis == "accruals" or book is not None or not error else f"{error} - АВР только KORT и 1С"
         return out
 
     return _run(member, action)
@@ -1013,7 +1014,7 @@ def revenue_view(
             session, workspace, access, year=year, today=contracts_service.today(), book=book, side=side
         ).out(group)
         out["book"] = _book_out(book) if book is not None else None
-        out["error"] = "" if book is not None else f"{error or 'Сводная таблица компании не подключена'} - АВР только KORT и 1С"
+        out["error"] = "" if book is not None or not error else f"{error} - АВР только KORT и 1С"
         return out
 
     return _run(member, action)

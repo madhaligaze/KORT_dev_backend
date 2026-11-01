@@ -39,13 +39,13 @@ def register(email="owner@example.com", company="ТОО Ромашка", passwor
         return member.user_id, member.workspace_id, token
 
 
-def test_registratsiya_sozdaet_kompaniyu_so_schetami(finance_db) -> None:
-    """Пустая компания без счетов не даёт сделать ни одного действия."""
+def test_registratsiya_sozdaet_kompaniyu_bez_pustyh_schetov(finance_db) -> None:
+    """Счёт рождается из выписки или первой оплаты: пустые «Банковский счёт» и «Касса» без юрлица уводили деньги мимо договоров."""
     _user_id, workspace_id, _token = register()
     with finance_session() as session:
         accounts = [a.name for a in service.list_accounts(session, workspace_id)]
         categories = [c.name for c in service.list_categories(session, workspace_id)]
-    assert accounts == ["Банковский счёт", "Касса"]
+    assert accounts == []
     assert "Выручка" in categories and "Аренда" in categories
 
 
@@ -160,7 +160,7 @@ def test_dve_kompanii_odnogo_cheloveka_ne_smeshivayutsya(finance_db) -> None:
     # В первой компании - поступление, во второй ничего.
     with finance_session() as session:
         workspace = service.get_workspace(session, first_id)
-        cash = next(a for a in service.list_accounts(session, first_id) if a.name == "Касса")
+        cash = service.create_account(session, workspace, name="Касса", kind="cash")
         service.create_operation(
             session,
             workspace,

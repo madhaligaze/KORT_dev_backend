@@ -136,7 +136,8 @@ class Part:
     amount: Decimal
     #: `hint` - по «за какой месяц», `order` - самому старому долгу, `date` - по
     #: месяцу платежа (договор без начислений), `over` - сверх начислений,
-    #: `old` - за период до учёта, сверх входящего сальдо.
+    #: `old` - «Старые (…)» сверх входящего сальдо, `before` - оплата, назвавшая
+    #: месяц раньше начала учёта, сверх сальдо: не аванс и не оплата месяцев учёта.
     by: str
 
 
@@ -205,8 +206,8 @@ class ContractMoney:
             (bucket.accrued for key, bucket in self.buckets.items() if key != OPENING and bucket.starts <= day),
             _ZERO,
         )
-        # Сверх сальдо за период до учёта («Старые (…)», «за май» при учёте с июня) - не долг месяцев учёта.
-        before = sum((part.amount for part in self.over if part.by == "old" and part.payment.paid_at <= day), _ZERO)
+        # «За май» при учёте с июня сверх сальдо - не оплата месяцев учёта.
+        before = sum((part.amount for part in self.over if part.by == "before" and part.payment.paid_at <= day), _ZERO)
         return owed - sum((payment.amount for payment in self.payments if payment.paid_at <= day), _ZERO) + before
 
     def out(self, *, today: date) -> dict[str, Any]:
@@ -218,10 +219,10 @@ class ContractMoney:
             "opening": opening.out() if opening is not None else None,
             "months": months,
             "over": [
-                {"key": part.payment.key, "paid_at": part.payment.paid_at.isoformat(), "amount": _money(part.amount)}
+                {"key": part.payment.key, "paid_at": part.payment.paid_at.isoformat(), "amount": _money(part.amount), "by": part.by}
                 for part in self.over
             ],
-            "over_total": _money(sum((part.amount for part in self.over), _ZERO)),
+            "over_total": _money(sum((part.amount for part in self.over if part.by != "before"), _ZERO)),
             "payments": [payment.out() for payment in sorted(self.payments, key=lambda item: (item.paid_at, item.key), reverse=True)],
             "paid": _money(self.paid),
             "accrues": self.accrues,
@@ -290,11 +291,12 @@ def allocate_months(
                 break
             if key in buckets:
                 take(payment, buckets[key], "order")
-    return [
-        Part(payment, left[payment.key], "old" if payment.label and payment.hint is None else "over")
-        for payment in ordered
-        if left[payment.key] > 0
-    ]
+    def rest(payment: Payment) -> str:
+        if payment.hint is None and payment.label == BEFORE:
+            return "before"
+        return "old" if payment.label and payment.hint is None else "over"
+
+    return [Part(payment, left[payment.key], rest(payment)) for payment in ordered if left[payment.key] > 0]
 
 
 class Money:
@@ -544,7 +546,7 @@ class Money:
                 # «Старые (…)» и аванс на начало - не за месяцы учёта, они остаются в стороне.
                 kept: list[Part] = []
                 for part in over:
-                    if part.payment.source == "opening" or part.by == "old":
+                    if part.payment.source == "opening" or part.by in ("old", "before"):
                         kept.append(part)
                         continue
                     month = month_key(part.payment.paid_at)

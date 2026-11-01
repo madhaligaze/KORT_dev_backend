@@ -18,9 +18,10 @@
 * `arrived` - что пришло: факты журнала, впервые записанные с дня `since`.
 * `documents` - дела по АВР и ЭСФ списком: не подписан, без ЭСФ после срока,
   месяц начислен - АВР нет.
-* `start` - первые шаги компании: наше юрлицо с БИН, договоры, деньги
-  (выписка, 1С или сводная таблица). Пока шаги не пройдены, пустые пункты
-  угроз говорят «считать не из чего», а не «всё хорошо».
+* `start` - первые шаги компании по порядку: наше юрлицо с БИН и режимом,
+  договоры, начало учёта, деньги (выписка, 1С или сводная таблица). Пока шаги
+  не пройдены, пустые пункты угроз говорят «считать не из чего», а не «всё
+  хорошо».
 
 Вопросы файла (порядок частей даты, скрытая строка реестра, сумма с даты)
 остаются в загрузке: без ответа файл не положить, и команда спрашивает
@@ -657,7 +658,7 @@ def documents(ctx: Ctx, raw: dict[str, Any]) -> dict[str, Any]:
         "columns": columns,
         "rows": rows,
         "counts": {key: len(work[key]) for key in DOCUMENT_VIEWS},
-        "note": "сводная таблица ещё читается - АВР только KORT и 1С" if book is None else "",
+        "note": today_module.acts_note(ctx.session, ctx.workspace, book),
     }
 
 
@@ -677,13 +678,15 @@ def _plural(count: int, one: str, few: str, many: str) -> str:
 def _company(ctx: Ctx) -> dict[str, Any]:
     """Что у компании уже есть: наши юрлица, договоры, откуда деньги."""
     from app.finance.contracts.models import Contract, GroupEntity
+    from app.finance.core import settings as core_settings
+    from app.finance.core import tax
     from app.finance.core import today as today_module
     from app.finance.models import Counterparty, Operation
     from app.finance.onec.models import OnecBase
 
     session, workspace_id = ctx.session, ctx.workspace.id
     entities = [
-        {"id": str(party_id), "name": name, "bin": entity_bin or party_bin or ""}
+        {"id": str(party_id), "name": name, "bin": entity_bin or party_bin or "", "regime": bool(tax.periods(session, party_id))}
         for party_id, name, entity_bin, party_bin in session.execute(
             sa.select(GroupEntity.counterparty_id, Counterparty.name, GroupEntity.bin, Counterparty.bin)
             .join(Counterparty, Counterparty.id == GroupEntity.counterparty_id)
@@ -694,6 +697,12 @@ def _company(ctx: Ctx) -> dict[str, Any]:
     contracts = session.scalar(
         sa.select(sa.func.count()).select_from(Contract).where(Contract.workspace_id == workspace_id, Contract.deleted_at.is_(None))
     ) or 0
+    # С какого дня договоры начисляют: от него шаг «начало учёта» предлагает ответ.
+    earliest = session.scalar(
+        sa.select(sa.func.min(sa.func.coalesce(Contract.billing_from, Contract.signed_at))).where(
+            Contract.workspace_id == workspace_id, Contract.deleted_at.is_(None)
+        )
+    )
     money: list[str] = []
     if session.scalar(sa.select(Operation.id).where(Operation.workspace_id == workspace_id, Operation.deleted_at.is_(None)).limit(1)):
         money.append("выписки банка")
@@ -701,34 +710,51 @@ def _company(ctx: Ctx) -> dict[str, Any]:
         money.append("1С")
     if today_module.has_summary(session, ctx.workspace):
         money.append("сводная таблица")
-    return {"entities": entities, "contracts": contracts, "money": money}
+    return {
+        "entities": entities, "contracts": contracts, "money": money, "earliest": earliest,
+        "since": core_settings.payments(session, ctx.workspace).since,
+    }
 
 
 def start(ctx: Ctx, raw: dict[str, Any]) -> dict[str, Any]:
-    """Первые шаги: без юрлица, договоров и денег KORT считать не из чего.
+    """Первые шаги по порядку: без юрлица, договоров, начала учёта и денег KORT считать не из чего.
 
     Пустая компания видела на «Сегодня» «Вопросов нет» и «Акты подписаны»,
     а «Первые шаги» лежали в «Ещё» (проход новичка 31.10). Шаг пройден по
     данным, а не по отметке: завели договор - шаг закрыт, где бы его ни
     завели. Шаги видит тот, кто настраивает компанию.
+
+    Начало учёта - отдельный вопрос, а не следствие первой оплаты: от него
+    зависят и долги, и список счетов. Без ответа выписка за октябрь молча
+    закрывала все месяцы раньше, а счета показывались только за текущий.
+    `first` и `current` - какие ответы предложить.
     """
     state = _company(ctx)
-    entities, contracts, money = state["entities"], state["contracts"], state["money"]
-    without_bin = next((item for item in entities if not item["bin"]), None)
+    entities, contracts, money, since = state["entities"], state["contracts"], state["money"], state["since"]
+    unfinished = next((item for item in entities if not item["bin"] or not item["regime"]), None)
     if not entities:
         entity_text = "Наших юрлиц ещё нет"
-    elif without_bin is not None:
-        entity_text = f"{without_bin['name']} - БИН не указан"
+    elif unfinished is not None:
+        missing = " и ".join(word for word, ok in (("БИН", unfinished["bin"]), ("режим налогов", unfinished["regime"])) if not ok)
+        entity_text = f"{unfinished['name']} - нужен {missing}"
     else:
         entity_text = ", ".join(item["name"] for item in entities[:3]) + (f" и ещё {len(entities) - 3}" if len(entities) > 3 else "")
+    current = today().replace(day=1)
+    first = state["earliest"].replace(day=1) if state["earliest"] else current
     rows = [
         {
-            "key": "entity", "title": "Наше юрлицо", "done": bool(entities) and without_bin is None, "text": entity_text,
-            "entity": without_bin["id"] if without_bin else (entities[0]["id"] if entities else None),
+            "key": "entity", "title": "Наше юрлицо", "done": bool(entities) and unfinished is None, "text": entity_text,
+            "entity": unfinished["id"] if unfinished else (entities[0]["id"] if entities else None),
+            "needs": {"bin": not unfinished["bin"], "regime": not unfinished["regime"]} if unfinished else None,
         },
         {
             "key": "contracts", "title": "Договоры", "done": contracts > 0,
             "text": f"{contracts} {_plural(contracts, 'договор', 'договора', 'договоров')}" if contracts else "Договоров ещё нет",
+        },
+        {
+            "key": "since", "title": "Начало учёта", "done": since is not None,
+            "text": f"с {since:%d.%m.%Y}" if since else "С какого дня KORT считает оплаты и счета",
+            "first": min(first, current).isoformat(), "current": current.isoformat(),
         },
         {
             "key": "money", "title": "Деньги", "done": bool(money),
@@ -741,7 +767,9 @@ def start(ctx: Ctx, raw: dict[str, Any]) -> dict[str, Any]:
         "as_of": today().isoformat(),
         "source": "start",
         "rows": rows if ctx.access.setup else [],
-        "done": all(row["done"] for row in rows) or not ctx.access.setup,
+        # Компания заведена - договоры, деньги и начало учёта есть: шаги ей больше не нужны,
+        # даже если у какого-то из юрлиц нет БИН (его просят «Участники»).
+        "done": all(row["done"] for row in rows) or not ctx.access.setup or bool(contracts and money and since),
     }
 
 

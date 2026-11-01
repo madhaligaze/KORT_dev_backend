@@ -352,7 +352,7 @@ def _made(contract: Contract, month: str, accrual: Any, owner: uuid.UUID, doc: D
         line=0,
         group=group,
         text=text,
-        own=context.codes.get(owner, ""),
+        own=context.codes.get(owner) or context.names.get(owner, ""),
         customer=context.names.get(contract.customer_id, "") if contract.customer_id else "",
         number=contract.number,
         month=f"{_MONTHS[int(month[5:7]) - 1]} {month[:4]}",

@@ -1033,6 +1033,9 @@ def dictionaries(member: Member = Depends(require_access(access_module.MONEY_RES
     """
     _guard()
     sees_balances = member.rights.can_any(("dictionaries", "reports.summary"))
+    from app.finance.contracts.models import GroupEntity
+    from app.finance.core import tax
+
     with finance_session() as session:
         workspace = _workspace(session, member)
         accounts = service.list_accounts(session, workspace.id)
@@ -1060,6 +1063,17 @@ def dictionaries(member: Member = Depends(require_access(access_module.MONEY_RES
                 }
                 for item in accounts
             ],
+            # Наши юрлица - чей счёт; ставка НДС года - значение по умолчанию формы счёта.
+            "entities": [
+                {"id": str(party_id), "name": name}
+                for party_id, name in session.execute(
+                    sa.select(GroupEntity.counterparty_id, Counterparty.name)
+                    .join(Counterparty, Counterparty.id == GroupEntity.counterparty_id)
+                    .where(GroupEntity.workspace_id == workspace.id, GroupEntity.archived_at.is_(None))
+                    .order_by(GroupEntity.position, Counterparty.name)
+                )
+            ],
+            "vat_rate": format(tax.year_of(session, workspace.id, date.today().year).vat_rate.normalize(), "f"),
             "categories": [
                 {
                     "id": str(item.id),
@@ -1185,6 +1199,46 @@ def patch_account_balance(
 
 class AccountNumberIn(BaseModel):
     number: str = ""
+
+
+class AccountEntityIn(BaseModel):
+    #: Наше юрлицо (`Account.group_entity_id`); пусто - счёт ничей.
+    group_entity_id: UUID | None = None
+
+
+@router.put("/accounts/{account_id}/entity")
+def put_account_entity(
+    account_id: UUID,
+    body: AccountEntityIn,
+    member: Member = Depends(require_access("dictionaries", "edit")),
+) -> dict[str, Any]:
+    """Чей счёт: оплата на него находит договоры этого юрлица, «Деньги вперёд» считают его деньгами.
+
+    Без этого экран писал «без юрлица», а поправить было негде.
+    """
+    _guard()
+    from app.finance.contracts.models import GroupEntity
+
+    with finance_session() as session:
+        workspace = _workspace(session, member)
+        account = session.get(Account, account_id)
+        if account is None or account.workspace_id != workspace.id or account.archived_at is not None:
+            raise HTTPException(status_code=404, detail="Такого счёта нет")
+        entity = session.get(GroupEntity, body.group_entity_id) if body.group_entity_id else None
+        if body.group_entity_id and (entity is None or entity.workspace_id != workspace.id or entity.archived_at is not None):
+            raise HTTPException(status_code=422, detail="Такого нашего юрлица нет")
+        before = account.group_entity_id
+        account.group_entity_id = entity.counterparty_id if entity is not None else None
+        session.flush()
+        if before != account.group_entity_id:
+            owner = session.get(Counterparty, account.group_entity_id) if account.group_entity_id else None
+            history.write(
+                session, workspace, kind="account.entity", entity="account", entity_id=account.id,
+                title=f"счёт «{account.name}»: " + (f"юрлицо {owner.name}" if owner is not None else "без юрлица"),
+                before={"group_entity_id": str(before) if before else None},
+                after={"group_entity_id": str(account.group_entity_id) if account.group_entity_id else None},
+            )
+        return {"id": str(account.id), "group_entity_id": str(account.group_entity_id) if account.group_entity_id else None}
 
 
 @router.put("/accounts/{account_id}/number")
@@ -2335,7 +2389,7 @@ def _statement_account(session: Any, workspace: Any, question: dict[str, Any] | 
     (`participants.entities_of_accounts`); ни одного или два - решает человек.
     """
     create = (question or {}).get("create") if (question or {}).get("kind") == "account" else None
-    if not create or not create.get("number") or not bank:
+    if not create or not bank:
         return question
     from app.finance.contracts.models import GroupEntity
     from app.finance.core import participants
@@ -2358,13 +2412,13 @@ def _statement_account(session: Any, workspace: Any, question: dict[str, Any] | 
         entity_id = next(iter(found.values())).counterparty_id if found else None
     owner = session.get(Counterparty, entity_id) if entity_id is not None else None
     opening = bank.get("opening_balance") if bank.get("period_start") else None
-    # Выписка назвала свой счёт - пустые ничьи счета («Банковский счёт», «Касса» новой
-    # компании: без номера, юрлица, остатка и операций) в выборе не нужны: выбранные,
-    # они уводили выписку на счёт без юрлица мимо договоров.
+    # Выписка назвала свой счёт - пустые ничьи счета (без номера, юрлица, остатка и
+    # операций: засев старых компаний) в выборе не нужны: выбранные, они уводили
+    # выписку на счёт без юрлица мимо договоров.
     empty = {
         account.name
         for account in service.list_accounts(session, workspace.id)
-        if not account.number and account.group_entity_id is None and not account.starting_balance
+        if create.get("number") and not account.number and account.group_entity_id is None and not account.starting_balance
         and session.scalar(
             sa.select(Operation.id).where(
                 Operation.workspace_id == workspace.id,

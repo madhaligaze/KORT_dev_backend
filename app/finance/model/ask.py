@@ -342,7 +342,7 @@ def debts_of(ctx: Ctx, view: View, day: date) -> tuple[Any, dict[str, Any], str]
         ctx.session, ctx.workspace, ctx.access, day=day, basis=params["basis"], book=book,
         side=params["side"], rule=(view.filter or None),
     )
-    note = f"{error or 'Сводная таблица компании не подключена'} - АВР только KORT и 1С" if params["basis"] == "acts" and book is None else ""
+    note = f"{error} - АВР только KORT и 1С" if params["basis"] == "acts" and book is None and error else ""
     return found, params, note
 
 

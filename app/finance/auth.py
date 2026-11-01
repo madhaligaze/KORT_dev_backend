@@ -412,7 +412,7 @@ def register(
     session.add(user)
     session.flush()
 
-    workspace = service.create_workspace(session, title=title)
+    workspace = service.create_workspace(session, title=title, accounts=False)
     session.add(
         FinanceMembership(workspace_id=workspace.id, user_id=user.id, role="owner")
     )

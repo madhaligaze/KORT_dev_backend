@@ -271,8 +271,7 @@ def test_kazhdyy_izmenyayushchiy_marshrut_pishet_sobytie(app: FastAPI, monkeypat
     first_company = me["company"]["id"]
 
     # ── счета и справочники ────────────────────────────────────────────
-    accounts = {item["name"]: item["id"] for item in owner.get(f"{BASE}/dictionaries").json()["accounts"]}
-    cash = accounts["Касса"]
+    cash = walk.call(owner, "POST", "/accounts", json={"name": "Касса", "kind": "cash"}).json()["id"]
     reserve = walk.call(owner, "POST", "/accounts", json={"name": "Резерв"}).json()["id"]
     walk.call(owner, "PATCH", "/accounts/{account_id}", account_id=reserve, json={"starting_balance": "1000"})
     walk.call(owner, "PUT", "/accounts/{account_id}/number", account_id=reserve, json={"number": "KZ86125KZT5004100100"})
@@ -533,6 +532,7 @@ def test_kazhdyy_izmenyayushchiy_marshrut_pishet_sobytie(app: FastAPI, monkeypat
     walk.call(owner, "POST", "/contracts/setup/values/merge", json={"keep": paused, "drop": pause})
     entity = walk.call(owner, "POST", "/contracts/setup/entities", json={"name": "BBCL", "code": "BBCL"}).json()["id"]
     walk.call(owner, "PATCH", "/contracts/setup/entities/{party_id}", party_id=entity, json={"full_name": "ТОО BBC Legal"})
+    walk.call(owner, "PUT", "/accounts/{account_id}/entity", account_id=reserve, json={"group_entity_id": entity})
     parties = {item["name"]: item["id"] for item in owner.get(f"{BASE}/contracts/parties", params={"q": "ТОО"}).json()["parties"]}
     walk.call(owner, "POST", "/contracts/setup/parties/merge", json={"keep": parties["ТОО Альфа"], "drop": parties["ТОО Бета"]})
     registry_department = walk.call(owner, "POST", "/contracts/setup/departments", json={"code": "НО"}).json()["id"]

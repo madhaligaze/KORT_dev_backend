@@ -170,12 +170,14 @@ SEED_NATURES: dict[str, str] = {
 }
 
 
-def create_workspace(session: Session, *, title: str) -> Workspace:
+def create_workspace(session: Session, *, title: str, accounts: bool = True) -> Workspace:
     """Новая компания с начальными справочниками.
 
-    Зовётся из регистрации и из «добавить ещё одну компанию». Пустая компания
-    без счетов не даёт сделать ни одного действия - ни записать операцию, ни
-    загрузить выписку, - поэтому счета и статьи заводятся сразу.
+    Зовётся из регистрации и из «добавить ещё одну компанию». Статьи заводятся
+    сразу. Счета - кроме регистрации (`accounts=False`): там счёт рождается
+    из выписки с номером, юрлицом и остатком или из первой оплаты руками, а
+    пустые «Банковский счёт» и «Касса» без юрлица только уводили деньги мимо
+    договоров.
 
     `slug` собирается из названия и номера: он нужен только как человекочитаемый
     ключ в адресах и логах, уникальность держится счётчиком, а не транслитом.
@@ -193,7 +195,7 @@ def create_workspace(session: Session, *, title: str) -> Workspace:
     )
     session.add(workspace)
     session.flush()
-    _seed(session, workspace)
+    _seed(session, workspace, accounts=accounts)
     log.info("finance: создана компания «%s» (%s)", clean, slug)
     return workspace
 
@@ -266,9 +268,9 @@ def ensure_workspace(session: Session, *, slug: str = DEFAULT_SLUG) -> Workspace
     return workspace
 
 
-def _seed(session: Session, workspace: Workspace) -> None:
+def _seed(session: Session, workspace: Workspace, *, accounts: bool = True) -> None:
     """Начальные счета и статьи новой компании."""
-    for position, (name, kind) in enumerate(SEED_ACCOUNTS):
+    for position, (name, kind) in enumerate(SEED_ACCOUNTS if accounts else ()):
         session.add(
             Account(
                 workspace_id=workspace.id,
@@ -1272,6 +1274,9 @@ def apply_batch(
         if key:
             known.add(key)
 
+    # Сначала записать строки: без этого счёт отставал на последнюю, и в «Прошлых
+    # загрузках» стояло «завели 2 из 4» при трёх заведённых (проход новичка 31.10).
+    session.flush()
     batch.rows_imported = int(
         session.scalar(
             sa.select(sa.func.count(ImportRow.id)).where(

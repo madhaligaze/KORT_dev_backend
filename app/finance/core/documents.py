@@ -71,6 +71,20 @@ def out(doc: Document) -> dict[str, Any]:
     }
 
 
+def of_contract(session: Session, workspace_id: uuid.UUID, contract_id: uuid.UUID) -> dict[str, dict[str, dict[str, Any]]]:
+    """Месяц → вид → документ KORT договора: что показать и править в строке месяца."""
+    found: dict[str, dict[str, dict[str, Any]]] = {}
+    for doc in session.scalars(
+        sa.select(Document).where(
+            Document.workspace_id == workspace_id, Document.contract_id == contract_id, Document.kind.in_(KINDS),
+            Document.deleted_at.is_(None),
+        )
+    ):
+        if doc.period is not None:
+            found.setdefault(month_key(doc.period), {})[doc.kind] = out(doc)
+    return found
+
+
 def find(session: Session, workspace_id: uuid.UUID, contract_id: uuid.UUID, kind: str, period: date) -> Document | None:
     return session.scalar(
         sa.select(Document)

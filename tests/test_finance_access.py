@@ -421,6 +421,7 @@ def test_svodka_ostatkov_svoim_pravom(app: FastAPI) -> None:
     денег на каждом счёте компании.
     """
     owner = register(app)
+    assert owner.post(f"{BASE}/accounts", json={"name": "Касса", "kind": "cash", "starting_balance": "1000"}).status_code == 200
     card = employee(owner, "Нурланова Асель", "+77071112233")
     grant(owner, "employee", card["id"], {"journal": "edit", "table": "edit"})
     person = activate(app, "+77071112233")
@@ -727,7 +728,7 @@ def test_udalennaya_operatsiya_vozvrashchaetsya_iz_zhurnala(app: FastAPI) -> Non
     """01.10.2026: «Удалить» в журнале отвечает записью истории, и «Вернуть»
     возвращает операцию тому, у кого правка журнала, - без корзины кабинета."""
     owner = register(app)
-    cash = next(item for item in owner.get(f"{BASE}/dictionaries").json()["accounts"] if item["name"] == "Касса")
+    cash = owner.post(f"{BASE}/accounts", json={"name": "Касса", "kind": "cash"}).json()
     card = employee(owner, "Кассир Касымова", "+77025550133")
     grant(owner, "employee", card["id"], {"journal": "edit"})
     cashier = activate(app, "+77025550133")
