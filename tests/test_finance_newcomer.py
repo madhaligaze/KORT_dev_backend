@@ -224,13 +224,16 @@ def test_schet_iz_vypiski_s_yurlicom_i_ostatkom(finance_db, monkeypatch) -> None
     entity = _ask(client, "start")["rows"][0]["entity"]
     _one(client, "participant.update", id=entity, bin=OUR_BIN)
     question = {
-        "kind": "account", "title": "На какой счёт лягут эти операции?", "text": "…", "options": [],
+        "kind": "account", "title": "На какой счёт лягут эти операции?", "text": "…",
+        "options": [{"value": "Банковский счёт", "label": "Банковский счёт", "example": ""}, {"value": "Касса", "label": "Касса", "example": ""}],
         "create": {"name": "Halyk ·3456", "number": "KZ86601A861000123456", "currency": ""},
     }
     bank = {"period_start": "2026-10-01", "opening_balance": "500000.00", "owner": "ТОО «Ромашка Проба»", "owner_bin": OUR_BIN}
     with finance_session() as session:
         workspace = session.scalar(sa.select(Workspace))
-        create = _statement_account(session, workspace, question, bank)["create"]
+        asked = _statement_account(session, workspace, question, bank)
+        assert asked["options"] == [], "пустые «Банковский счёт» и «Касса» из регистрации - не выбор, когда выписка назвала свой счёт"
+        create = asked["create"]
         assert create["group_entity_id"] == entity and create["owner"] == "ТОО «Ромашка Проба»"
         assert create["starting_balance"] == "500000.00" and create["period_start"] == "2026-10-01"
         # Без БИН - по имени целиком; чужое имя - юрлица нет, решает человек.
@@ -241,3 +244,69 @@ def test_schet_iz_vypiski_s_yurlicom_i_ostatkom(finance_db, monkeypatch) -> None
         # Без начала периода остаток - не на известный день: не предлагается.
         undated = _statement_account(session, workspace, question, {**bank, "period_start": None})["create"]
         assert undated["starting_balance"] is None
+
+
+# ── Счета без сводной таблицы и оплата руками ────────────────────────────────
+
+
+def test_scheta_bez_svodnoy_po_dogovoram(finance_db, monkeypatch) -> None:
+    """«Счета пора выставить» вели в пустой раздел журнала: без сводной «Не выставлены» не было."""
+    client = _client(monkeypatch, "ТОО «Ромашка Проба»")
+    _entity, contract = _romashka_with_contract(client)
+    board = _ok(client.get(f"{BASE}/bills"))
+    assert board["source"]["kind"] == "kort"
+    bill = next(item for item in board["items"] if item["contract_id"] == contract)
+    assert bill["customer"] == "ТОО «Алматы Строй»" and bill["source"] == "kort" and bill["amount"]
+    card = _ok(client.get(f"{BASE}/bills/{bill['id']}"))
+    assert card["book"]["kort"] is True and not card["problem"]
+    _ok(client.post(f"{BASE}/bills/{bill['id']}", json={"values": {"bill_no": "1", "bill_date": "2026-10-01"},
+                                                            "expect": card["book"]["fields"]}))
+    board = _ok(client.get(f"{BASE}/bills"))
+    assert all(item["id"] != bill["id"] for item in board["items"]), "выставленный ушёл из «Не выставлены»"
+    assert any(item["id"] == bill["id"] and item["bill_no"] == "1" for item in board["issued"])
+
+
+def test_prishla_oplata_v_kartochke(finance_db, monkeypatch) -> None:
+    """Оплата руками из карточки договора: счёта у юрлица нет - команда заводит его, и он виден для следующей."""
+    client = _client(monkeypatch, "ТОО «Ромашка Проба»")
+    entity = _ask(client, "start")["rows"][0]["entity"]
+    contract = _one(
+        client, "contract.create",
+        values={"executor": {"id": entity}, "customer": "ТОО «Алматы Строй»", "number": "01/2026", "amount": "1200000",
+                "billing": "month", "signed_at": "2026-09-01"},
+    )["contract"]["id"]
+    months = _ok(client.get(f"{BASE}/core/contracts/{contract}/months"))
+    assert months["pay_accounts"] == []
+    _one(client, "payment.record", contract=contract, day="2026-10-05", amount="1200000", key="card-1")
+    months = _ok(client.get(f"{BASE}/core/contracts/{contract}/months"))
+    assert len(months["pay_accounts"]) == 1
+    paid = {item["month"]: item for item in months["money"]["months"]}
+    assert paid["2026-10"]["paid"] == "1200000.00", "без «за какой месяц» - по первой оплате, учёт с октября"
+    accounts = _ok(client.get(f"{BASE}/dictionaries"))["accounts"]
+    owned = [item for item in accounts if item["group_entity_id"] == entity]
+    assert len(owned) == 1 and owned[0]["owner"] == "ТОО «Ромашка Проба»"
+    assert {item["owner"] for item in accounts if item["name"] in ("Банковский счёт", "Касса")} == {""}
+
+
+def test_pervaya_oplata_rukami_stavit_nachalo_ucheta(finance_db, monkeypatch) -> None:
+    """Первая оплата руками за сентябрь 01.11: начало учёта - с первого начисления, а не месяц оплаты.
+
+    Иначе сентябрь и октябрь молча «до начала учёта», а деньги - на ноябрь.
+    Карточка шлёт пачку: начало учёта и оплата за названный месяц.
+    """
+    client = _client(monkeypatch, "ТОО «Ромашка Проба»")
+    entity = _ask(client, "start")["rows"][0]["entity"]
+    contract = _one(
+        client, "contract.create",
+        values={"executor": {"id": entity}, "customer": "ТОО «Алматы Строй»", "number": "01/2026", "amount": "1200000",
+                "billing": "month", "signed_at": "2026-09-01"},
+    )["contract"]["id"]
+    _ok(client.post(f"{MODEL}/apply", json={"commands": [
+        {"command": "accounting.start", "params": {"since": "2026-09-01"}},
+        {"command": "payment.record", "params": {"contract": contract, "day": "2026-10-30", "amount": "1200000", "month": "2026-09", "key": "first"}},
+    ]}))
+    money = _money(client, contract)
+    months = {item["month"]: item for item in money["months"]}
+    assert money["since"] == "2026-09-01"
+    assert months["2026-09"]["paid"] == "1200000.00" and months["2026-10"]["debt"] == "1200000.00"
+    assert money["debt"] == "1200000.00"

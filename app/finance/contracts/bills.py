@@ -669,11 +669,31 @@ def recent(board: Board, today: date | None = None) -> list[Bill]:
 
 
 def board_out(session: Session, workspace_id: uuid.UUID, *, force: bool = False) -> dict[str, Any]:
-    """Раздел «Счета»: невыставленные с числами по группам, недавно выставленные и откуда они."""
-    board, error = current(session, workspace_id, force=force)
+    """Раздел «Счета»: невыставленные с числами по группам, недавно выставленные и откуда они.
+
+    Компания без сводной таблицы - счета по начислениям договоров KORT
+    (`core/billing.kort_board`), той же формы: раньше у неё раздел был пуст,
+    и «Счета пора выставить 1 200 000» с главной вёл в «Счетов пока нет»
+    (проход новичка 31.10).
+    """
     source = source_of(session, workspace_id)
     if source is None:
-        return {"source": None, "items": [], "issued": [], "counts": None}
+        from app.finance.contracts.service import today
+        from app.finance.core import billing
+        from app.finance.models import Workspace
+
+        workspace = session.get(Workspace, workspace_id)
+        board = billing.kort_board(session, workspace, today=today())
+        return {
+            "source": {
+                "title": "KORT", "worksheet": "", "kind": "kort", "url": "", "read_at": board.read_at.isoformat(),
+                "drift": "", "error": "", "kort": list(board.kort), "kort_error": board.kort_error,
+            },
+            "items": [bill.out() for bill in board.bills],
+            "issued": [bill.out() for bill in recent(board)],
+            "counts": counts_out(board),
+        }
+    board, error = current(session, workspace_id, force=force)
     return {
         "source": {
             "title": (board.title if board else "") or source.title,

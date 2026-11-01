@@ -15,6 +15,7 @@ from datetime import date, timedelta
 from typing import Any
 from uuid import UUID
 
+import sqlalchemy as sa
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 
@@ -444,6 +445,25 @@ def _opened_contract(session, workspace, access, contract_id: UUID):
     return contract
 
 
+def _pay_accounts(session: Any, workspace: Any, contract: Any) -> list[dict[str, str]]:
+    """Счета нашего юрлица договора - куда записать оплату руками; нет счёта - его заведёт сама команда."""
+    from app.finance.contracts.service import Registry
+    from app.finance.models import Account
+
+    registry = Registry(session, workspace)
+    ours = next((party for party in (contract.executor_id, contract.customer_id) if party and registry.is_own(party)), None)
+    if ours is None:
+        return []
+    return [
+        {"id": str(account_id), "name": name}
+        for account_id, name in session.execute(
+            sa.select(Account.id, Account.name)
+            .where(Account.workspace_id == workspace.id, Account.group_entity_id == ours, Account.archived_at.is_(None))
+            .order_by(Account.name)
+        )
+    ]
+
+
 @router.get("/contracts/{contract_id}/months")
 def contract_months(contract_id: UUID, member: Member = Depends(viewer)) -> dict[str, Any]:
     """Лента месяцев договора: начисление KORT и строка книги за месяц."""
@@ -462,6 +482,8 @@ def contract_months(contract_id: UUID, member: Member = Depends(viewer)) -> dict
         # Оплаты KORT по месяцам - тем, кому открыты оплаты по выписке (нужен журнал).
         if access.view and "paid" not in access.hidden:
             out["money"] = payments_module.contract_money(session, workspace, access, contract, today=today)
+            # «Пришла оплата» в карточке: счета нашего юрлица договора - выбрать, если их несколько.
+            out["pay_accounts"] = _pay_accounts(session, workspace, contract)
         # АВР месяца - KORT, 1С, книга; сумма - только с правом на деньги книги.
         acts = acts_module.Acts(session, workspace, access, book, today=today, only=contract)
         out["acts"] = acts.contract(contract.id, money=money)

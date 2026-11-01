@@ -1035,6 +1035,16 @@ def dictionaries(member: Member = Depends(require_access(access_module.MONEY_RES
     sees_balances = member.rights.can_any(("dictionaries", "reports.summary"))
     with finance_session() as session:
         workspace = _workspace(session, member)
+        accounts = service.list_accounts(session, workspace.id)
+        # Чей счёт - словами: счёт без юрлица оплаты не относит ни к одному договору нашего ТОО.
+        owners = {
+            party_id: name
+            for party_id, name in session.execute(
+                sa.select(Counterparty.id, Counterparty.name).where(
+                    Counterparty.id.in_([item.group_entity_id for item in accounts if item.group_entity_id] or [None])
+                )
+            )
+        }
         return {
             "accounts": [
                 {
@@ -1045,8 +1055,10 @@ def dictionaries(member: Member = Depends(require_access(access_module.MONEY_RES
                     "starting_balance": str(item.starting_balance) if sees_balances else None,
                     "excluded_from_reports": item.excluded_from_reports,
                     "number": item.number or "",
+                    "group_entity_id": str(item.group_entity_id) if item.group_entity_id else None,
+                    "owner": owners.get(item.group_entity_id, "") if item.group_entity_id else "",
                 }
-                for item in service.list_accounts(session, workspace.id)
+                for item in accounts
             ],
             "categories": [
                 {
@@ -2346,8 +2358,23 @@ def _statement_account(session: Any, workspace: Any, question: dict[str, Any] | 
         entity_id = next(iter(found.values())).counterparty_id if found else None
     owner = session.get(Counterparty, entity_id) if entity_id is not None else None
     opening = bank.get("opening_balance") if bank.get("period_start") else None
+    # Выписка назвала свой счёт - пустые ничьи счета («Банковский счёт», «Касса» новой
+    # компании: без номера, юрлица, остатка и операций) в выборе не нужны: выбранные,
+    # они уводили выписку на счёт без юрлица мимо договоров.
+    empty = {
+        account.name
+        for account in service.list_accounts(session, workspace.id)
+        if not account.number and account.group_entity_id is None and not account.starting_balance
+        and session.scalar(
+            sa.select(Operation.id).where(
+                Operation.workspace_id == workspace.id,
+                sa.or_(Operation.account_to_id == account.id, Operation.account_from_id == account.id),
+            ).limit(1)
+        ) is None
+    }
     return {
         **question,
+        "options": [option for option in question.get("options") or [] if option.get("value") not in empty],
         "create": {
             **create,
             "group_entity_id": str(entity_id) if entity_id is not None else None,
@@ -2508,7 +2535,13 @@ def _board_of(session: Any, workspace_id: UUID) -> tuple[Any, tuple[Any, ...] | 
 
     source = source_of(session, workspace_id)
     if source is None:
-        raise HTTPException(status_code=404, detail="Сводная таблица не подключена")
+        # Без сводной - счета по начислениям KORT: карточка пишет счёт документом ядра.
+        from app.finance.contracts.service import today
+        from app.finance.core import billing as core_billing
+
+        from app.finance.models import Workspace
+
+        return core_billing.kort_board(session, session.get(Workspace, workspace_id), today=today()), None
     board, error = bills_module.current(session, workspace_id)
     if board is None:
         raise HTTPException(status_code=503, detail=error or "Сводная таблица ещё читается - попробуйте через минуту")

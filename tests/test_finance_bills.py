@@ -1230,7 +1230,9 @@ def test_bez_svodki_bot_molchit(app: FastAPI, book) -> None:
 def test_razdel_ne_vystavleny(app: FastAPI, book) -> None:
     owner = register(app)
     empty = owner.get(f"{BASE}/bills").json()
-    assert empty == {"source": None, "items": [], "issued": [], "counts": None, "channel": None, "can_edit": True}
+    # Без сводной - счета по начислениям договоров KORT; договоров нет - и счетов нет.
+    assert empty["source"]["kind"] == "kort" and empty["items"] == [] and empty["issued"] == [] and empty["channel"] is None
+    assert not any(value for key, value in empty["counts"].items() if not key.endswith("_total"))
     connect(owner)
     data = owner.get(f"{BASE}/bills").json()
     assert data["counts"]["overdue"] == 8 and data["counts"]["overdue_total"] == "891000"
