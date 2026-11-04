@@ -1980,7 +1980,7 @@ def accept(
         if kind == "transfer":
             done = _complete_half(values, account_from, account_to, halves)
             if done is not None:
-                # Половинка могла родиться этой же загрузкой и ещё не лечь в базу.
+                # Ссылка - вместе с остальными, после записи пачки (см. ниже).
                 linked.append((row, done.id))
                 completed += 1
                 continue
@@ -2047,8 +2047,11 @@ def accept(
         imported += 1
         if key:
             known_keys.add(key)
-        if kind == "transfer" and not (account_from and account_to):
-            halves[(paid_at.isoformat(), _money(amount))].append(operation)
+        # Половинку, заведённую этой же загрузкой, вторая строка файла не
+        # дописывает: строки одного файла - разные строки выписки, их пары уже
+        # свёл `_pair_transfers`. Дописка «склеила» бы две строки в одну, и одна
+        # из них пропала бы из журнала (журнал BBC, 22.07: два «Пэй - Юр счёт»
+        # по 150 000 и перевод с депозита на те же 150 000).
     session.add_all(new_operations)
     session.flush()
     for row, operation_id in linked:

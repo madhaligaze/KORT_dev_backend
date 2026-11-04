@@ -276,6 +276,30 @@ def test_polovinka_dopisyvaetsya_vtoroy_vypiskoy(space):
         assert session.scalar(sa.select(sa.func.count(Operation.id)).where(Operation.kind == "transfer")) == 2
 
 
+def test_kazhdaya_stroka_vypiski_ostaetsya_v_zhurnale(space):
+    """Две одинаковые половинки и перевод на ту же сумму в один день - три строки выписки, три стороны в журнале.
+
+    Журнал BBC, 22.07: два «Пэй - Юр счёт» по 150 000 на Kaspi и перевод с
+    депозита на 150 000. Перевод сводился с одной половинкой, а при «Принять»
+    ещё и «дописывался» ко второй, заведённой той же загрузкой, - строка
+    выписки пропадала из журнала без следа.
+    """
+    rows = [
+        bbc_row("22.07.2026", KASPI_HR, income="150 000", sub="Пэй - Юр счет", group="Перемещения", comment="Pay 1"),
+        bbc_row("22.07.2026", KASPI_HR, income="150 000", sub="Пэй - Юр счет", group="Перемещения", comment="Pay 2"),
+        bbc_row("22.07.2026", DEPO_HR, expense="150 000", sub="Текущий счет - Депозит", group="Перемещения", comment="С депозита"),
+    ]
+    payload = _upload(space, book_of(rows, REFERENCE), "Пэй.xlsx")
+    done = _accept(space, payload["batch_id"])
+    assert done["completed"] == 0
+    with finance_session() as session:
+        sides = []
+        for item in session.scalars(sa.select(Operation).where(Operation.paid_at == date(2026, 7, 22))):
+            sides += [("in", item.account_to_id)] if item.account_to_id else []
+            sides += [("out", item.account_from_id)] if item.account_from_id else []
+        assert sorted(side for side, _account in sides) == ["in", "in", "out"]
+
+
 def test_pravka_v_predprosmotre(space):
     payload = _upload(space, book_of(BASIC, REFERENCE))
     batch = uuid.UUID(payload["batch_id"])
