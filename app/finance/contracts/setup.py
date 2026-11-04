@@ -16,6 +16,7 @@ from app.finance.layout import norm
 from app.finance.contracts import summary as summary_module
 from app.finance.contracts import views as views_module
 from app.finance.contracts.fields import (
+    BOOKS,
     CHOICES,
     ENTITY,
     FIELD_BY_KEY,
@@ -45,8 +46,6 @@ from app.finance.contracts.models import (
     ListValue,
 )
 from app.finance.contracts.service import Access, Registry, today
-from app.finance.core import formulas as core_formulas
-from app.finance.core import views as core_views
 from app.finance.models import POSITION_STEP, Account, Counterparty, Workspace
 from app.finance.service import FinanceError
 
@@ -137,20 +136,7 @@ def schema(session: Session, workspace: Workspace, access: Access) -> dict[str, 
             if item.archived_at is None
         ],
         "views": [view_out(view) for view in registry.views],
-        # Виды договоров - книги листов (`core/views.py`): название, владелец,
-        # отбор, меры, группировки, формы; отдел доли - владелец с мерой доли.
-        "books": core_views.schema_books(session, workspace, access.user_id),
-        "measures": [
-            {"key": item.key, "title": item.title, "type": item.type}
-            for item in core_views.MEASURES
-            if item.key in core_views.COLUMN_MEASURES and item.key not in access.hidden
-        ]
-        # Формулы компании - меры колонкой листа, только чтение; значения - вызовом «спросить».
-        + [
-            {"key": item.key, "title": item.title, "type": "money" if item.type == "money" else "number",
-             "formula": item.text, "kind": item.type, "digits": item.digits}
-            for item in core_formulas.of(session, workspace.id)
-        ],
+        "books": list(BOOKS),
         # Откуда «Оплачено (сводка)»: книга, лист, когда прочитана. Без
         # похода в Google - схему перечитывают на каждую настройку.
         "summary": summary_module.status(session, workspace.id),
@@ -301,16 +287,45 @@ def merge_parties(
     Операции журнала тоже переезжают - иначе один клиент остался бы в отчёте
     двумя строками. Сводит только человек: похожесть - повод спросить, а не
     решить.
-
-    С 24.10.2026 переносом занимается ядро (`core/participants.merge_into`):
-    раньше здесь у нашего юрлица терялись расчётные счета и базы 1С, а
-    одинаковое написание у обоих роняло сведение на уникальном ключе.
     """
-    from app.finance.core.participants import merge_into
+    from app.finance.contracts.models import Contract
+    from app.finance.models import Invoice, Operation, Recurrence
 
     if keep == drop:
         return
-    merge_into(session, workspace, keep=keep, drop=drop)
+    kept, dropped = session.get(Counterparty, keep), session.get(Counterparty, drop)
+    if kept is None or dropped is None or kept.workspace_id != workspace.id or dropped.workspace_id != workspace.id:
+        raise FinanceError("Контрагент не найден")
+    for column in (Contract.executor_id, Contract.customer_id):
+        session.execute(sa.update(Contract).where(column == drop).values({column.key: keep}))
+    for model in (Operation, Invoice, Recurrence):
+        session.execute(sa.update(model).where(model.counterparty_id == drop).values(counterparty_id=keep))
+    session.execute(
+        sa.update(CounterpartyName)
+        .where(CounterpartyName.counterparty_id == drop)
+        .values(counterparty_id=keep)
+    )
+    remember_alias(session, workspace.id, keep, dropped.name, source="manual")
+    if session.get(GroupEntity, drop) is not None and session.get(GroupEntity, keep) is None:
+        entity = session.get(GroupEntity, drop)
+        session.add(
+            GroupEntity(
+                counterparty_id=keep,
+                workspace_id=workspace.id,
+                code=entity.code,
+                full_name=entity.full_name,
+                bin=entity.bin,
+                vat_payer=entity.vat_payer,
+                position=entity.position,
+            )
+        )
+        session.flush()
+    session.execute(sa.delete(GroupEntity).where(GroupEntity.counterparty_id == drop))
+    from datetime import datetime, timezone
+
+    dropped.archived_at = datetime.now(timezone.utc)
+    session.flush()
+    _schema_changed(session, workspace)
 
 
 # ── Поля ─────────────────────────────────────────────────────────────────────
@@ -894,9 +909,8 @@ def upsert_view(
         if key in taken:
             key = slug_for(key, taken)
         book = str(data.get("book") or "")
-        found = registry.books.get(book)
-        if found is None or found.archived_at is not None:
-            raise FinanceError("Такого вида с листами нет")
+        if book not in BOOKS:
+            raise FinanceError("Такого раздела листов нет")
         view = EntityView(
             workspace_id=workspace.id,
             entity=ENTITY,

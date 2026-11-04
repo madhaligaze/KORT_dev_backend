@@ -31,8 +31,9 @@
 5. **Выписку из банка он читает только в своём формате.** Настоящая выписка
    приходит PDF-ом, и её надо разбирать, а не просить человека переложить
    двести строк в шаблон. Здесь PDF уходит в разбор выписок продукта
-   (`app.finance.statements` → `app.services.document_service`). Выписка таблицей -
-   Excel любого года, HTML под видом .xls, выгрузка 1С - читается этим же модулем: формат
+   (`app.finance.statements` → `app.services.document_service`), тот же, что
+   работает в разделе «Анализ выписок». Выписка таблицей - Excel любого
+   года, HTML под видом .xls, выгрузка 1С - читается этим же модулем: формат
    решает содержимое файла (`formats`), реквизиты над таблицей - счёт,
    период, остатки, владелец - читаются как колонки, по подписям, а не по
    месту (`read_requisites`). Шаблона «под банк» нет намеренно: выписка
@@ -44,35 +45,19 @@
 """
 from __future__ import annotations
 
-import calendar
 import hashlib
+import io
 import logging
 import re
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from decimal import Decimal
-from typing import Any, Sequence
+from decimal import Decimal, InvalidOperation
+from typing import Any, Iterable, Sequence
 
 from app.finance.layout import Column, norm, squash
 from app.finance import banks, formats
 from app.finance.statements import StatementError, read_statement
-from app.finance.intake import header as intake_header
-from app.finance.intake import rows as intake_rows
-from app.finance.intake import tables as intake_tables
-from app.finance.intake.values import (  # noqa: F401 - имена остаются и здесь
-    _DATE_PARTS,
-    _MONEY_JUNK,
-    _MONTH_NAMES,
-    _SPACES,
-    _WEEKDAY,
-    DateReading,
-    Money,
-    _date_parts,
-    decide_date_order,
-    parse_date,
-    parse_money,
-)
 
 log = logging.getLogger(__name__)
 
@@ -89,7 +74,7 @@ class ImportError_(RuntimeError):
 #
 # `hint` не ставится намеренно. У книги, которую ведут руками, «привычной
 # позиции» не существует: файл каждый раз другой. Подсказка нужна там, где
-# читают один и тот же лист годами, здесь она врала бы.
+# читают один и тот же лист годами (см. `app.bbc`), здесь она врала бы.
 
 COLUMNS: tuple[Column, ...] = (
     Column(
@@ -259,38 +244,9 @@ COLUMNS: tuple[Column, ...] = (
     Column(
         key="comment",
         title="Комментарий",
-        # «Комментарии» - не опечатка «Комментария»: так колонка названа в
-        # журналах, которые ведут руками, и без этого написания назначение
-        # платежа из такого журнала терялось целиком (нечёткое совпадение
-        # «комментари-и» с «комментари-й» не берёт: ни одно не начало другого).
         names=(
-            "комментарий", "комментарии", "назначение платежа", "назначение", "описание", "примечание", "comment",
+            "комментарий", "назначение платежа", "назначение", "описание", "примечание", "comment",
             "детали операции", "содержание операции",
-        ),
-        required=False,
-    ),
-    # Номер договора, как его написал источник. Довод разнесения оплаты по
-    # договорам: платит нередко не сам клиент (Kaspi Pay от физлица, другое
-    # ТОО), и по плательщику оплату не отнести, а по номеру - можно.
-    Column(
-        key="contract_ref",
-        title="№ договора",
-        names=(
-            "№ дог.", "№ дог", "№ договора", "номер договора", "договор №", "№ контракта", "номер контракта",
-            "contract no", "contract number",
-        ),
-        required=False,
-    ),
-    # За какой месяц платёж: «ИЮНЬ 2026» в колонке «ОПиУ период» журнала. Это
-    # месяц отчёта о прибылях (дата начисления) и подсказка, какой месяц
-    # договора оплачен. Не «ДДС Месяц»: тот - месяц движения денег, он и так
-    # есть в дате платежа.
-    Column(
-        key="period_month",
-        title="Месяц начисления",
-        names=(
-            "опиу период", "период опиу", "месяц опиу", "опиу месяц", "месяц начисления", "отчетный месяц",
-            "за месяц", "месяц услуги", "период услуги",
         ),
         required=False,
     ),
@@ -299,8 +255,14 @@ COLUMNS: tuple[Column, ...] = (
 #: Что именно нельзя не знать, чтобы строка стала операцией.
 ESSENTIAL = ("paid_at", "amount")
 
-#: Слова итоговой строки - общие для всех входов (`intake.rows`).
-TOTAL_WORDS = intake_rows.TOTAL_WORDS
+#: Слова, по которым строка опознаётся как итоговая, а не как операция.
+#: Итоговую строку не удаляют перед импортом почти никогда - и это не ошибка
+#: человека, а свойство файла: в книге итог нужен. Finmap на таком файле
+#: отказывается целиком («Итого - неверный формат даты»).
+TOTAL_WORDS = (
+    "итого", "всего", "итог", "баланс", "остаток на конец", "остаток на начало",
+    "оборот", "сальдо", "total", "subtotal",
+)
 
 #: Слова, означающие вид операции в колонке «Тип».
 KIND_WORDS: dict[str, tuple[str, ...]] = {
@@ -321,6 +283,27 @@ KIND_CODES: dict[str, str] = {
     "к": "income", "кт": "income", "c": "income", "cr": "income",
 }
 
+_SPACES = re.compile(r"[\s   ]+")
+_MONEY_JUNK = re.compile(r"[^0-9,.\-()]")
+_DATE_PARTS = re.compile(r"^\s*(\d{1,4})[.\-/\\](\d{1,2})[.\-/\\](\d{1,4})")
+#: День недели перед датой. В книгах, которые ведут руками, дата часто записана
+#: форматом «ддд ДД.ММ.ГГ» - в «Журнале ГК BBC» это «пн 01.06.26». Для человека
+#: это ячейка с датой, для разбора - текст, не начинающийся с цифры: без снятия
+#: приставки книга целиком уходила в отложенные строки с «не понял дату».
+_WEEKDAY = re.compile(
+    r"^\s*(?:пн|вт|ср|чт|пт|сб|вс|понедельник|вторник|среда|четверг|пятница|суббота|"
+    r"воскресенье|дүйсенбі|сейсенбі|сәрсенбі|бейсенбі|жұма|сенбі|жексенбі|"
+    r"mon|tue|wed|thu|fri|sat|sun|monday|tuesday|wednesday|thursday|friday|"
+    r"saturday|sunday)\.?,?\s+",
+    re.IGNORECASE,
+)
+_MONTH_NAMES = {
+    "янв": 1, "фев": 2, "мар": 3, "апр": 4, "май": 5, "мая": 5, "июн": 6, "июл": 7,
+    "авг": 8, "сен": 9, "окт": 10, "ноя": 11, "дек": 12,
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6, "jul": 7, "aug": 8,
+    "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+
 
 # ── Чтение файла в строки ────────────────────────────────────────────────────
 
@@ -332,16 +315,48 @@ def read_rows(data: bytes, file_name: str) -> list[list[Any]]:
     имеет неоднозначности порядка частей, и терять это знание, обратив её в
     текст, - значит создать себе задачу угадывания на пустом месте.
 
-    Читает общий читатель приёмника (`intake.tables`): формат решает
-    содержимое, а не расширение - «.xls» из интернет-банка бывает и старым
-    Excel, и HTML-таблицей, и XML Excel 2003. Раньше на любой .xls человек
-    получал «пересохраните как .xlsx».
+    Чем читать, решает содержимое, а не расширение (`formats.sniff`): «.xls»
+    из интернет-банка бывает и старым Excel, и HTML-таблицей, и XML Excel 2003.
+    Раньше на любой .xls человек получал «пересохраните как .xlsx».
     """
+    kind = formats.sniff(data, file_name)
+    if kind == "xlsx":
+        return _read_xlsx(data)
+    if kind == "pdf":
+        raise ImportError_("Это PDF - он читается разбором выписок, а не как таблица")
+    if kind == "image":
+        raise ImportError_(
+            "Это изображение. Загрузите выписку из банка в PDF или Excel - "
+            "снимок экрана не содержит всех строк и реквизитов."
+        )
+    if kind == "text" and b"\x00" in data[:4096] and not data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        raise ImportError_(
+            f"Не понимаю формат файла «{file_name}». Подойдут PDF, Excel (.xlsx, .xls), "
+            "CSV и выгрузка банк-клиента для 1С."
+        )
     try:
-        found = intake_tables.read(data, file_name, detail=False, max_rows=None, hidden_sheets=True)
-    except intake_tables.TableError as exc:
+        tables = formats.read_tables(data, kind)
+    except formats.FormatError as exc:
         raise ImportError_(str(exc)) from exc
-    return _best_table([table.rows for table in found])
+    return _best_table(tables)
+
+
+def _read_xlsx(data: bytes) -> list[list[Any]]:
+    try:
+        import openpyxl
+    except ImportError as exc:  # pragma: no cover - библиотека в зависимостях
+        raise ImportError_("На сервере нет openpyxl - чтение Excel недоступно") from exc
+
+    try:
+        book = openpyxl.load_workbook(io.BytesIO(data), data_only=True, read_only=True)
+    except Exception as exc:  # noqa: BLE001 - сюда попадает любой битый zip
+        raise ImportError_(f"Файл не открывается как Excel: {exc}") from exc
+
+    try:
+        tables = [[list(row) for row in sheet.iter_rows(values_only=True)] for sheet in book.worksheets]
+    finally:
+        book.close()
+    return _best_table(tables)
 
 
 def _best_table(tables: Sequence[list[list[Any]]]) -> list[list[Any]]:
@@ -368,6 +383,13 @@ def _best_table(tables: Sequence[list[list[Any]]]) -> list[list[Any]]:
     return best
 
 
+def _read_csv(data: bytes) -> list[list[Any]]:
+    try:
+        return _trim(formats.read_csv(data)[0])
+    except formats.FormatError as exc:
+        raise ImportError_(str(exc)) from exc
+
+
 def _trim(rows: list[list[Any]]) -> list[list[Any]]:
     """Убрать пустые строки с конца и хвостовые пустые колонки."""
     while rows and not any(_has_value(cell) for cell in rows[-1]):
@@ -375,7 +397,12 @@ def _trim(rows: list[list[Any]]) -> list[list[Any]]:
     return rows
 
 
-_has_value = intake_rows.has_value
+def _has_value(cell: Any) -> bool:
+    if cell is None:
+        return False
+    if isinstance(cell, str):
+        return bool(cell.strip())
+    return True
 
 
 # ── Поиск шапки ──────────────────────────────────────────────────────────────
@@ -568,81 +595,297 @@ def _merge_subheader(rows: Sequence[Sequence[Any]], index: int) -> tuple[list[st
     Так печатают выписки Halyk и ЦентрКредит: верхняя ячейка объединена над
     несколькими колонками, названия денег стоят строкой ниже. Одна верхняя
     строка не называет ни одной денежной колонки - и файл отказывался с «нет
-    колонки суммы», хотя суммы в нём есть. Общее для всех входов -
-    `intake.header.compose`; здесь - каталог выписок.
+    колонки суммы», хотя суммы в нём есть.
+
+    Для каждой колонки пробуем по порядку: «группа + подпись» («Корреспондент
+    Счёт» - счёт контрагента, а не наш), одну подпись («Дебет»), одну группу.
+    Нижняя строка признаётся продолжением шапки, только если с ней узнаётся
+    больше колонок, чем без неё: иначе это первая строка данных.
     Возвращает шапку и номер первой строки тела.
     """
-    return intake_header.compose(rows, index, _match_strength, _header_score, swapped=False)
+    header = [_header_text(cell) for cell in rows[index]]
+    if index + 1 >= len(rows) or not _looks_like_subheader(rows[index + 1]):
+        return header, index + 1
+    sub = [_header_text(cell) for cell in rows[index + 1]]
+    merged: list[str] = []
+    group = ""
+    for position in range(max(len(header), len(sub))):
+        top = header[position] if position < len(header) else ""
+        low = sub[position] if position < len(sub) else ""
+        if squash(top):
+            group = top
+        elif not squash(low):
+            group = ""
+        if not squash(low):
+            merged.append(top)
+            continue
+        base = top if squash(top) else group
+        candidates = ([f"{base} {low}"] if squash(base) else []) + [low] + ([top] if squash(top) else [])
+        # Самое точное совпадение; при равных - раньше в списке.
+        best = max(candidates, key=_match_strength)
+        merged.append(best if _match_strength(best) else (top if squash(top) else low))
+    if _header_score(merged) > _header_score(header):
+        return merged, index + 2
+    return header, index + 1
 
 
-_header_text = intake_header.text
-_looks_like_subheader = intake_header.looks_like_subheader
-_is_numbering_row = intake_rows.is_numbering
+def _header_text(cell: Any) -> str:
+    return "" if cell is None else str(cell)
 
 
-_PERIOD_WORD = re.compile(r"^([a-zа-я]+)\.?\s*(\d{4}|\d{2})\s*(?:г\.?|года?|year)?$")
-_PERIOD_MONTH_YEAR = re.compile(r"^(\d{1,2})[./\-](\d{4})$")
-_PERIOD_YEAR_MONTH = re.compile(r"^(\d{4})[./\-](\d{1,2})$")
-_PERIOD_YEAR = re.compile(r"^(\d{4})\s*(?:г\.?|года?|year)?$")
-#: «3 квартал 2026», «III кв. 2026», «Q3 2026».
-_PERIOD_QUARTER = re.compile(r"^(?:([1-4]|iv|iii|ii|i)\s*(?:-?й\s*)?(?:квартал|кв\.?)|q([1-4]))\s*(\d{4})\s*(?:г\.?|года?)?$")
-_ROMAN = {"i": 1, "ii": 2, "iii": 3, "iv": 4}
+def _looks_like_subheader(row: Sequence[Any]) -> bool:
+    """Строка из одних подписей: ни дат, ни чисел, ни текста, похожего на них."""
+    texts = [cell for cell in row if _has_value(cell)]
+    if not texts:
+        return False
+    for cell in texts:
+        if not isinstance(cell, str):
+            return False
+        if _DATE_PARTS.match(cell) or re.fullmatch(r"[\d\s.,\-+()₸$€]+", cell.strip()):
+            return False
+    return True
 
 
-def parse_period(raw: Any, reading: DateReading) -> tuple[date, date, str] | None:
-    """Месяц, квартал или год из колонки «за какой месяц»: начало, конец и «month»/«quarter»/«year».
+def _is_numbering_row(cells: Sequence[Any]) -> bool:
+    """Строка «1 2 3 … 9» под шапкой - нумерация колонок, как в бланке.
 
-    Только запись целиком: «ИЮНЬ 2026», «06.2026», «2026-06», «3 квартал 2026»,
-    «2027 год», дата.
-    «Старые (до Май/Июня 2026)» - не месяц, хотя в ней есть и «май», и «июня»,
-    и год: подпись остаётся в строке источника, а месяца у операции нет.
+    Её печатают Kaspi Business и выгрузки по форме банка. Разбор принимал её за
+    операцию: дата «2» становилась 1 января 1900 года, «3» и «4» - суммами в
+    обеих колонках сразу.
     """
-    if raw is None or isinstance(raw, bool):
+    values = [cell for cell in cells if _has_value(cell)]
+    if len(values) < 3:
+        return False
+    numbers: list[int] = []
+    for value in values:
+        if isinstance(value, bool):
+            return False
+        if isinstance(value, int) or (isinstance(value, float) and value.is_integer()):
+            numbers.append(int(value))
+        elif isinstance(value, str) and value.strip().isdigit():
+            numbers.append(int(value.strip()))
+        else:
+            return False
+    return numbers[0] in (0, 1) and numbers == list(range(numbers[0], numbers[0] + len(numbers)))
+
+
+# ── Числа ────────────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class Money:
+    """Разобранная сумма: величина по модулю и знак отдельно.
+
+    Знак вынесен из величины намеренно: дальше он превращается в вид операции,
+    а не в отрицательное число в базе. Тогда запись «минус приход» становится
+    невыразимой, а не тихо возможной.
+    """
+
+    value: Decimal
+    negative: bool
+
+
+def parse_money(raw: Any) -> Money | None:
+    """Сумма из ячейки. Понимает пробелы, запятую, скобки, минус, апостроф.
+
+    Возвращает `None`, если в ячейке нет числа вообще. Пустая ячейка - не
+    ошибка: в двухколоночной выписке («Приход»/«Расход») одна из двух всегда
+    пуста.
+    """
+    if raw is None:
         return None
-    if isinstance(raw, (int, float)) and raw < 10000:
-        # «6» - номер месяца без года, а не дата Excel из 1900 года.
+    if isinstance(raw, bool):
         return None
-    if isinstance(raw, (datetime, date, int, float)):
-        day = parse_date(raw, reading)
-        return _month_span(day.year, day.month) if day else None
-    text = _SPACES.sub(" ", str(raw)).strip().lower().replace("ё", "е")
+    if isinstance(raw, (int, float, Decimal)):
+        value = Decimal(str(raw))
+        return Money(abs(value), value < 0)
+
+    text = str(raw).strip()
+    if not text:
+        return None
+    text = text.lstrip("'")  # наследие выгрузок 1С: числа как текст
+    negative = False
+    if text.startswith("(") and text.endswith(")"):
+        # Бухгалтерские скобки. Finmap их теряет: «(15 000)» приезжает
+        # доходом 15 000, то есть ошибка вдвое больше суммы.
+        negative = True
+        text = text[1:-1]
+    text = _SPACES.sub("", text)
+    if text.endswith("-"):  # «1 500-» - так пишет часть банковских выгрузок
+        negative = True
+        text = text[:-1]
+    text = _MONEY_JUNK.sub("", text)
+    if text.startswith("-"):
+        negative = True
+        text = text[1:]
     if not text:
         return None
 
-    def year_of(value: str) -> int:
-        number = int(value)
-        return number + (2000 if number < 70 else 1900) if number < 100 else number
-
-    match = _PERIOD_WORD.match(text)
-    if match and match.group(1)[:3] in _MONTH_NAMES:
-        return _month_span(year_of(match.group(2)), _MONTH_NAMES[match.group(1)[:3]])
-    match = _PERIOD_MONTH_YEAR.match(text)
-    if match:
-        return _month_span(int(match.group(2)), int(match.group(1)))
-    match = _PERIOD_YEAR_MONTH.match(text)
-    if match:
-        return _month_span(int(match.group(1)), int(match.group(2)))
-    match = _PERIOD_YEAR.match(text)
-    if match:
-        year = int(match.group(1))
-        return date(year, 1, 1), date(year, 12, 31), "year"
-    match = _PERIOD_QUARTER.match(text)
-    if match:
-        raw_quarter = match.group(1) or match.group(2)
-        quarter = int(raw_quarter) if raw_quarter.isdigit() else _ROMAN[raw_quarter]
-        year = int(match.group(3))
-        last = quarter * 3
-        return date(year, last - 2, 1), date(year, last, calendar.monthrange(year, last)[1]), "quarter"
-    if _date_parts(text):
-        day = parse_date(text, reading)
-        return _month_span(day.year, day.month) if day else None
-    return None
-
-
-def _month_span(year: int, month: int) -> tuple[date, date, str] | None:
-    if not 1 <= month <= 12 or not 1900 <= year <= 2200:
+    # Разделители: последний из «,» и «.» считается десятичным, если после него
+    # не три цифры. «1,234.56» → 1234.56; «1.234,56» → 1234.56; «1,234» → 1234.
+    comma, dot = text.rfind(","), text.rfind(".")
+    cut = max(comma, dot)
+    if cut >= 0:
+        tail = text[cut + 1 :]
+        if len(tail) == 3 and tail.isdigit():
+            text = text.replace(",", "").replace(".", "")
+        else:
+            text = text[:cut].replace(",", "").replace(".", "") + "." + tail
+    try:
+        value = Decimal(text)
+    except InvalidOperation:
         return None
-    return date(year, month, 1), date(year, month, calendar.monthrange(year, month)[1]), "month"
+    return Money(abs(value), negative or value < 0)
+
+
+# ── Даты ─────────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class DateReading:
+    """Как читать даты этого файла.
+
+    `order` - «dmy» или «mdy». `evidence` - чем это доказано; попадает в
+    протокол импорта, чтобы решение было видно человеку, а не считалось
+    магией.
+    """
+
+    order: str = "dmy"
+    evidence: str = ""
+    ambiguous: bool = False
+    #: Примеры дат, из-за которых порядок остался неизвестным.
+    samples: tuple[str, ...] = ()
+
+
+def _date_parts(text: str) -> tuple[int, int, int] | None:
+    match = _DATE_PARTS.match(_WEEKDAY.sub("", text, count=1))
+    if not match:
+        return None
+    a, b, c = (int(part) for part in match.groups())
+    return a, b, c
+
+
+def decide_date_order(values: Iterable[Any]) -> DateReading:
+    """Решить порядок частей даты один раз на файл.
+
+    Правило: если хоть где-то первая часть больше 12 - порядок «день-месяц»;
+    если где-то вторая больше 12 - «месяц-день». Нашлось и то и другое - файл
+    внутренне противоречив, и это отдельный разговор с человеком, а не выбор
+    большинством. Не нашлось ничего - все даты подходят под оба чтения, и тогда
+    мы обязаны спросить, а не взять привычное.
+
+    Именно здесь Finmap ошибается тихо: он решает по каждой строке отдельно, и
+    в одном файле «12/25/2026» становится 25 декабря, а «08/03/2026» - 8 марта.
+    """
+    first_big = second_big = 0
+    year_first = 0
+    samples: list[str] = []
+    for value in values:
+        if isinstance(value, (datetime, date)):
+            continue
+        text = str(value or "").strip()
+        if not text:
+            continue
+        parts = _date_parts(text)
+        if not parts:
+            continue
+        a, b, _c = parts
+        if a > 31:  # «2026-08-03» - год впереди, порядок однозначен
+            year_first += 1
+            continue
+        if a > 12:
+            first_big += 1
+        elif b > 12:
+            second_big += 1
+        elif len(samples) < 5:
+            samples.append(text)
+
+    if first_big and second_big:
+        return DateReading(
+            order="dmy",
+            ambiguous=True,
+            evidence=(
+                f"в файле есть и даты, где первое число больше 12 ({first_big} шт.), "
+                f"и даты, где больше 12 второе ({second_big} шт.) - "
+                "один и тот же файл записан двумя разными способами"
+            ),
+            samples=tuple(samples),
+        )
+    if first_big:
+        return DateReading("dmy", f"нашлись даты с числом больше 12 на первом месте ({first_big} шт.)")
+    if second_big:
+        return DateReading("mdy", f"нашлись даты с числом больше 12 на втором месте ({second_big} шт.)")
+    if year_first and not samples:
+        return DateReading("dmy", "все даты записаны с года - порядок однозначен")
+    if not samples:
+        return DateReading("dmy", "даты пришли из Excel датами - порядок не требуется")
+    return DateReading(
+        order="dmy",
+        ambiguous=True,
+        evidence="все даты подходят и под «день-месяц», и под «месяц-день»",
+        samples=tuple(samples),
+    )
+
+
+def parse_date(raw: Any, reading: DateReading) -> date | None:
+    """Дата из ячейки по решённому для файла порядку частей."""
+    if raw is None:
+        return None
+    if isinstance(raw, datetime):
+        return raw.date()
+    if isinstance(raw, date):
+        return raw
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        # Серийный номер Excel. Эпоха 1899-12-30 - та же, что в «Книгах»;
+        # полдень не добавляем: он округляет дату вверх и уводит книгу на день.
+        try:
+            from datetime import timedelta
+
+            return (datetime(1899, 12, 30) + timedelta(days=float(raw))).date()
+        except (OverflowError, ValueError):
+            return None
+
+    text = str(raw).strip()
+    if not text:
+        return None
+
+    parts = _date_parts(text)
+    if parts:
+        a, b, c = parts
+        if a > 31:
+            year, month, day = a, b, c
+        elif reading.order == "mdy":
+            month, day, year = a, b, c
+        else:
+            day, month, year = a, b, c
+        if year < 100:
+            year += 2000 if year < 70 else 1900
+        try:
+            return date(year, month, day)
+        except ValueError:
+            return None
+
+    # «3 сентября 2026», «03 сен 2026», «Sep 3, 2026», «пн 3 сентября 2026»
+    lowered = _WEEKDAY.sub("", text, count=1).lower().replace(",", " ")
+    chunks = _SPACES.sub(" ", lowered).split(" ")
+    day = month = year = 0
+    for chunk in chunks:
+        if chunk.isdigit():
+            number = int(chunk)
+            if number > 31:
+                year = number
+            elif not day:
+                day = number
+        else:
+            key = chunk[:3]
+            if key in _MONTH_NAMES:
+                month = _MONTH_NAMES[key]
+    if day and month:
+        try:
+            return date(year or date.today().year, month, day)
+        except ValueError:
+            return None
+    return None
 
 
 # ── Реквизиты выписки ────────────────────────────────────────────────────────
@@ -696,7 +939,6 @@ class StatementInfo:
             "account_number": self.account_number,
             "card_number": "",
             "owner": self.owner,
-            "owner_bin": self.owner_bin,
             "bank_name": self.bank,
             "account": account,
         }
@@ -909,7 +1151,25 @@ def _kind_from_word(text: str) -> str | None:
     return None
 
 
-_is_total_row = intake_rows.is_total
+def _is_total_row(cells: Sequence[Any], *, dated: bool = False) -> bool:
+    """Строка итога, а не операция.
+
+    У строки с датой операции итогом считается только ячейка, которая
+    начинается со слова итога («Итого за август»). Раньше хватало слова где
+    угодно в строке, и операция «Пополнение баланса Tele2» пропускалась молча
+    как итоговая - деньги уходили из учёта без единого замечания.
+    """
+    texts = [norm(cell) for cell in cells if isinstance(cell, str) and cell.strip()]
+    if any(text.startswith(word) for text in texts for word in ("итого", "всего", "total", "subtotal")):
+        return True
+    if dated:
+        return False
+    joined = " ".join(norm(cell) for cell in cells if _has_value(cell))
+    if not joined:
+        return False
+    return any(joined.startswith(word) or f" {word}" in f" {joined}" for word in TOTAL_WORDS[:4]) or any(
+        joined == word for word in TOTAL_WORDS
+    )
 
 
 def analyze(
@@ -1035,18 +1295,6 @@ def analyze_rows(
             continue
         date_cells.extend(row[index] for row in body if index < len(row))
     reading = decide_date_order(date_cells)
-    if reading.ambiguous and header_index > 0:
-        # Все даты операций - с днём не больше 12 (выписка ИП за июнь, полигон),
-        # но над таблицей тот же банк печатает «Период: 01.06.2026 - 30.06.2026»:
-        # 30 на первом месте решает порядок для всего файла. Противоречие в
-        # самих операциях реквизиты не перебивают - оно остаётся вопросом.
-        above = [
-            piece for cells in rows[:header_index] for cell in cells if isinstance(cell, str)
-            for piece in _DATE_IN_TEXT.findall(cell)
-        ]
-        joined = decide_date_order([*date_cells, *above]) if above else reading
-        if not joined.ambiguous:
-            reading = DateReading(joined.order, f"{joined.evidence} - в реквизитах над таблицей")
     if date_order in ("dmy", "mdy"):
         reading = DateReading(date_order, "порядок указан человеком", ambiguous=False)
 
@@ -1487,22 +1735,6 @@ def _parse_row(
     for key in ("period_start", "period_end"):
         value = parse_date(cell(key), reading)
         row.values[key] = value.isoformat() if value else None
-    # «За какой месяц» - период начисления, а у месяца ещё и дата начисления:
-    # по ней отчёт о прибылях кладёт платёж в свой месяц. Колонки периода и
-    # даты начисления, если они есть в файле, точнее - их не перебиваем.
-    span = parse_period(cell("period_month"), reading)
-    row.values["period_label"] = ""
-    if span is not None:
-        start, end, unit = span
-        if not row.values["period_start"] and not row.values["period_end"]:
-            row.values["period_start"], row.values["period_end"] = start.isoformat(), end.isoformat()
-        if unit == "month" and not row.values["accrued_at"]:
-            row.values["accrued_at"] = start.isoformat()
-    elif _has_value(cell("period_month")):
-        # Период назван, но не месяцем: «Старые (до Май/Июня 2026)». Месяца у
-        # операции нет, а подпись остаётся - оплата не за месяцы учёта.
-        row.values["period_label"] = _text(cell("period_month")) or ""
-    row.values["contract_ref"] = _text(cell("contract_ref")) or ""
 
     # Сумма и вид операции разбираются вместе: в двухколоночной выписке вид
     # задаёт как раз то, в какой из колонок стоит число.
@@ -1556,12 +1788,7 @@ def _parse_row(
         if found:
             return found
         close = [real for key_, real in ctx.accounts_by_name.items() if key_.startswith(norm(name)[:4])]
-        # Строка без даты и без суммы - не операция, а повтор шапки внутри
-        # данных («Дата | ТОО | Сумма» во второй строке выгрузки Kaspi Pay): её
-        # «ТОО» в колонке счёта просило завести счёт «ТОО». Замечание у строки
-        # остаётся, в список «завести счета» она не идёт.
-        if paid_at is not None or amount is not None:
-            ctx.missing_accounts.add(name)
+        ctx.missing_accounts.add(name)
         row.state = "failed"
         hint = f"; похожие есть: {', '.join(sorted(close)[:3])}" if close else ""
         row.problem(key, f"счёт «{name}» не найден{hint}")
@@ -1754,6 +1981,5 @@ __all__ = [
     "fingerprint",
     "parse_date",
     "parse_money",
-    "parse_period",
     "read_rows",
 ]

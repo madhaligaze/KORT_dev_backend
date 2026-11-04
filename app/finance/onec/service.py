@@ -36,7 +36,6 @@ KIND_TITLES = {
     "sf": "счёт-фактура",
     "esf": "ЭСФ",
     "payment": "поступление",
-    "refund": "возврат покупателю",
 }
 #: Фазы статуса, при которых абонентский договор ждёт документы в месяце.
 WORKING_PHASES = ("active", "in_progress")
@@ -251,8 +250,6 @@ def sync_base(workspace_id: uuid.UUID, base_id: uuid.UUID) -> SyncResult:
     """Перечитать базу (см. описание модуля): настройки → 1С → запись."""
     with finance_session() as session:
         base = get_base(session, workspace_id, base_id)
-        if base.url.startswith("file:"):
-            return SyncResult(False, "База из файлов: новые документы - следующей выгрузкой из 1С", dict(base.counts or {}), [])
         try:
             connection = sync_module.connection_of(base)
         except secretbox.SecretError as exc:
@@ -302,9 +299,7 @@ def sync_due(minutes: int) -> int:
         due = [
             (base.workspace_id, base.id)
             for base in session.scalars(sa.select(OnecBase).where(OnecBase.state == "active"))
-            # База из файлов перечитывается следующей выгрузкой, а не по сети.
-            if not base.url.startswith("file:")
-            and (base.last_sync_at is None or (now - base.last_sync_at).total_seconds() >= minutes * 60)
+            if base.last_sync_at is None or (now - base.last_sync_at).total_seconds() >= minutes * 60
         ]
     done = 0
     for workspace_id, base_id in due:
@@ -413,7 +408,7 @@ def _working(session: Session, workspace_id: uuid.UUID, entity_ids: set[uuid.UUI
 def month_view(
     session: Session, workspace: Workspace, month: str, *, base_id: uuid.UUID | None = None
 ) -> dict[str, Any]:
-    """Месяц по договорам: счёт, оплата, АВР, подписание, ЭСФ - как колонки таблиц юрлиц."""
+    """Месяц по договорам: счёт, оплата, АВР, подписание, ЭСФ - как колонки книг BBC."""
     try:
         year, number = (int(part) for part in month.split("-"))
         date(year, number, 1)

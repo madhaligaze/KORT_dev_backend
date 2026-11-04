@@ -16,7 +16,7 @@
 показывал весь реестр: лист «Заказчик ГК» на 192 строки выгружался пятью
 тысячами договоров. Новый лист без правила теперь пуст, пока правило не задано.
 
-Почему одной колонки мало: в реестре юротдела «Агентский» и «Финансовая помощь»
+Почему одной колонки мало: в реестре BBC «Агентский» и «Финансовая помощь»
 лежат в **предмете** при виде «Иное», и отбор «по виду» не поймал бы ни одной
 строки этих листов. Поэтому поле в условии - любое: вид, предмет, стороны,
 статус, свои поля и виртуальные признаки ниже.
@@ -28,7 +28,7 @@
 Подсветка строки
 ────────────────
 У блока может быть `paint` - условное форматирование, как в книге юротдела
-таблицы «Разовые» юротдела (`=TRIM($E2)="исполнен"` красит строку целиком):
+BBC «Разовые» (`=TRIM($E2)="исполнен"` красит строку целиком):
 `[{"filter": {"any": [{"all": [{"field": "status", "op": "in", "value": ["<id>"]}]}]}, "tone": "done"}]`.
 Условие - такое же правило, как у листа (и правится той же фразой), и
 считает его тоже только сервер: тон едет в принадлежности договора
@@ -165,24 +165,17 @@ def matches(rule: dict[str, Any] | None, facts: dict[str, Any]) -> bool:
     return any(all(_check(condition, facts) for condition in group.get("all", [])) for group in groups)
 
 
-def place(view: Any, facts: dict[str, Any], base: dict[str, Any] | None = None) -> int | None:
+def place(view: Any, facts: dict[str, Any]) -> int | None:
     """Блок листа, в котором стоит договор, или `None` - договора в листе нет.
 
     Договор встаёт в первый подходящий блок: в двух блоках одного листа одна
     запись не показывается - в Excel она и стояла бы в одном месте. Главный
     лист держит все договоры: первый блок с подходящим правилом, иначе первый
     блок без правила, иначе первый блок.
-
-    `base` - отбор вида, чья это книга (`core/views.py`): договор не под ним -
-    не в листе вовсе; блок без правила у вида с отбором - весь вид.
     """
-    narrowed = not is_empty(base)
-    if narrowed and not matches(base, facts):
-        return None
     blocks = [block or {} for block in (view.blocks or [])]
     for index, block in enumerate(blocks):
-        rule = block.get("filter")
-        if matches(rule, facts) or (narrowed and is_empty(rule)):
+        if matches(block.get("filter"), facts):
             return index
     if not getattr(view, "main", False):
         return None
@@ -228,17 +221,14 @@ def tone_of(block: dict[str, Any] | None, facts: dict[str, Any]) -> str:
     return ""
 
 
-def membership(
-    facts: dict[str, Any], views: Iterable[Any], bases: dict[str, dict[str, Any]] | None = None
-) -> list[dict[str, Any]]:
+def membership(facts: dict[str, Any], views: Iterable[Any]) -> list[dict[str, Any]]:
     """В каких листах и блоках стоит договор: `[{"view": key, "block": i}]`.
 
     `tone` - подсветка строки в этом блоке (`paint`), только если она есть.
-    `bases` - отбор вида каждой книги (`Registry.bases`).
     """
     out: list[dict[str, Any]] = []
     for view in views:
-        index = place(view, facts, (bases or {}).get(getattr(view, "book", "") or ""))
+        index = place(view, facts)
         if index is not None:
             entry: dict[str, Any] = {"view": view.key, "block": index}
             tone = tone_of((view.blocks or [])[index] if index < len(view.blocks or []) else None, facts)
@@ -256,7 +246,57 @@ def fields_used(rule: dict[str, Any] | None) -> set[str]:
     }
 
 
+def book_department(views: Iterable[Any], book: str) -> str | None:
+    """Отдел, которым отобраны все листы книги, - его id.
+
+    «Разовые» с условием «отдел - ЮО» в каждой группе каждого блока - это
+    «Разовые ЮО», и сумма договора в них - доля ЮО (30.09.2026). Хоть один
+    блок без такого условия или отделы разные - `None`: книга не про один
+    отдел. То же правило у клиента (`bookDepartment` в `schema.ts`).
+    """
+    if not book:
+        return None
+    found: str | None = None
+    seen = False
+    for view in views:
+        if (getattr(view, "book", "") or "") != book:
+            continue
+        seen = True
+        for block in view.blocks or []:
+            groups = ((block or {}).get("filter") or {}).get("any") or []
+            if not groups:
+                return None
+            for group in groups:
+                hit = next(
+                    (
+                        condition
+                        for condition in group.get("all", [])
+                        if condition.get("field") == "department"
+                        and condition.get("op") == "in"
+                        and isinstance(condition.get("value"), list)
+                        and len(condition["value"]) == 1
+                    ),
+                    None,
+                )
+                department = str(hit["value"][0]) if hit else None
+                if department is None or (found is not None and found != department):
+                    return None
+                found = department
+    return found if seen else None
+
+
+def book_departments(views: Iterable[Any]) -> dict[str, str]:
+    """Книга → её отдел, у книг, отобранных одним отделом (`book_department`)."""
+    listed = list(views)
+    out: dict[str, str] = {}
+    for book in {(getattr(view, "book", "") or "") for view in listed} - {""}:
+        department = book_department(listed, book)
+        if department is not None:
+            out[book] = department
+    return out
+
+
 __all__ = [
-    "FilterError", "NUMBER_OPS", "OPS", "TONES", "VIRTUAL_FIELDS", "fields_used",
+    "FilterError", "NUMBER_OPS", "OPS", "TONES", "VIRTUAL_FIELDS", "book_department", "book_departments", "fields_used",
     "is_empty", "matches", "membership", "place", "tone_of", "validate", "validate_paint",
 ]

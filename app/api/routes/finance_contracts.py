@@ -1,7 +1,7 @@
 """HTTP-маршруты реестра договоров «Финансов» (`/finance/contracts/…`).
 
 Вход и компания - те же, что у раздела (`current_member`, `_workspace` из
-`routes/finance.py`).
+`routes/finance.py`); сюда не импортируется ничего из `app.bbc`.
 
 Что фронт получает на отказ
 ───────────────────────────
@@ -39,7 +39,7 @@ from app.finance.contracts import shares as shares_module
 from app.finance.contracts import summary as summary_module
 from app.finance.contracts import sync as sync_module
 from app.finance.contracts.views import FilterError
-from app.finance.db import finance_session, retryable, retrying
+from app.finance.db import finance_session
 from app.finance.service import FinanceError
 
 log = logging.getLogger(__name__)
@@ -50,8 +50,8 @@ router = APIRouter(prefix="/finance/contracts", tags=["finance-contracts"])
 #: или на правку. Временный пароль (`must_change_password`), продиктованный
 #: по телефону и оставшийся в переписке, не открывает договоры: его
 #: отсекает `require_access` в `routes/finance.py` - одна дверь для всего
-#: раздела, а не проверка по месту: проверку по месту однажды забывают в одном
-#: маршруте. Строки и поля договоров режутся дальше, в сервисе, по `Access`.
+#: раздела, а не проверка по месту (урок дашборда BBC, где её забыли в одном
+#: маршруте). Строки и поля договоров режутся дальше, в сервисе, по `Access`.
 contract_member = require_access("contracts", "view")
 contract_editor = require_access("contracts", "edit")
 
@@ -161,7 +161,7 @@ def list_payments(member: Member = Depends(contract_member)) -> dict[str, Any]:
 
 
 class SyncIn(BaseModel):
-    #: Откуда строки - для журнала: «Google: Реестр юротдела, лист Разовые».
+    #: Откуда строки - для журнала: «Google: BBC Реестр ЮО - Разовые, лист Разовые».
     source: str = ""
     #: Строки: `{"number": "№ЮО/143", "customer": "ТОО …", "values": {"Статус": "Исполнен", …}}`.
     rows: list[dict[str, Any]]
@@ -743,27 +743,17 @@ class SummaryIn(BaseModel):
 
 @router.post("/setup/summary")
 def connect_summary(body: SummaryIn, member: Member = Depends(contract_editor)) -> dict[str, Any]:
-    """Подключить книгу-сводку: читается сразу, сохраняется, только если читается.
-
-    Колонки, названные по-своему, - не отказ: таблица подключается, `problem`
-    говорит, каких колонок не нашлось, и их называют в «Колонках для ядра».
-    """
+    """Подключить книгу-сводку: читается сразу, сохраняется, только если читается."""
 
     def action(session, workspace, access):
         try:
-            source, index, problem = summary_module.connect(
+            source, index = summary_module.connect(
                 session, workspace.id, link=body.link, worksheet=body.worksheet, user_id=member.user_id
             )
         except summary_module.SummaryError as exc:
             raise FinanceError(str(exc)) from exc
         setup._schema_changed(session, workspace)
-        return {
-            "title": source.title,
-            "worksheet": source.worksheet,
-            "rows": index.rows if index is not None else 0,
-            "drift": index.drift if index is not None else "",
-            "problem": problem,
-        }
+        return {"title": source.title, "worksheet": source.worksheet, "rows": index.rows, "drift": index.drift}
 
     return _setup_call(member, action, "подключена сводка оплат", "summary_connect")
 
@@ -823,24 +813,20 @@ class PieceIn(BaseModel):
 @router.post("", status_code=201)
 def create_contract(body: CreateIn, member: Member = Depends(contract_editor)):
     access = _access(member)
-
-    def once():
-        with finance_session() as session:
-            workspace = _workspace(session, member)
-            try:
-                contract = service.create(
-                    session, workspace, access, _actor(member), body.values,
-                    view_key=body.view, block=body.block,
-                    source="grid" if body.source == "grid" else "app",
-                    before=body.before,
-                    contract_id=body.id,
-                )
-                return service.one(session, workspace, access, contract)
-            except Exception as exc:  # noqa: BLE001
-                session.rollback()
-                return _raise(exc)
-
-    return retrying(once)
+    with finance_session() as session:
+        workspace = _workspace(session, member)
+        try:
+            contract = service.create(
+                session, workspace, access, _actor(member), body.values,
+                view_key=body.view, block=body.block,
+                source="grid" if body.source == "grid" else "app",
+                before=body.before,
+                contract_id=body.id,
+            )
+            return service.one(session, workspace, access, contract)
+        except Exception as exc:  # noqa: BLE001
+            session.rollback()
+            return _raise(exc)
 
 
 @router.get("/{contract_id}")
@@ -858,44 +844,33 @@ def get_contract(contract_id: UUID, member: Member = Depends(contract_member)):
 @router.patch("/{contract_id}")
 def patch_contract(contract_id: UUID, body: PatchIn, member: Member = Depends(contract_editor)):
     access = _access(member)
-
-    def once():
-        with finance_session() as session:
-            workspace = _workspace(session, member)
-            try:
-                mode = service.Mode.parse(body.mode)
-                contract = service.patch(
-                    session, workspace, access, _actor(member), contract_id, body.values,
-                    known_seq=body.known_seq, mode=mode,
-                )
-                return service.one(session, workspace, access, contract)
-            except Exception as exc:
-                # Правка не состоялась целиком: ни одно поле, ни соглашение, ни
-                # заведённый по пути контрагент не остаются в базе.
-                session.rollback()
-                if retryable(exc):
-                    raise
-                return _raise(exc, session=session, workspace=_workspace(session, member), access=access)
-
-    # Жертва взаимоблокировки - заново (`db.retrying`): `known_seq` тот же, чужая правка поля - конфликт.
-    return retrying(once)
+    with finance_session() as session:
+        workspace = _workspace(session, member)
+        try:
+            mode = service.Mode.parse(body.mode)
+            contract = service.patch(
+                session, workspace, access, _actor(member), contract_id, body.values,
+                known_seq=body.known_seq, mode=mode,
+            )
+            return service.one(session, workspace, access, contract)
+        except Exception as exc:  # noqa: BLE001
+            # Правка не состоялась целиком: ни одно поле, ни соглашение, ни
+            # заведённый по пути контрагент не остаются в базе.
+            session.rollback()
+            return _raise(exc, session=session, workspace=_workspace(session, member), access=access)
 
 
 @router.delete("/{contract_id}")
 def delete_contract(contract_id: UUID, member: Member = Depends(contract_editor)):
     access = _access(member)
-
-    def once():
-        with finance_session() as session:
-            workspace = _workspace(session, member)
-            try:
-                service.remove(session, workspace, access, _actor(member), contract_id)
-                return {"ok": True}
-            except Exception as exc:  # noqa: BLE001
-                session.rollback()
-                return _raise(exc)
-
-    return retrying(once)
+    with finance_session() as session:
+        workspace = _workspace(session, member)
+        try:
+            service.remove(session, workspace, access, _actor(member), contract_id)
+            return {"ok": True}
+        except Exception as exc:  # noqa: BLE001
+            session.rollback()
+            return _raise(exc)
 
 
 @router.post("/{contract_id}/acknowledge")

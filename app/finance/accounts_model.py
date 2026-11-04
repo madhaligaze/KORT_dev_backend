@@ -1,9 +1,17 @@
-"""Учётки и компании KORT - модель.
+"""Учётки и компании раздела «Финансы» - модель.
 
-Каждая компания регистрируется сама и ведёт свой учёт. Здесь `users`,
-`memberships`, `sessions`, а `workspaces` из `models.py` - компания: у неё есть
-владелец. Пакет `app.finance` не импортирует чужих модулей - это проверяется
-тестом `test_finance_isolated`.
+Почему у раздела своя авторизация, а не общая с дашбордом
+────────────────────────────────────────────────────────
+Первая версия пускала в раздел по праву `finance` учётки BBC Dashboard. Это
+было неверно по существу: в «Финансах» каждая компания регистрируется сама,
+ведёт свой учёт и к BBC отношения не имеет. Более того, BBC сам может однажды
+переехать сюда - и тогда зависимость смотрела бы в обратную сторону, от общего
+к частному.
+
+Поэтому здесь свои `users`, `memberships`, `sessions`, а `workspaces` из
+`models.py` становится компанией: у неё появляется владелец. Пакет
+`app.finance` после этого не импортирует `app.bbc` ни одной строкой - это
+проверяется тестом `test_finance_isolated`.
 
 Три решения, которые стоит объяснить
 ────────────────────────────────────
@@ -13,7 +21,8 @@
 пользователя заставила бы завести ему вторую учётку с тем же паролем.
 
 **2. Сессия живёт на сервере, в cookie уходит только случайный токен.** В базе
-лежит его SHA-256: дамп базы не должен давать работающих сессий.
+лежит его SHA-256: дамп базы не должен давать работающих сессий. Тот же принцип,
+что в дашборде, - он проверен и правильный.
 
 **3. Роль хранится на членстве, а не на пользователе.** Один и тот же человек -
 владелец своей компании и приглашённый бухгалтер в чужой. Роль на пользователе
@@ -294,45 +303,7 @@ class Notification(FinanceBase):
     )
 
 
-#: Что можно ключу API модели: `read` - описать, спросить, объяснить,
-#: подписаться; `write` - ещё предложить, применить, отменить.
-API_KEY_LEVELS = ("read", "write")
-
-
-class ApiKey(FinanceBase):
-    """Ключ API модели для чужого сервиса - вместо сеанса учётки.
-
-    Ключ выдаёт владелец или администратор компании, и действует он правами
-    того, кто его выдал, не шире: учётку заблокировали или исключили из
-    компании - ключ перестаёт открывать что-либо. Ключ открывает только
-    `/finance/model/*`: кабинет, пароли и права ключом не трогаются. Токен
-    хранится хешем и показывается один раз - при выдаче, как пароль.
-    """
-
-    __tablename__ = "api_keys"
-    __table_args__ = (
-        sa.CheckConstraint(_in("level", API_KEY_LEVELS), name="api_key_level"),
-        sa.UniqueConstraint("token_hash", name="uq_api_keys_token_hash"),
-    )
-
-    id: Mapped[uuid.UUID] = mapped_column(sa.Uuid, primary_key=True, default=_uuid)
-    workspace_id: Mapped[uuid.UUID] = mapped_column(
-        sa.Uuid, sa.ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
-    )
-    #: Кто выдал - чьими правами действует ключ.
-    user_id: Mapped[uuid.UUID] = mapped_column(sa.Uuid, sa.ForeignKey("users.id", ondelete="CASCADE"), index=True)
-    title: Mapped[str] = mapped_column(sa.Text)
-    level: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("'read'"))
-    token_hash: Mapped[str] = mapped_column(sa.Text)
-    #: Начало токена - узнать ключ в списке, не показывая его.
-    prefix: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("''"))
-    created_at: Mapped[datetime] = mapped_column(sa.DateTime(timezone=True), server_default=sa.func.now())
-    last_used_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True))
-    revoked_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True))
-
-
 __all__ = [
-    "API_KEY_LEVELS",
     "GRANT_LEVELS",
     "GRANT_SUBJECTS",
     "MEMBER_ROLES",
@@ -340,7 +311,6 @@ __all__ = [
     "USER_STATUSES",
     "LOGIN_DEVICE_STATUSES",
     "AccessGrant",
-    "ApiKey",
     "FinanceMembership",
     "FinanceSession",
     "FinanceUser",

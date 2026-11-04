@@ -1,7 +1,7 @@
 """Доступ «Финансов» по HTTP: cookie → зависимость → ответ.
 
-Права проверяются цепочкой запросов, а не юнитом: сборка, типы и линтер дыр
-в правах не ловят, экраны выглядят рабочими. Набор держит
+Права проверяются цепочкой запросов, а не юнитом (урок дашборда BBC: сборка,
+типы и линтер дыр в правах не ловят, экраны выглядят рабочими). Набор держит
 обещания плана:
 
 * каждый маршрут `/finance/*` объявляет свой раздел - обход падает на
@@ -155,26 +155,6 @@ SELF = {
 READONLY_POSTS = {
     ("POST", "/contracts/{contract_id}/amendments/parse"),
     ("POST", "/contracts/setup/views/preview"),
-    # Предпросмотр перевода клиентов: оборот юрлиц до и после, ничего не пишет.
-    ("POST", "/core/vat/preview"),
-    # API модели (этап 2, шаг 7): «спросить» - вопрос телом, «предложить» -
-    # прогон в транзакции, которая откатывается всегда (`_dry`).
-    ("POST", "/model/ask"),
-    ("POST", "/model/propose"),
-    # «Сравнить» - таблица файлом против KORT; файл - телом, в базу не пишет,
-    # а деньги всех договоров показывает только владельцу и администратору
-    # (`intake/compare.compare`).
-    ("POST", "/core/intake/compare"),
-    ("POST", "/model/compare"),
-}
-#: API модели: «применить» и «отменить» - пачка команд, у каждой своё право
-#: (`model/commands.check_right`: договоры - правка реестра, виды - владелец
-#: вида; точка - своя или администратор). Право раздела на входе - только
-#: «видит хоть один источник видов»: сохранить себе вид может и тот, кому
-#: реестр открыт на чтение.
-MODEL_WRITES = {
-    ("POST", "/model/apply"),
-    ("POST", "/model/undo"),
 }
 #: Меняет только свой экран, а не данные компании: личный вид листа (ширины,
 #: цвета) настраивает и тот, кому лист открыт только на чтение.
@@ -183,12 +163,6 @@ PERSONAL_WRITES = {
     ("DELETE", "/looks/{key}"),
     # Привычка вида раздела - тоже своё, не данные компании (29.09.2026).
     ("POST", "/looks/habits/{group}"),
-    # Виды (этап 2, шаг 6) - сохранённые вопросы, а не данные компании: себе
-    # сохраняет любой, отделу - начальник, компании - администратор; решает
-    # `core/views.py` по владельцу, а не право раздела.
-    ("POST", "/core/views"),
-    ("PATCH", "/core/views/{view_id}"),
-    ("DELETE", "/core/views/{view_id}"),
 }
 
 
@@ -238,7 +212,7 @@ def test_kazhdyy_marshrut_finansov_obyavlyaet_razdel(app: FastAPI) -> None:
                     _resources, level = value
                     if method == "GET" and level != "view":
                         problems.append(f"{method} {path}: чтение требует «{level}»")
-                    if method != "GET" and level != "edit" and key not in READONLY_POSTS | PERSONAL_WRITES | MODEL_WRITES:
+                    if method != "GET" and level != "edit" and key not in READONLY_POSTS | PERSONAL_WRITES:
                         problems.append(f"{method} {path}: изменение объявлено с «{level}», нужно «edit»")
     assert not problems, "\n".join(problems)
     assert seen_self == SELF, f"в SELF лишнее: {sorted(SELF - seen_self)}"
@@ -421,7 +395,6 @@ def test_svodka_ostatkov_svoim_pravom(app: FastAPI) -> None:
     денег на каждом счёте компании.
     """
     owner = register(app)
-    assert owner.post(f"{BASE}/accounts", json={"name": "Касса", "kind": "cash", "starting_balance": "1000"}).status_code == 200
     card = employee(owner, "Нурланова Асель", "+77071112233")
     grant(owner, "employee", card["id"], {"journal": "edit", "table": "edit"})
     person = activate(app, "+77071112233")
@@ -728,7 +701,7 @@ def test_udalennaya_operatsiya_vozvrashchaetsya_iz_zhurnala(app: FastAPI) -> Non
     """01.10.2026: «Удалить» в журнале отвечает записью истории, и «Вернуть»
     возвращает операцию тому, у кого правка журнала, - без корзины кабинета."""
     owner = register(app)
-    cash = owner.post(f"{BASE}/accounts", json={"name": "Касса", "kind": "cash"}).json()
+    cash = next(item for item in owner.get(f"{BASE}/dictionaries").json()["accounts"] if item["name"] == "Касса")
     card = employee(owner, "Кассир Касымова", "+77025550133")
     grant(owner, "employee", card["id"], {"journal": "edit"})
     cashier = activate(app, "+77025550133")

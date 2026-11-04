@@ -9,7 +9,7 @@
 
 Оформление (30.09.2026). До него файл выглядел сломанным: строку с
 многострочным текстом (соглашения, примечания) Excel растягивал на 5–10 строк,
-остальное прижималось к низу, ссылки на папки договоров налезали на соседние колонки,
+остальное прижималось к низу, ссылки Битрикса налезали на соседние колонки,
 формат «# ##0» показывал 1 200 000 как «1200 000», а «Оплачено/Остаток по
 выписке» выходили пустыми. Теперь: строки одной высоты, многострочное видно
 первой строкой (целиком - в ячейке), длинное обрезается краем ячейки, ширины -
@@ -69,7 +69,7 @@ LINK_COLOR = "0563C1"
 #: Только строчными: «DD.MM.YYYY» просмотр Apple (айфон) читает по правилам
 #: Unicode, где «D» - номер дня в году, и 23.10.2026 показывался «296.10.2026».
 DATE_FORMAT = "dd.mm.yyyy"
-DATE_KEYS = ("signed_at", "planned_end_at", "end_date", "billing_from")
+DATE_KEYS = ("signed_at", "planned_end_at", "end_date")
 MONEY_KEYS = (
     "amount", "paid_snapshot", "remaining_snapshot", "summary_paid", "summary_remaining", *LIVE_FIELDS,
 )
@@ -88,28 +88,6 @@ WIDTH_CAP = {"index": 8.0, "date": 12.0, "money": 18.0, "link": 22.0, "text": 42
 _LINK = re.compile(r"^https?://\S+$")
 
 
-def _formula(
-    registry: Registry, contract: Contract, key: str, people: Sequence[uuid.UUID], share: shares_module.BookShare | None,
-) -> float | None:
-    """Ячейка формулы компании (`core/formulas.py`): из тех же суммы, оплачено, остатка и срока, что выгрузка пишет рядом."""
-    from app.finance.core import formulas
-
-    known = getattr(registry, "_formulas", None)
-    if known is None:
-        known = {item.key: item for item in formulas.of(registry.session, registry.workspace.id)}
-        registry._formulas = known  # type: ignore[attr-defined]
-    found = known.get(key)
-    if found is None:
-        return None
-    values: dict[str, Decimal | None] = {}
-    for name, (measure, _title) in formulas.VARIABLES.items():
-        raw = _text(registry, contract, measure, people, share)
-        values[name] = Decimal(str(raw)) if isinstance(raw, (int, float, Decimal)) else None
-    value = formulas.evaluate(found.text, values)
-    shown = formulas.shown(found, value)
-    return float(shown) if shown is not None else None
-
-
 def _text(
     registry: Registry,
     contract: Contract,
@@ -119,7 +97,7 @@ def _text(
 ) -> Any:
     """Значение ячейки выгрузки: так, как его пишут в реестре.
 
-    `share` - доля отдела вида (вид отдела с мерой доли): «Сумма» - доля, «Оплачено» и
+    `share` - доля отдела книги («Разовые ЮО»): «Сумма» - доля, «Оплачено» и
     «Остаток» - той же частью договора (`shares.book_share`).
     """
     if key == "amount" and share is not None and share.kind == "share":
@@ -162,11 +140,9 @@ def _text(
         return float(contract.amount - match.paid) if contract.amount is not None else None
     if key == "age_months":
         return age_months(contract.signed_at)
-    if key.startswith("f_"):
-        return _formula(registry, contract, key, people, share)
-    if key in DATE_KEYS:
+    if key in ("signed_at", "planned_end_at", "end_date"):
         return getattr(contract, key)
-    if key in ("billing", "end_kind", "vat_mode"):
+    if key in ("billing", "end_kind"):
         # Выбор - словами, как на экране: «Расторжение», а не «terminated».
         raw = getattr(contract, key) or None
         return dict(CHOICES[key]).get(raw, raw) if raw else None
@@ -232,7 +208,7 @@ def build(session: Session, workspace: Workspace, access: Access, actor: Actor, 
         allocation = payments_module.allocate(session, workspace, registry, contracts)
         for item in visible:
             summary = payments_module.summary_of(
-                item, allocation.paid.get(item.id, []), len(allocation.open.get(item.id, [])), registry
+                item, allocation.paid.get(item.id, []), len(allocation.open.get(item.id, []))
             )
             if summary is not None:
                 live[item.id] = summary
@@ -240,16 +216,16 @@ def build(session: Session, workspace: Workspace, access: Access, actor: Actor, 
     # начальнику - договоров отдела, сотруднику - только своя.
     shares = shares_module.all_visible(session, workspace, access)["contracts"]
 
-    # Без выбора - листы реестра; листы другого вида выгружаются его кнопкой.
+    # Без выбора - листы реестра; «Разовые» выгружаются своей кнопкой.
     views: list[EntityView] = [
         view for view in registry.views if (view.key in view_keys if view_keys else not view.book)
     ]
-    # Вид отдела с мерой доли - суммы долей этого отдела, как на экране.
-    money_open = "amount" not in hidden
+    # Книга одного отдела («Разовые ЮО») - суммы долей этого отдела, как на экране.
+    book_departments = views_module.book_departments(registry.views) if "amount" not in hidden else {}
     book = Workbook(write_only=True)
     taken_titles: list[str] = []
     for view in views:
-        department = registry.share_department_of(view.book or "") if money_open else None
+        department = _uuid(book_departments.get(view.book or ""))
         title = _sheet_title(view.title, taken_titles)
         taken_titles.append(title)
         sheet = book.create_sheet(title=title)
@@ -270,7 +246,7 @@ def build(session: Session, workspace: Workspace, access: Access, actor: Actor, 
         # Договор - в одном блоке листа: в первом подходящем (`views.place`).
         members: list[list[Contract]] = [[] for _ in blocks]
         for item in visible:
-            index = views_module.place(view, facts[item.id], registry.bases.get(view.book or ""))
+            index = views_module.place(view, facts[item.id])
             if index is not None and index < len(members):
                 members[index].append(item)
         # Значения - заранее: ширины колонок потоковой книги задаются до
@@ -456,6 +432,13 @@ def _block_title(title: str, columns: Sequence[dict[str, Any]], rows: Sequence[S
     if known:
         out += f" · остаток: {_grouped(round(sum(known), 2))} ₸"
     return out
+
+
+def _uuid(raw: Any) -> uuid.UUID | None:
+    try:
+        return uuid.UUID(str(raw)) if raw else None
+    except ValueError:
+        return None
 
 
 def _kind(registry: Registry, key: str) -> str:

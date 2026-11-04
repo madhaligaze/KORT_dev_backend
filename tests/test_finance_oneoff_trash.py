@@ -3,13 +3,14 @@
 * «Оплачено (сводка)» - как колонка Q книги юротдела «Разовые»: сумма «Сумма
   Факт Поступ.» строк основной сводки того же договора. Колонки сводки - по
   названиям; договор - по номеру и клиенту, без угадывания.
-* «Разовые» - вид отдела из шаблона отрасли (с 28.10, этап 2, шаг 6): отборы по
+* «Разовые» - книга листов тех же договоров вида «Разовая услуга»: отборы по
   сроку от даты договора и «Остатки» по сводке.
 * Корзина: удалённое видно, возвращается, а насовсем не стирается то, на что
   ещё ссылаются живые договоры.
 """
 from __future__ import annotations
 
+import time
 import uuid
 from datetime import timedelta
 from decimal import Decimal
@@ -21,17 +22,7 @@ from app.finance import trash
 from app.finance.contracts import export as export_module
 from app.finance.contracts import service, setup, summary, views
 from app.finance.contracts.models import Contract
-from app.finance.core import book as core_book
 from app.finance.db import finance_session
-
-import company_layer
-
-
-@pytest.fixture(autouse=True)
-def _company_layer(monkeypatch):
-    """Компания теста - с шапкой таблиц копии прода: её знает словарь компании, а не ядро (п.9 «Пакеты»)."""
-    company_layer.everywhere(monkeypatch)
-
 
 FULL = service.Access(view=True, edit=True, setup=True)
 OWNER = service.Actor(uuid.uuid4(), "owner@test")
@@ -49,13 +40,6 @@ def _row(customer: str, number: str, paid: str, own: str = "BBC", month: str = "
     row = [""] * len(HEADER)
     row[3], row[5], row[8], row[13], row[16], row[29] = month, own, customer, "ЮО", number, paid
     return row
-
-
-def _put(workspace_id: uuid.UUID, values: list[list[str]]) -> summary.Index:
-    """Сводка «прочитана» (шапка копии прода): общий разбор листа лежит у компании, «Оплачено (сводка)» строится по нему."""
-    book = core_book.parse(values, title="Сводка", worksheet="Сводка все ЮР лица", columns=core_book.columns_for(company_layer.COLUMNS))
-    core_book.put(workspace_id, book)
-    return summary.index_of(book)
 
 
 @pytest.fixture
@@ -123,9 +107,8 @@ def test_svodka_perezhivaet_vstavlennuyu_kolonku():
     row = _row("ТОО Альфа", "№1", "500")
     row = row[:10] + [""] + row[10:]
     index = summary.build_index([shifted, row], title="", worksheet="Сводка")
-    # Колонка находится по названию; позиций у ядра нет (п.9 «Пакеты»), и
-    # строки «колонка переехала» больше нет.
     assert index.match("№1", ["ТОО Альфа"]).paid == Decimal("500")
+    assert "Сумма Факт Поступ." in index.drift
 
 
 def test_svodka_bez_nuzhnoy_kolonki_otkazyvaet():
@@ -161,83 +144,50 @@ def test_chislovye_usloviya():
         views.validate({"any": [{"all": [{"field": "age_months", "op": "gte", "value": "много"}]}]})
 
 
-# ── «Разовые» - вид отдела из шаблона отрасли (этап 2, шаг 6) ───────────────
+# ── «Разовые» ───────────────────────────────────────────────────────────────
 
 
-def _oneoff(session, workspace, code: str = "ЮО") -> tuple[dict, str]:
-    """«Разовые договоры по возрасту долга», сохранённые отделом: вид и ключ его книги.
-
-    До шага 6 «Разовые» засевались каждой компании; теперь их сохраняет отдел.
-    """
-    from app.finance.contracts.models import Department
-    from app.finance.core import views as core_views
-
-    registry = service.Registry(session, workspace)
-    department = next((item for item in registry.departments.values() if item.code == code), None)
-    if department is None:
-        department = setup.upsert_department(session, workspace, {"code": code})
-    assert isinstance(department, Department)
-    viewer = core_views.Viewer(user_id=None, admin=True)
-    view = core_views.create(
-        session, workspace, viewer, "owner@test", {"template": "oneoff_age", "owner": {"department": str(department.id)}}
-    )
-    return view, view["key"]
-
-
-def test_novaya_kompaniya_bez_razovyh(space):
-    """Новая компания начинает без «Разовых»: реестр и «Долги», листов чужой книги нет."""
-    from app.finance.core import views as core_views
-
-    with finance_session() as session:
-        workspace = _ws(session, space)
-        registry = service.Registry(session, workspace)
-        assert {view.book or "" for view in registry.views} == {""}
-        keys = [(view.key, view.title, view.source) for view in core_views.all_of(session, workspace.id)]
-        assert keys == [("", "Реестр", "contracts"), ("dolgi", "Долги", "debts")]
-
-
-def test_razovye_iz_shablona_i_otbirayut(space, monkeypatch):
+def test_razovye_zasevayutsya_i_otbirayut(space, monkeypatch):
     with finance_session() as session:
         workspace = _ws(session, space)
         today = service.today()
-        common = {"executor": "BBC legal support", "type": "Разовая услуга", "department": "ЮО"}
-        view, book = _oneoff(session, workspace)
-        assert view["title"] == "Разовые ЮО"
-        fresh = _make(session, space, customer="ТОО Альфа", number="№ЮО/1", status="На исполнении", amount="150000",
-                      signed_at=(today - timedelta(days=20)).isoformat(), **common)
-        old = _make(session, space, customer="ТОО Бета", number="№ЮО/2", status="На исполнении", amount="300000",
-                    signed_at=(today - timedelta(days=200)).isoformat(), **common)
-        done = _make(session, space, customer="ТОО Гамма", number="№ЮО/3", status="Исполнен", amount="100000",
-                     signed_at=(today - timedelta(days=100)).isoformat(), **common)
+        fresh = _make(session, space, executor="BBC legal support", customer="ТОО Альфа", number="№ЮО/1",
+                      type="Разовая услуга", status="На исполнении", amount="150000",
+                      signed_at=(today - timedelta(days=20)).isoformat())
+        old = _make(session, space, executor="BBC legal support", customer="ТОО Бета", number="№ЮО/2",
+                    type="Разовая услуга", status="На исполнении", amount="300000",
+                    signed_at=(today - timedelta(days=200)).isoformat())
+        done = _make(session, space, executor="BBC legal support", customer="ТОО Гамма", number="№ЮО/3",
+                     type="Разовая услуга", status="Исполнен", amount="100000",
+                     signed_at=(today - timedelta(days=100)).isoformat())
         _make(session, space, executor="BBC legal support", customer="ТОО Дельта", number="№5",
-              type="Абонентское обслуживание", department="ЮО")
-        # Разовый договор другого отдела - не в виде ЮО.
-        _make(session, space, customer="ТОО Эпсилон", number="№НО/1", status="На исполнении",
-              executor="BBC legal support", type="Разовая услуга", department="НО",
-              signed_at=(today - timedelta(days=20)).isoformat())
+              type="Абонентское обслуживание")
 
         registry = service.Registry(session, workspace)
-        sheets = sorted((view for view in registry.views if view.book == book), key=lambda v: v.position)
-        assert [view.title for view in sheets] == ["Все", "до 2 мес", "2-3 мес", "3-6 мес", "6+ мес", "Остатки"]
+        books = {view.key: view for view in registry.views if view.book == "oneoff"}
+        assert [view.title for view in sorted(books.values(), key=lambda v: v.position)] == [
+            "Разовые", "до 2 мес", "2–3 мес", "3–6 мес", "6+ мес", "Остатки",
+        ]
 
         # Сводка «прочитана»: Альфа оплатила 150 000 из 150 000, Гамма - 40 000 из 100 000.
-        index = _put(workspace.id, [
-            HEADER, _row("ТОО Альфа", "№ЮО/1", "150000", own="BBCL"), _row("ТОО Гамма", "№ЮО/3", "40000", own="BBCL"),
-        ])
+        index = summary.build_index(
+            [HEADER, _row("ТОО Альфа", "№ЮО/1", "150000", own="BBCL"), _row("ТОО Гамма", "№ЮО/3", "40000", own="BBCL")],
+            title="Сводка", worksheet="Сводка все ЮР лица",
+        )
+        summary._slots[workspace.id] = summary._Slot(source=("x", "y"), index=index, at=time.monotonic())
         try:
             listed = service.list_all(session, workspace, FULL)
         finally:
             summary.forget(workspace.id)
         places = {item["values"]["number"]: {place["view"] for place in item["views"]} for item in listed["contracts"]}
-        assert places["№ЮО/1"] >= {f"{book}_all", f"{book}_2m"}
-        assert f"{book}_6p" in places["№ЮО/2"] and f"{book}_2m" not in places["№ЮО/2"]
+        assert places["№ЮО/1"] >= {"oneoff", "oneoff_2m"}
+        assert "oneoff_6p" in places["№ЮО/2"] and "oneoff_2m" not in places["№ЮО/2"]
         # Исполнен - ни в каком сроке, но с остатком - в «Остатках».
-        assert f"{book}_3m" not in places["№ЮО/3"] and f"{book}_rest" in places["№ЮО/3"]
+        assert "oneoff_3m" not in places["№ЮО/3"] and "oneoff_rest" in places["№ЮО/3"]
         # Оплачено всё - в «Остатках» нет; в сводке нет - тоже нет (не «ноль»).
-        assert f"{book}_rest" not in places["№ЮО/1"]
-        assert f"{book}_rest" not in places["№ЮО/2"]
-        assert not any(view.startswith(book) for view in places["№5"])
-        assert not any(view.startswith(book) for view in places["№НО/1"])
+        assert "oneoff_rest" not in places["№ЮО/1"]
+        assert "oneoff_rest" not in places["№ЮО/2"]
+        assert not any(view.startswith("oneoff") for view in places["№5"])
         # Клиент сверяет номер сводки, по которой разложены листы, со свежим.
         assert listed["summary_rev"] == index.rev
         assert {fresh.id, old.id, done.id}
@@ -248,22 +198,22 @@ def test_razovye_dva_statusa_i_zelyonaya_stroka(space):
     «исполнен» подсвечена (как `=TRIM($E2)="исполнен"` в книге юротдела)."""
     with finance_session() as session:
         workspace = _ws(session, space)
-        _view, book = _oneoff(session, workspace)
-        common = {"executor": "BBC legal support", "type": "Разовая услуга", "department": "ЮО"}
-        done = _make(session, space, customer="ТОО Гамма", number="№ЮО/3", status="Исполнен", **common)
-        going = _make(session, space, customer="ТОО Альфа", number="№ЮО/1", status="На исполнении", **common)
+        done = _make(session, space, executor="BBC legal support", customer="ТОО Гамма", number="№ЮО/3",
+                     type="Разовая услуга", status="Исполнен")
+        going = _make(session, space, executor="BBC legal support", customer="ТОО Альфа", number="№ЮО/1",
+                      type="Разовая услуга", status="На исполнении")
         registry = service.Registry(session, workspace)
         statuses = {value.value: str(value.id) for value in registry.values.values() if value.field_key == "status"}
-        main = next(view for view in registry.views if view.key == f"{book}_all")
+        main = next(view for view in registry.views if view.key == "oneoff")
         block = main.blocks[0]
         assert block["choices"] == {"status": [statuses["На исполнении"], statuses["Исполнен"]]}
         assert block["defaults"]["status"] == statuses["На исполнении"]
 
         listed = {item["id"]: item for item in service.list_all(session, workspace, FULL)["contracts"]}
         tone = {place["view"]: place.get("tone") for place in listed[str(done.id)]["views"]}
-        assert tone[f"{book}_all"] == "done"
+        assert tone["oneoff"] == "done"
         assert all("tone" not in place for place in listed[str(going.id)]["views"])
-        # В реестре подсветки нет - правило живёт у блока вида.
+        # В реестре подсветки нет - правило живёт у блока «Разовых».
         assert "tone" not in next(place for place in listed[str(done.id)]["views"] if place["view"] == "main")
 
         # Выбор - только значения списков и только у полей-списков.
@@ -284,7 +234,6 @@ def test_razovye_tolko_dva_statusa(space):
     договоры, в «Разовых» - только эти два статуса, без статуса тоже нет."""
     with finance_session() as session:
         workspace = _ws(session, space)
-        _view, book = _oneoff(session, workspace)
         setup.add_value(session, workspace, "status", "нужно закрыть по бух")
         signed = (service.today() - timedelta(days=20)).isoformat()
         for number, status in (
@@ -292,12 +241,12 @@ def test_razovye_tolko_dva_statusa(space):
             ("№ЮО/4", "Недействующий"), ("№ЮО/5", "нужно закрыть по бух"), ("№ЮО/6", ""),
         ):
             _make(session, space, executor="BBC legal support", customer=f"ТОО {number}", number=number,
-                  type="Разовая услуга", status=status, signed_at=signed, department="ЮО")
+                  type="Разовая услуга", status=status, signed_at=signed)
         listed = service.list_all(session, workspace, FULL)["contracts"]
         places = {item["values"]["number"]: {place["view"] for place in item["views"]} for item in listed}
-        oneoff = {number: {view for view in views if view.startswith(book)} for number, views in places.items()}
-        assert oneoff["№ЮО/1"] == {f"{book}_all", f"{book}_2m"}
-        assert oneoff["№ЮО/2"] == {f"{book}_all"}
+        oneoff = {number: {view for view in views if view.startswith("oneoff")} for number, views in places.items()}
+        assert oneoff["№ЮО/1"] == {"oneoff", "oneoff_2m"}
+        assert oneoff["№ЮО/2"] == {"oneoff"}
         for number in ("№ЮО/3", "№ЮО/4", "№ЮО/5", "№ЮО/6"):
             assert oneoff[number] == set(), number
         # Реестр держит всё.
@@ -308,13 +257,12 @@ def test_razovye_otdela_summa_i_ostatok_dolej(space):
     """30.09.2026: в «Разовых ЮО» №ОКР/59 на 348 000 (HR 70% / ЮО 30%) стоял
     суммой 348 000. Юротделу нужна своя доля - 104 400, «Оплачено» и «Остаток» -
     той же долей, а в названии части «Остатков» - итог, как в книге юротдела:
-    «· договоров: N · остаток: … ₸». С шага 6 отдел доли - владелец вида."""
+    «· договоров: N · остаток: … ₸»."""
     import io
 
     from openpyxl import load_workbook
 
     from app.finance.contracts import shares
-    from app.finance.core import views as core_views
 
     admin = service.Access(view=True, edit=True, setup=True, admin=True)
     with finance_session() as session:
@@ -331,24 +279,40 @@ def test_razovye_otdela_summa_i_ostatok_dolej(space):
             session, workspace, admin, OWNER, split.id, "percent",
             [{"department_id": str(hr.id), "value": "70"}, {"department_id": str(yuo.id), "value": "30"}],
         )
-        # Вида отдела нет - доли нет ни у какой книги.
-        assert service.Registry(session, workspace).share_departments() == []
-        view, book = _oneoff(session, workspace)
+        # Книга «Разовые» - только ЮО, как на проде после 0024.
         registry = service.Registry(session, workspace)
-        assert registry.share_departments() == [yuo.id]
-        keys = [sheet.key for sheet in registry.views if sheet.book == book]
+        assert views.book_departments(registry.views) == {}
+        for view in [item for item in registry.views if item.book == "oneoff"]:
+            blocks = [
+                {
+                    **block,
+                    "filter": {
+                        "any": [
+                            {"all": [*group["all"], {"field": "department", "op": "in", "value": [str(yuo.id)]}]}
+                            for group in block["filter"]["any"]
+                        ]
+                    },
+                }
+                for block in view.blocks
+            ]
+            setup.upsert_view(session, workspace, {"blocks": blocks}, view.id)
+        registry = service.Registry(session, workspace)
+        assert views.book_departments(registry.views) == {"oneoff": str(yuo.id)}
+        keys = [view.key for view in registry.views if view.book == "oneoff"]
 
         # Сводка: Акжол заплатил 174 000 из 348 000, Альфа - 50 000 из 150 000.
-        _put(workspace.id, [
-            HEADER,
-            _row("ТОО Акжол", "№ОКР/59", "174000", own="BBCL"),
-            _row("ТОО Альфа", "№ЮО/1", "50000", own="BBCL"),
-        ])
+        index = summary.build_index(
+            [
+                HEADER,
+                _row("ТОО Акжол", "№ОКР/59", "174000", own="BBCL"),
+                _row("ТОО Альфа", "№ЮО/1", "50000", own="BBCL"),
+            ],
+            title="Сводка", worksheet="Сводка все ЮР лица",
+        )
+        summary._slots[workspace.id] = summary._Slot(source=("x", "y"), index=index, at=time.monotonic())
         try:
             listed = {item["values"]["number"]: item for item in service.list_all(session, workspace, FULL)["contracts"]}
             data = export_module.build(session, workspace, FULL, OWNER, keys)
-            # «Спросить» вид - те же числа, что в листе и выгрузке.
-            asked = core_views.ask(session, workspace, admin, core_views.find(session, workspace, book))
         finally:
             summary.forget(workspace.id)
 
@@ -356,40 +320,30 @@ def test_razovye_otdela_summa_i_ostatok_dolej(space):
     assert listed["№ОКР/59"]["department_share"] == {yuo_id: {"amount": "104400.00", "percent": "30"}}
     assert "department_share" not in listed["№ЮО/1"] and "department_share" not in listed["№ЮО/2"]
 
-    book_file = load_workbook(io.BytesIO(data))
-    rows = [[cell.value for cell in row] for row in book_file["Остатки"].iter_rows()]
+    book = load_workbook(io.BytesIO(data))
+    rows = [[cell.value for cell in row] for row in book["Остатки"].iter_rows()]
     # Итог части - по долям: 52 200 у ОКР/59 (30% от 174 000) и 100 000 у Альфы.
     assert rows[0][1] == "Работа идёт - есть остаток · договоров: 2 · остаток: 152 200 ₸"
     head = rows[1]
-    number, amount, paid, rest = (head.index(label) for label in ("№ Договора", "Сумма Договора", "Оплачено", "Остаток"))
+    number, amount, paid, rest = (head.index(label) for label in ("№ договора", "Сумма договора", "Оплачено", "Остаток"))
     values = {row[number]: (row[amount], row[paid], row[rest]) for row in rows[2:] if row and row[number]}
     assert values["№ОКР/59"] == (104400, 52200, 52200)
     assert values["№ЮО/1"] == (150000, 50000, 100000)
-    # Во всём списке вида: отделов два, доли ЮО нет - договор целиком.
-    main = [[cell.value for cell in row] for row in book_file["Все"].iter_rows()]
-    column = main[0].index("Сумма Договора")
-    assert {row[main[0].index("№ Договора")]: row[column] for row in main[1:]}["№ЮО/2"] == 90000
-
-    sheet = {item["key"]: item for item in asked["sheets"]}
-    assert sheet[f"{book}_rest"]["blocks"][0] == {
-        "title": "Работа идёт - есть остаток", "contracts": 2, "remaining": "152200",
-    }
-    measured = {row["number"]: row["measures"] for row in asked["rows"]}
-    assert measured["№ОКР/59"]["amount"] == "104400" and measured["№ОКР/59"]["summary_remaining"] == "52200"
-    staff = asked["groups"]["people"]
-    assert staff["totals"]["contracts"] == 3 and staff["totals"]["amount"] == "344400"
+    # Во всём списке «Разовых»: отделов два, доли ЮО нет - договор целиком.
+    main = [[cell.value for cell in row] for row in book["Разовые"].iter_rows()]
+    column = main[0].index("Сумма договора")
+    assert {row[main[0].index("№ договора")]: row[column] for row in main[1:]}["№ЮО/2"] == 90000
 
 
 def test_vygruzka_bez_vybora_tolko_reestr(space):
     with finance_session() as session:
         workspace = _ws(session, space)
-        _oneoff(session, workspace)
-        _make(session, space, executor="BBC legal support", customer="ТОО Альфа", type="Разовая услуга", department="ЮО")
+        _make(session, space, executor="BBC legal support", customer="ТОО Альфа", type="Разовая услуга")
         from openpyxl import load_workbook
         import io
 
         book = load_workbook(io.BytesIO(export_module.build(session, workspace, FULL, OWNER)))
-        assert not any(title in book.sheetnames for title in ("Все", "Остатки"))
+        assert not any(title in book.sheetnames for title in ("Разовые", "Остатки"))
 
 
 # ── Корзина ─────────────────────────────────────────────────────────────────

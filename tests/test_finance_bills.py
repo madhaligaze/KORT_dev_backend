@@ -41,18 +41,8 @@ from app.finance import auth, bills_bot
 from app.finance.config import finance_settings
 from app.finance.contracts import bill_book, bills
 from app.finance.contracts.models import BillNotice
-from app.finance.core import book as core_book
 from app.finance.db import finance_session
 from app.finance.support_bot import TelegramError
-
-import company_layer
-
-
-@pytest.fixture(autouse=True)
-def _company_layer(monkeypatch):
-    """Компания теста - с шапкой таблиц копии прода: её знает словарь компании, а не ядро (п.9 «Пакеты»)."""
-    company_layer.everywhere(monkeypatch)
-
 
 BASE = "/api/v1/finance"
 PASSWORD = "pass-12345"
@@ -192,12 +182,11 @@ def test_kniga_razbiraetsya_po_nazvaniyam() -> None:
     assert {bill.text for bill in board.of(bills.UNDATED)} == {"", "FALSE"}
     assert board.find(adk.id) is adk and board.find(done.id) is done and len(adk.id) == 12
 
-    # В книгу вставили колонку перед «Счет»: читается то же самое. Позиций у
-    # колонок нет (п.9 «Пакеты»: позиции - таблица компании, а не ядро) -
-    # колонка находится по названию, и строки «колонка переехала» больше нет.
+    # В книгу вставили колонку перед «Счет»: читается то же самое.
     shifted = [line[:5] + ["вставили"] + line[5:] for line in SHEET]
     again = bills.build_board(shifted, title="", worksheet="Сводка все ЮР лица")
     assert [bill.out()["text"] for bill in again.bills] == [bill.out()["text"] for bill in board.bills]
+    assert "«Счет»" in again.drift
 
 
 def test_bez_kolonok_scheta_list_chitaetsya() -> None:
@@ -412,11 +401,11 @@ def finance_db(tmp_path, monkeypatch):
     monkeypatch.setattr(finance_settings, "bills_every", "3")
     monkeypatch.setattr(finance_settings, "app_url", "https://kort.cards")
     auth._ATTEMPTS.clear()
-    core_book.forget()
+    bills._slots.clear()
     bills._marks.clear()
     bill_book.forget()
     yield engine
-    core_book.forget()
+    bills._slots.clear()
     bills._marks.clear()
     bill_book.forget()
     auth._ATTEMPTS.clear()
@@ -445,17 +434,18 @@ def register(app: FastAPI) -> TestClient:
 
 @pytest.fixture
 def book(monkeypatch):
-    """Книга в памяти: тест правит `book["values"]` - «в книге поставили галочку».
+    """Книга в памяти: тест правит `book["values"]` - «в книге поставили галочку»."""
+    from app.finance.contracts import summary
 
-    Читатель таблицы один на сверку, «Оплачено (сводка)» и «Счета» (`core/book._read`):
-    подменяется он, и все трое видят один лист.
-    """
     state = {"values": [list(line) for line in SHEET]}
     monkeypatch.setattr(
-        core_book, "_read",
-        lambda spreadsheet_id, tab, extra=None: core_book.parse(
-            state["values"], title="Осн.Общая сводка BBC 2026", worksheet=tab, spreadsheet_id=spreadsheet_id,
-            columns=core_book.columns_with(bills.columns_for(extra), {"bill": "bill_state", "paid": "paid_state"}),
+        summary, "_read",
+        lambda spreadsheet_id, tab: summary.build_index(state["values"], title="Осн.Общая сводка BBC 2026", worksheet=tab),
+    )
+    monkeypatch.setattr(
+        bills, "_read",
+        lambda spreadsheet_id, tab: bills.build_board(
+            state["values"], title="Осн.Общая сводка BBC 2026", worksheet=tab, spreadsheet_id=spreadsheet_id
         ),
     )
     return state
@@ -471,12 +461,12 @@ def connect(owner: TestClient) -> None:
 
 def fresh() -> None:
     """Книгу перечитать сразу: бот берёт прочитанную, свежая доедет к следующему проходу."""
-    with core_book._guard:
-        slots = [slot for slot in core_book._slots.values() if slot.source != core_book.ANY]
+    with bills._guard:
+        slots = list(bills._slots.values())
     for slot in slots:
-        book = core_book._read(slot.source[1], slot.source[2], slot.extra)
-        with core_book._guard:
-            slot.book, slot.error, slot.at = book, "", time.monotonic()
+        board = bills._read(*slot.source)
+        with bills._guard:
+            slot.board, slot.at = board, time.monotonic()
 
 
 def issue_all(values: list[list[str]]) -> None:
@@ -491,24 +481,6 @@ ALL_SAME = "abon-same+abon-late-same+rent-same+rent-late-same"
 TITLE_ABON, TITLE_ABON_LATE, TITLE_RENT, TITLE_RENT_LATE = (
     "Абонентская плата: счета", "Абонентская плата: просроченные", "Аренда: счета", "Аренда: просроченные"
 )
-
-
-def test_bot_beryot_scheta_vyzovom_sprosit(app: FastAPI, book) -> None:
-    """Бот - первый клиент API модели (этап 2, шаг 7): счета он спрашивает видом
-    «Не выставлены», а строки, собранные из ответа, - те же, что даёт книга."""
-    from app.finance.db import finance_session
-
-    owner = register(app)
-    connect(owner)
-    workspace_id = bills_bot.target_workspace()
-    with finance_session() as session:
-        direct, _ = bills.current(session, workspace_id)
-    asked = bills_bot.board_of(workspace_id)
-    assert direct is not None and asked is not None
-    assert asked.bills == direct.bills and asked.issued == direct.issued
-    answer = owner.post(f"{BASE}/model/ask", json={"source": "unbilled"}).json()
-    assert [row["key"] for row in answer["rows"]] == [bill.key for bill in direct.bills]
-    assert answer["totals"]["bills"] == len(direct.bills)
 
 
 def test_posty_po_chasu_i_pravka(app: FastAPI, book) -> None:
@@ -1137,7 +1109,7 @@ def test_shablon_scheta_razdela(app: FastAPI, book, books, monkeypatch) -> None:
     assert parsed.status_code == 200, parsed.text
     by_name = {row["customer"]: row for row in parsed.json()["rows"]}
     assert parsed.json()["counts"] == {"ready": 2, "same": 0, "empty": 4, "error": 1}
-    assert by_name["ИП АЙЯ"]["problem"] == "Дата счёта - пусто"
+    assert by_name["ИП АЙЯ"]["problem"] == "«Дата выстав. Счета» - пусто"
     kenesary, trade = by_name["ТОО KENESARY AGRO"], by_name["ТОО Custom Trade"]
     assert kenesary["values"] == {"bill_no": "312", "bill_date": "2026-10-22"}
     assert kenesary["defaults"] == {"bill_period": "с 22.10.2026 года по 21.11.2026 года"}
@@ -1230,9 +1202,7 @@ def test_bez_svodki_bot_molchit(app: FastAPI, book) -> None:
 def test_razdel_ne_vystavleny(app: FastAPI, book) -> None:
     owner = register(app)
     empty = owner.get(f"{BASE}/bills").json()
-    # Без сводной - счета по начислениям договоров KORT; договоров нет - и счетов нет.
-    assert empty["source"]["kind"] == "kort" and empty["items"] == [] and empty["issued"] == [] and empty["channel"] is None
-    assert not any(value for key, value in empty["counts"].items() if not key.endswith("_total"))
+    assert empty == {"source": None, "items": [], "issued": [], "counts": None, "channel": None, "can_edit": True}
     connect(owner)
     data = owner.get(f"{BASE}/bills").json()
     assert data["counts"]["overdue"] == 8 and data["counts"]["overdue_total"] == "891000"

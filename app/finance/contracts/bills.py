@@ -2,10 +2,11 @@
 
 Откуда
 ──────
-Та же сводная таблица, что даёт «Оплачено (сводка)» (`summary.py`, запись
-`SummarySource`), строка - договор за месяц. Лист собирает формула
-(`IMPORTRANGE`) из таблиц юрлиц, а отметку счёта каждая таблица считает сама:
-заполнен номер счёта - `TRUE`, нет - состояние словами: «Просрочка более 5 дней», «3 дня до
+Та же книга-сводка, что даёт «Оплачено (сводка)» (`summary.py`, запись
+`SummarySource`): у BBC - «Осн.Общая сводка BBC 2026», лист «Сводка все ЮР
+лица», строка - договор за месяц. Лист собирает формула (`IMPORTRANGE`) из книг
+девяти юрлиц, а колонку «Счет» каждая книга считает сама: заполнен «№ Счета» -
+`TRUE`, нет - состояние словами: «Просрочка более 5 дней», «3 дня до
 выставления», «Еще рано» (разобрано 22.10.2026).
 
 Что здесь по-другому и почему
@@ -26,11 +27,6 @@
 * **Колонки - по названиям** (`app.finance.layout`): рядом с «Счет» стоят «№
   Счета», «Счет за Период» и «Счет2», и прибитая буква однажды читала бы
   соседнюю.
-* **Юрлицо, переведённое на KORT** («Сверка → Переход», `core/switch.py`), -
-  исключение из первого пункта: его счета считает KORT по начислениям
-  договоров (`switched`), словами той же формулы, а месяц без строки в
-  таблице приходит счётом без строки (`line = 0`), который записывается в
-  KORT. Строка без договора в KORT остаётся словами таблицы.
 
 Чтение - одно на компанию раз в `CACHE_TTL`, как у сводки оплат; его делят
 раздел «Счета», число у пункта колонки и бот (`bills_bot.py`).
@@ -50,9 +46,9 @@ from typing import Any, Sequence
 
 from sqlalchemy.orm import Session
 
+from app.finance import google
 from app.finance.contracts.summary import read_money, source_of
-from app.finance.core.columns import column, with_company_names
-from app.finance.layout import Column, norm
+from app.finance.layout import Column, LayoutError, norm, resolve_layout
 
 log = logging.getLogger(__name__)
 
@@ -83,34 +79,39 @@ DONE = "issued"
 ISSUED = frozenset({"true", "истина"})
 PAID = frozenset({"true", "истина"})
 
-#: Колонки сводки - ключи ядра (`core/columns.py`); шапка компании - её
-#: словарь колонок. «bill» - колонка «Счет» (в ядре `bill_state`), «paid» -
-#: отметка «оплачено» (в ядре `paid_state`).
+#: Колонки сводки. `hint` - где стояли 22.10.2026 (A=0): подсказка для
+#: одинаковых заголовков и строки «книгу поправили», а не адрес.
 COLUMNS: tuple[Column, ...] = (
-    column("bill", core="bill_state", required=True, strict=False),
-    column("customer", required=True, strict=False),
-    column("number", required=True, strict=False),
-    column("own", required=True, strict=False),
-    column("month", strict=False),
-    column("month_no", strict=False),
-    column("kind", strict=False),
-    column("staff", strict=False),
-    column("amount", strict=False),
-    column("department", strict=False),
-    column("period_from", strict=False),
-    column("period_to", strict=False),
-    column("note", strict=False),
-    # Для карточки и шаблона счетов: как клиент назван в 1С (по нему
+    Column("bill", "Счет", ("счет",), hint=24),
+    Column("customer", "Заказчик", ("заказчик (название фирмы)", "заказчик", "клиент"), hint=8),
+    Column("number", "№ Договора", ("№ договора", "номер договора"), hint=16),
+    Column("own", "Наша Фирма", ("наша фирма",), hint=5),
+    Column("month", "Месяц строки (Техн. 1)", ("техн. 1",), hint=3, required=False),
+    Column("month_no", "Мес", ("мес",), hint=2, required=False),
+    Column("kind", "Вид Услуги", ("вид услуги",), hint=6, required=False),
+    Column("staff", "Наш Сотрудник", ("наш сотрудник",), hint=7, required=False),
+    Column("amount", "Сумма Договора", ("сумма договора",), hint=12, required=False),
+    Column("department", "Отдел", ("отдел",), hint=13, required=False),
+    Column("period_from", "Период с (нач.)", ("период с (нач.)", "период с"), hint=18, required=False),
+    Column("period_to", "Период по (зав.)", ("период по (зав.)", "период по"), hint=19, required=False),
+    Column("note", "Доп. Коммент.", ("доп. коммент.", "доп. комментарий"), hint=20, required=False),
+    # Для карточки и шаблона финансистов: как клиент назван в 1С (по нему
     # выставляют счёт) и когда заключён договор.
-    column("onec_name"),
-    column("signed_at"),
-    # Поля счёта - только по точному названию: «Счёт за период» иначе нашлась
-    # бы «похожей» на «Счёт», и лист без неё не читался бы вовсе.
-    column("bill_period"),
-    column("bill_no"),
-    column("bill_date"),
-    column("paid", core="paid_state", strict=False),
-    column("status", strict=False),
+    Column("onec_name", "По 1C", ("по 1c", "по 1с"), hint=10, required=False, strict=True),
+    Column("signed_at", "Дата заключения Договора", ("дата заключения договора",), hint=15, required=False, strict=True),
+    # Поля счёта - только по точному названию: «Счет за Период» иначе нашлась бы
+    # «похожей» на «Счет», и лист без неё не читался бы вовсе.
+    Column("bill_period", "Счет за Период (Коммент)", ("счет за период (коммент)",), hint=25, required=False, strict=True),
+    Column("bill_no", "№ Счета", ("№ счета",), hint=26, required=False, strict=True),
+    Column("bill_date", "Дата выстав. Счета", ("дата выстав. счета",), hint=27, required=False, strict=True),
+    Column("paid", "Факт Оплата", ("факт оплата",), hint=28, required=False),
+    Column(
+        "status",
+        "Статус договора",
+        ("статус (продл./приостн./разв./на исп.)", "статус"),
+        hint=48,
+        required=False,
+    ),
 )
 
 
@@ -118,16 +119,9 @@ class BillsError(Exception):
     """Книгу нельзя прочитать - с текстом для человека."""
 
 
-def state_of(value: Any, words: dict[str, str] | None = None) -> str | None:
-    """Группа строки по значению «Счет»; `None` - счёт выставлен.
-
-    `words` - слова компании (`core/settings.table_words`, колонка «Счет»):
-    смысл, который им дал человек, главнее обычных слов ниже.
-    """
+def state_of(value: Any) -> str | None:
+    """Группа строки по значению «Счет»; `None` - счёт выставлен."""
     text = norm(value)
-    meaning = (words or {}).get(text)
-    if meaning:
-        return None if meaning == "issued" else meaning
     if text in ISSUED:
         return None
     if text.startswith("просрочка"):
@@ -204,13 +198,6 @@ class Bill:
     bill_period: str = ""
     onec_name: str = ""
     signed_at: str = ""
-    #: `kort` - счета юрлица ведёт KORT (`core/switch.py`): состояние посчитано по
-    #: начислениям договора, а не словами таблицы; `line == 0` - строки в таблице нет.
-    source: str = ""
-    contract_id: str = ""
-    #: Пост бота по слову «Вида Услуги» из словаря компании (`abon`, `rent`, `skip`);
-    #: пусто - бот понимает вид сам (`bills_bot.kind_of`).
-    post: str = ""
 
     @property
     def key(self) -> str:
@@ -244,44 +231,7 @@ class Bill:
             "bill_period": self.bill_period,
             "onec_name": self.onec_name,
             "signed_at": self.signed_at,
-            "source": self.source,
-            "contract_id": self.contract_id or None,
-            "key": self.key,
-            "month_no": self.month_no,
-            "post": self.post,
         }
-
-    @classmethod
-    def from_out(cls, item: dict[str, Any]) -> "Bill":
-        """Счёт из ответа - обратно в строку: бот берёт счета вызовом «спросить» (`model/ask.py`)."""
-        amount = item.get("amount")
-        return cls(
-            line=int(item.get("line") or 0),
-            group=str(item.get("group") or ""),
-            text=str(item.get("text") or ""),
-            own=str(item.get("own") or ""),
-            customer=str(item.get("customer") or ""),
-            number=str(item.get("number") or ""),
-            month=str(item.get("month") or ""),
-            month_no=item.get("month_no"),
-            kind=str(item.get("kind") or ""),
-            staff=str(item.get("staff") or ""),
-            department=str(item.get("department") or ""),
-            amount=Decimal(str(amount)) if amount not in (None, "") else None,
-            period_from=date.fromisoformat(item["period_from"]) if item.get("period_from") else None,
-            period_to=date.fromisoformat(item["period_to"]) if item.get("period_to") else None,
-            paid=str(item.get("paid") or ""),
-            status=str(item.get("status") or ""),
-            note=str(item.get("note") or ""),
-            bill_no=str(item.get("bill_no") or ""),
-            bill_date=str(item.get("bill_date") or ""),
-            bill_period=str(item.get("bill_period") or ""),
-            onec_name=str(item.get("onec_name") or ""),
-            signed_at=str(item.get("signed_at") or ""),
-            source=str(item.get("source") or ""),
-            contract_id=str(item.get("contract_id") or ""),
-            post=str(item.get("post") or ""),
-        )
 
 
 def _order(bill: Bill) -> tuple[Any, ...]:
@@ -306,10 +256,6 @@ class Board:
     issued: set[str] = field(default_factory=set)
     #: Выставленные строки целиком - для «Выставлены» и карточки счёта.
     done: list[Bill] = field(default_factory=list)
-    #: Юрлица, чьи счета ведёт KORT (коды), и отказ расчёта, если был:
-    #: тогда их строки - словами таблицы, как до перехода.
-    kort: tuple[str, ...] = ()
-    kort_error: str = ""
 
     def of(self, group: str) -> list[Bill]:
         return [bill for bill in self.bills if bill.group == group]
@@ -327,123 +273,71 @@ class Board:
         """Счёт по `bill_id` - среди невыставленных и выставленных."""
         return next((bill for bill in [*self.bills, *self.done] if bill.id == wanted), None)
 
-    @classmethod
-    def from_answer(cls, answer: dict[str, Any]) -> "Board | None":
-        """Книга из ответа «спросить» вида «Не выставлены»; `None` - книга не подключена или не прочиталась."""
-        source = answer.get("board") or None
-        if source is None or not source.get("read_at"):
-            return None
-        return cls(
-            read_at=datetime.fromisoformat(source["read_at"]),
-            title=str(source.get("title") or ""),
-            worksheet=str(source.get("worksheet") or ""),
-            spreadsheet_id="",
-            bills=[Bill.from_out(item) for item in answer.get("rows") or []],
-            rows=len(answer.get("rows") or []),
-            drift=str(source.get("drift") or ""),
-            issued=set(answer.get("issued") or []),
-            done=[Bill.from_out(item) for item in answer.get("done") or []],
-            kort=tuple(source.get("kort") or ()),
-            kort_error=str(source.get("kort_error") or ""),
-        )
 
-
-#: Ключ колонки здесь → ключ ядра в словаре колонок компании, где они разные.
-_CORE_KEYS = {"bill": "bill_state", "paid": "paid_state"}
-
-
-def columns_for(extra: dict[str, list[str]] | None) -> tuple[Column, ...]:
-    """Колонки «Счетов» со своими названиями компании - тот же словарь, что у ядра («Колонки для ядра»)."""
-    return with_company_names(COLUMNS, extra, _CORE_KEYS) if extra else COLUMNS
-
-
-#: Ключ «Счетов» в строках читателей общего разбора (`core/book.derive`).
-_DERIVED = "bills"
-#: Без чего «Счета» не читаются: колонка «Счет», клиент, номер, наше юрлицо.
-REQUIRED = ("bill_state", "customer", "number", "own")
-
-
-def board_of(book: Any) -> Board:
-    """«Счета» из общего разбора листа (`core/book.parse`) - прежними правилами строки.
-
-    Строка - с клиентом или номером; состояние - словами колонки «Счет»; ячейки -
-    как написаны в таблице (по ним ключ счёта, на котором стоят посты бота).
-    """
-    from app.finance.core import book as core_book
-
-    missing = core_book.require(book, REQUIRED)
-    if missing:
-        raise BillsError(missing)
+def build_board(
+    values: Sequence[Sequence[Any]], *, title: str, worksheet: str, spreadsheet_id: str = ""
+) -> Board:
+    """Разобрать значения листа. Шапка - первая строка, строка листа 2 - первая данных."""
+    if not values:
+        raise BillsError(f"Лист «{worksheet}» пуст")
+    try:
+        layout = resolve_layout(worksheet, COLUMNS, [str(cell) for cell in values[0]])
+    except LayoutError as exc:
+        raise BillsError(str(exc)) from exc
     bills: list[Bill] = []
     done: list[Bill] = []
     count = 0
-    for line in book.lines:
-        cell = line.get
-        customer = cell("customer").strip()
-        number = cell("number").strip()
+    for offset, raw in enumerate(values[1:]):
+        row = [str(cell) for cell in raw]
+        customer = layout.cell(row, "customer").strip()
+        number = layout.cell(row, "number").strip()
         if not customer and not number:
             continue
         count += 1
-        text = cell("bill_state").strip()
+        text = layout.cell(row, "bill").strip()
         group = state_of(text)
-        amount_text = cell("amount").strip()
+        amount_text = layout.cell(row, "amount").strip()
         bill = Bill(
-            line=line.line,
+            line=offset + 2,
             group=DONE if group is None else group,
             text=text,
-            own=cell("own").strip(),
+            own=layout.cell(row, "own").strip(),
             customer=customer,
             number=number,
-            month=cell("month").strip(),
-            month_no=_int(cell("month_no")),
-            kind=cell("kind").strip(),
-            staff=cell("staff").strip(),
-            department=cell("department").strip(),
+            month=layout.cell(row, "month").strip(),
+            month_no=_int(layout.cell(row, "month_no")),
+            kind=layout.cell(row, "kind").strip(),
+            staff=layout.cell(row, "staff").strip(),
+            department=layout.cell(row, "department").strip(),
             amount=read_money(amount_text) if amount_text else None,
-            period_from=read_date(cell("period_from")),
-            period_to=read_date(cell("period_to")),
-            paid=_paid(cell("paid_state")),
-            status=cell("status").strip(),
-            note=cell("note").strip(),
-            bill_no=cell("bill_no").strip(),
-            bill_date=cell("bill_date").strip(),
-            bill_period=cell("bill_period").strip(),
-            onec_name=cell("onec_name").strip(),
-            signed_at=cell("signed_at").strip(),
+            period_from=read_date(layout.cell(row, "period_from")),
+            period_to=read_date(layout.cell(row, "period_to")),
+            paid=_paid(layout.cell(row, "paid")),
+            status=layout.cell(row, "status").strip(),
+            note=layout.cell(row, "note").strip(),
+            bill_no=layout.cell(row, "bill_no").strip(),
+            bill_date=layout.cell(row, "bill_date").strip(),
+            bill_period=layout.cell(row, "bill_period").strip(),
+            onec_name=layout.cell(row, "onec_name").strip(),
+            signed_at=layout.cell(row, "signed_at").strip(),
         )
         (done if group is None else bills).append(bill)
     if not count:
         # Пустой лист под шапкой - это сводка, которую формула ещё собирает, а не
         # «всё выставлено»: прежнее чтение остаётся, бот не правит пост в пустоту.
-        raise BillsError(f"В листе «{book.worksheet}» нет ни одной строки договора - таблица, похоже, ещё собирается")
+        raise BillsError(f"В листе «{worksheet}» нет ни одной строки договора - таблица, похоже, ещё собирается")
     bills.sort(key=_order)
     return Board(
-        read_at=book.read_at,
-        title=book.title,
-        worksheet=book.worksheet,
-        spreadsheet_id=book.spreadsheet_id,
+        read_at=datetime.now(timezone.utc),
+        title=title,
+        worksheet=worksheet,
+        spreadsheet_id=spreadsheet_id,
         bills=bills,
         rows=count,
-        drift=book.drift,
+        drift=layout.describe_drift(),
         issued={bill.key for bill in done},
         done=done,
     )
-
-
-def build_board(
-    values: Sequence[Sequence[Any]], *, title: str, worksheet: str, spreadsheet_id: str = "",
-    columns: Sequence[Column] = COLUMNS,
-) -> Board:
-    """Разобрать значения листа. Шапка - первая строка, строка листа 2 - первая данных."""
-    from app.finance.core import book as core_book
-
-    try:
-        book = core_book.parse(
-            values, title=title, worksheet=worksheet, spreadsheet_id=spreadsheet_id, columns=core_book.columns_with(columns, _CORE_KEYS),
-        )
-    except core_book.BookError as exc:
-        raise BillsError(str(exc)) from exc
-    return board_of(book)
 
 
 # ── Записанное из KORT ───────────────────────────────────────────────────────
@@ -478,9 +372,9 @@ def mark(workspace_id: uuid.UUID, key: str, values: dict[str, str]) -> None:
     )
     with _guard:
         _marks.setdefault(workspace_id, {})[key] = stamp
-    from app.finance.core import book as core_book
-
-    core_book.expire(workspace_id)  # следующее обращение перечитает сводку
+        slot = _slots.get(workspace_id)
+        if slot is not None:
+            slot.at = 0.0  # следующее обращение перечитает сводку
 
 
 def _group_by_date(period_from: date | None, today: date) -> str:
@@ -542,83 +436,86 @@ def view(workspace_id: uuid.UUID, board: Board) -> Board:
 
 @dataclass
 class _Slot:
-    """«Счета» по общему чтению таблицы (`core/book.sheet`): строки и отказ."""
-
+    source: tuple[str, str]
     board: Board | None = None
     error: str = ""
     at: float = 0.0
+    reading: threading.Event | None = None
 
 
+_slots: dict[uuid.UUID, _Slot] = {}
 _guard = threading.Lock()
 
 
-def _view(shared: Any) -> _Slot:
-    from app.finance.core import book as core_book
-
-    error = shared.error
+def _read(spreadsheet_id: str, worksheet: str) -> Board:
+    if not google.is_configured():
+        raise BillsError("Не заданы креды Google - таблицу прочитать нечем")
     try:
-        board = core_book.derive(shared, _DERIVED, board_of)
+        meta = google.spreadsheet_meta(spreadsheet_id)
+        values = google.fetch_tab_values(spreadsheet_id, worksheet, fresh=True)
+    except google.GoogleError as exc:
+        raise BillsError(str(exc)) from exc
+    return build_board(values, title=meta.get("title", ""), worksheet=worksheet, spreadsheet_id=spreadsheet_id)
+
+
+def _refresh(slot: _Slot, done: threading.Event) -> None:
+    try:
+        board = _read(*slot.source)
+        with _guard:
+            slot.board, slot.error = board, ""
     except BillsError as exc:
-        board, error = None, str(exc)
-    return _Slot(board=board, error=error, at=shared.at)
+        with _guard:
+            slot.error = str(exc)
+    except Exception as exc:  # noqa: BLE001 - чтение книги не должно ронять раздел
+        log.exception("счета: таблица не прочиталась")
+        with _guard:
+            slot.error = f"Таблица не прочиталась: {exc}"
+    finally:
+        with _guard:
+            slot.at = time.monotonic()
+            slot.reading = None
+        done.set()
+
+
+def _start(workspace_id: uuid.UUID, source: tuple[str, str], *, force: bool = False) -> tuple[_Slot, threading.Event]:
+    """Слот компании и событие текущего чтения (начатого сейчас или раньше)."""
+    with _guard:
+        slot = _slots.get(workspace_id)
+        if slot is None or slot.source != source:
+            slot = _slots[workspace_id] = _Slot(source=source)
+        age = time.monotonic() - slot.at
+        # Отказ Google не повторяется на каждый запрос: раз в минуту, иначе
+        # ошибка съела бы квоту всего аккаунта.
+        stale = age >= (ERROR_RETRY if slot.board is None and slot.error else CACHE_TTL) or (
+            slot.board is None and not slot.error
+        )
+        if force and age >= FORCE_GAP:
+            stale = True
+        if slot.reading is not None:
+            return slot, slot.reading
+        if not stale:
+            done = threading.Event()
+            done.set()
+            return slot, done
+        done = slot.reading = threading.Event()
+    threading.Thread(target=_refresh, args=(slot, done), daemon=True).start()
+    return slot, done
 
 
 def get(session: Session, workspace_id: uuid.UUID, *, wait: float = FIRST_READ_WAIT, force: bool = False) -> _Slot | None:
     """Книга компании: прочитанная, при необходимости - перечитанная.
 
-    Чтение и разбор таблицы - общие со сверкой ядра и «Оплачено (сводка)»
-    (`core/book.sheet`). Первое чтение ждём до `wait` секунд; «Обновить»
-    (`force`) - тоже, чтобы человек увидел свежее, а не то, что было до
-    нажатия. `None` - книга-сводка не подключена.
+    Первое чтение ждём до `wait` секунд; «Обновить» (`force`) - тоже, чтобы
+    человек увидел свежее, а не то, что было до нажатия. `None` - книга-сводка
+    не подключена.
     """
-    from app.finance.core import book as core_book
-
-    shared = core_book.sheet(session, workspace_id, wait=wait, force=force)
-    return _view(shared) if shared is not None else None
-
-
-def worded(board: Board, words: dict[str, dict[str, str]]) -> Board:
-    """Сводка со словами компании (`core/settings.table_words`): смысл слов «Счет» и пост бота по «Виду Услуги».
-
-    Применяется к прочитанному, без нового чтения таблицы: слово, которому
-    дали смысл, действует сразу.
-    """
-    bill_words, kind_words = words.get("bill") or {}, words.get("kind") or {}
-    if not bill_words and not kind_words:
-        return board
-    bills: list[Bill] = []
-    done: list[Bill] = []
-    for bill in [*board.bills, *board.done]:
-        state = state_of(bill.text, bill_words) if bill_words else (None if bill.group == DONE else bill.group)
-        group = DONE if state is None else state
-        post = kind_words.get(norm(bill.kind), "")
-        if group != bill.group or post != bill.post:
-            bill = dataclasses.replace(bill, group=group, post=post)
-        (done if bill.group == DONE else bills).append(bill)
-    bills.sort(key=_order)
-    return dataclasses.replace(board, bills=bills, done=done, issued={bill.key for bill in done})
-
-
-def prepared(session: Session, workspace_id: uuid.UUID, board: Board) -> Board:
-    """Прочитанная сводка такой, какой её видят список, число у пункта и бот: слова компании, затем юрлица на KORT."""
-    from app.finance.core import settings as core_settings
-
-    return switched(session, workspace_id, worded(board, core_settings.table_words(session, workspace_id)))
-
-
-def switched(session: Session, workspace_id: uuid.UUID, board: Board) -> Board:
-    """Сводка, где счета юрлиц, переведённых на KORT, посчитаны KORT (`core/switch.py`).
-
-    Сбой расчёта не роняет раздел и бот: строки таких юрлиц остаются словами
-    таблицы, а причина - в `kort_error`, и раздел её показывает.
-    """
-    try:
-        from app.finance.core import switch
-
-        return switch.bills_board(session, workspace_id, board)
-    except Exception as exc:  # noqa: BLE001 - список счетов важнее расчёта KORT
-        log.exception("счета: KORT не посчитал счета юрлиц")
-        return dataclasses.replace(board, kort_error=f"Счета юрлиц, переведённых на KORT, сейчас из таблицы: {exc}")
+    source = source_of(session, workspace_id)
+    if source is None:
+        return None
+    slot, done = _start(workspace_id, (source.spreadsheet_id, source.worksheet), force=force)
+    if (slot.board is None or force) and wait > 0:
+        done.wait(wait)
+    return slot
 
 
 def current(session: Session, workspace_id: uuid.UUID, **kwargs: Any) -> tuple[Board | None, str]:
@@ -628,15 +525,13 @@ def current(session: Session, workspace_id: uuid.UUID, **kwargs: Any) -> tuple[B
         return None, ""
     with _guard:
         board, error = slot.board, slot.error
-    return (view(workspace_id, prepared(session, workspace_id, board)) if board is not None else None), error
+    return (view(workspace_id, board) if board is not None else None), error
 
 
 def forget(workspace_id: uuid.UUID) -> None:
-    from app.finance.core import book as core_book
-
     with _guard:
+        _slots.pop(workspace_id, None)
         _marks.pop(workspace_id, None)
-    core_book.forget(workspace_id)
 
 
 # ── Наружу ───────────────────────────────────────────────────────────────────
@@ -669,42 +564,19 @@ def recent(board: Board, today: date | None = None) -> list[Bill]:
 
 
 def board_out(session: Session, workspace_id: uuid.UUID, *, force: bool = False) -> dict[str, Any]:
-    """Раздел «Счета»: невыставленные с числами по группам, недавно выставленные и откуда они.
-
-    Компания без сводной таблицы - счета по начислениям договоров KORT
-    (`core/billing.kort_board`), той же формы: раньше у неё раздел был пуст,
-    и «Счета пора выставить 1 200 000» с главной вёл в «Счетов пока нет»
-    (проход новичка 31.10).
-    """
+    """Раздел «Счета»: невыставленные с числами по группам, недавно выставленные и откуда они."""
+    board, error = current(session, workspace_id, force=force)
     source = source_of(session, workspace_id)
     if source is None:
-        from app.finance.contracts.service import today
-        from app.finance.core import billing
-        from app.finance.models import Workspace
-
-        workspace = session.get(Workspace, workspace_id)
-        board = billing.kort_board(session, workspace, today=today())
-        return {
-            "source": {
-                "title": "KORT", "worksheet": "", "kind": "kort", "url": "", "read_at": board.read_at.isoformat(),
-                "drift": "", "error": "", "kort": list(board.kort), "kort_error": board.kort_error,
-            },
-            "items": [bill.out() for bill in board.bills],
-            "issued": [bill.out() for bill in recent(board)],
-            "counts": counts_out(board),
-        }
-    board, error = current(session, workspace_id, force=force)
+        return {"source": None, "items": [], "issued": [], "counts": None}
     return {
         "source": {
             "title": (board.title if board else "") or source.title,
             "worksheet": source.worksheet,
-            "kind": source.kind or "google",
-            "url": "" if source.kind == "file" else f"https://docs.google.com/spreadsheets/d/{source.spreadsheet_id}/edit",
+            "url": f"https://docs.google.com/spreadsheets/d/{source.spreadsheet_id}/edit",
             "read_at": board.read_at.isoformat() if board else None,
             "drift": board.drift if board else "",
             "error": error,
-            "kort": list(board.kort) if board else [],
-            "kort_error": board.kort_error if board else "",
         },
         "items": [bill.out() for bill in board.bills] if board else [],
         "issued": [bill.out() for bill in recent(board)] if board else [],
@@ -717,11 +589,12 @@ def badge(session: Session, workspace_id: uuid.UUID) -> dict[str, int] | None:
     source = source_of(session, workspace_id)
     if source is None:
         return None
-    slot = get(session, workspace_id, wait=0)
-    board = slot.board if slot is not None else None
+    slot, _ = _start(workspace_id, (source.spreadsheet_id, source.worksheet))
+    with _guard:
+        board = slot.board
     if board is None:
         return None
-    counts = view(workspace_id, prepared(session, workspace_id, board)).counts()
+    counts = view(workspace_id, board).counts()
     return {OVERDUE: counts[OVERDUE], SOON: counts[SOON]}
 
 
@@ -739,10 +612,8 @@ __all__ = [
     "badge",
     "bill_id",
     "bill_key",
-    "board_of",
     "board_out",
     "build_board",
-    "columns_for",
     "counts_out",
     "current",
     "forget",
@@ -750,10 +621,7 @@ __all__ = [
     "mark",
     "read_date",
     "recent",
-    "prepared",
     "state_of",
-    "switched",
-    "worded",
     "view",
     "window_start",
 ]

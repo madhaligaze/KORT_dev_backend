@@ -6,8 +6,9 @@
 метаданных нельзя - тест, которому этот список нужен, запустил бы миграции
 самим фактом импорта.
 
-В KORT схема одна - `finance`. Переименовать её - не косметика, а миграция:
-имя схемы стоит в каждой ревизии и в дампах базы.
+В KORT схема одна - `finance`. Имя осталось от раздела «Финансы», из которого
+продукт выделен 28.09.2026: данные с прода переносятся дампом этой схемы, и
+переименование означало бы переписать и дамп, и одиннадцать ревизий.
 """
 from __future__ import annotations
 
@@ -17,7 +18,6 @@ import app.finance.accounts_model  # noqa: F401 - учётки
 import app.finance.contracts.models  # noqa: F401 - реестр договоров
 import app.finance.support_model  # noqa: F401 - переписка с поддержкой
 import app.finance.onec.models  # noqa: F401 - базы 1С и их документы
-import app.finance.core.models  # noqa: F401 - ядро: налоговый профиль юрлиц, документы
 
 target_metadata = [FinanceBase.metadata]
 

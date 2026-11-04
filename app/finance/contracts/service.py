@@ -38,7 +38,6 @@ from app.finance.layout import norm
 from app.finance import history
 from app.finance.accounts_model import FinanceUser
 from app.finance.contracts import views as views_module
-from app.finance import packs
 from app.finance.contracts.fields import (
     CHOICES,
     COMPUTED_FIELDS,
@@ -64,7 +63,6 @@ from app.finance.contracts.fields import (
 from app.finance.contracts.models import (
     BILLING_KINDS,
     END_KINDS,
-    VAT_MODES,
     Contract,
     ContractAmendment,
     ContractDepartment,
@@ -90,7 +88,7 @@ DMY = DateReading(order="dmy", evidence="дата в карточке или л�
 
 #: Поля, значения которых - идентификаторы из справочников.
 LIST_KEYS = frozenset(SYSTEM_LISTS)
-DATE_KEYS = frozenset({"signed_at", "planned_end_at", "end_date", "billing_from"})
+DATE_KEYS = frozenset({"signed_at", "planned_end_at", "end_date"})
 TEXT_KEYS = frozenset(
     {"number", "folder_url", "amendments_text", "amendments_summary_text", "note", "amount_terms"}
 )
@@ -170,7 +168,7 @@ def _pick_closed(
     """Одно из `items` по напечатанному: точное написание, иначе однозначное начало.
 
     Начало - это «Дей» → «Действующий», «Наталья П.» → «Наталья Петровна»,
-    «Тумар» → «Тумар Сервис». Кандидатов больше одного - отказ со
+    «Omar» → «Omar Development & Consulting». Кандидатов больше одного - отказ со
     списком: выбирать между ними за человека нельзя (правило «не угадывать»).
     """
     needle = key(text)
@@ -207,8 +205,8 @@ def _person_key(value: Any) -> str:
 
 
 def _own_key(value: Any) -> str:
-    # «Тумар» - начало «Тумар Сервис», в каком бы виде ни была записана
-    # организационная форма: «ТОО «Тумар Офис»» и «Тумар Офис» - одно имя.
+    # «Omar» - начало «Omar Development», в каком бы виде ни была записана
+    # организационная форма: «ТОО «BBC Astana»» и «BBC Astana» - одно имя.
     return _ORG_PREFIX.sub("", party_key(value))
 
 
@@ -249,8 +247,6 @@ class Access:
     #: «В договорах включено всё»: правит, все договоры, без ограничения по
     #: юрлицам. Начальнику с таким правом открыты и доли отделов.
     full_contracts: bool = False
-    #: Учётка вошедшего - чьи личные виды показывать (`core/views.py`).
-    user_id: uuid.UUID | None = None
 
     def can_edit_field(self, key: str) -> bool:
         return self.edit and key not in self.hidden and key not in self.readonly
@@ -267,12 +263,11 @@ def access_of(member: Any) -> Access:
     rights = getattr(member, "rights", None)
     if rights is None:
         return Access()
-    user_id = getattr(member, "user_id", None)
     if rights.is_admin:
-        return Access(view=True, edit=True, setup=True, admin=True, full_contracts=True, user_id=user_id)
+        return Access(view=True, edit=True, setup=True, admin=True, full_contracts=True)
     level = rights.level("contracts")
     if level == "none":
-        return Access(user_id=user_id)
+        return Access()
     head = rights.department_id if rights.people_rows == "department" and rights.can("people") else None
     hidden = frozenset(key for key in rights.fields if rights.field_level(key) == "none")
     # «Оплачено/Остаток по выписке» - суммы из журнала операций: кому журнал
@@ -294,7 +289,6 @@ def access_of(member: Any) -> Access:
         head_department=head,
         head_shares=rights.people_shares,
         full_contracts=level == "edit" and rights.contract_rows == "all" and not rights.contract_entities,
-        user_id=user_id,
     )
 
 
@@ -321,13 +315,7 @@ class Registry:
         self.session = session
         self.workspace = workspace
         self.fields: list[EntityField] = fields_of(session, workspace.id)
-        self.field_by_key: dict[str, Any] = {item.key: item for item in self.fields}
-        # Меры вида («Оплачено», «Остаток», «Срок, мес») - колонками и условиями
-        # листов, но не полями договора (`core/views.MEASURES`).
-        from app.finance.core.views import measure_fields
-
-        for key, measure in measure_fields(session, workspace.id).items():
-            self.field_by_key.setdefault(key, measure)
+        self.field_by_key = {item.key: item for item in self.fields}
         values = session.scalars(
             sa.select(ListValue).where(ListValue.workspace_id == workspace.id)
         ).all()
@@ -365,10 +353,6 @@ class Registry:
                 .order_by(EntityView.position, EntityView.created_at)
             )
         )
-        # Книги листов - виды договоров (`core/views.py`): отбор вида и отдел доли.
-        from app.finance.core import views as core_views
-
-        self.books = core_views.books(session, workspace.id)
         self.economic = economic_role_values(session, workspace.id)
         self._parties: dict[uuid.UUID, Counterparty] | None = None
         self._party_cache: dict[uuid.UUID, Counterparty] = {}
@@ -379,51 +363,6 @@ class Registry:
         self._summary: Any = _UNSET
         self._aliases: dict[uuid.UUID, list[str]] | None = None
         self._summary_matches: dict[uuid.UUID, Any] = {}
-        #: Юрлица, чьи оплаты ведёт KORT («Сверка → Переход»), и оплачено по договорам - на запрос.
-        self._kort_payments: set[uuid.UUID] | None = None
-        self._kort_paid: dict[uuid.UUID, Any] | None = None
-        self._summary_connected: bool | None = None
-        #: День, на который «Оплачено» KORT (`core/views.ask`); `None` - сегодня.
-        self.paid_on: date | None = None
-        self._rule_fields: set[str] | None = None
-
-    # - книги -
-
-    @property
-    def bases(self) -> dict[str, dict[str, Any]]:
-        """Отбор вида каждой книги: договор в листе, если подходит и под него."""
-        return {key: view.filter or {} for key, view in self.books.items()}
-
-    @property
-    def rule_fields(self) -> set[str]:
-        """Поля, по которым отбирают и красят листы и виды, - что считать в фактах договора."""
-        if self._rule_fields is None:
-            found: set[str] = set()
-            for sheet in self.views:
-                for block in sheet.blocks or []:
-                    found |= views_module.fields_used((block or {}).get("filter"))
-                    for paint in (block or {}).get("paint") or []:
-                        found |= views_module.fields_used((paint or {}).get("filter"))
-            for view in self.books.values():
-                found |= views_module.fields_used(view.filter or {})
-            self._rule_fields = found
-        return self._rule_fields
-
-    def share_departments(self) -> list[uuid.UUID]:
-        """Отделы, долей которых виды показывают сумму договора (вид отдела ЮО - доля ЮО)."""
-        from app.finance.core import views as core_views
-
-        found = {
-            department
-            for view in self.books.values()
-            if view.archived_at is None and (department := core_views.share_department(view)) is not None
-        }
-        return sorted(found, key=str)
-
-    def share_department_of(self, book: str) -> uuid.UUID | None:
-        from app.finance.core import views as core_views
-
-        return core_views.share_department(self.books.get(book or ""))
 
     # - сводка оплат -
 
@@ -455,33 +394,10 @@ class Registry:
         return self._aliases.get(party_id, [])
 
     def summary_of(self, contract: Contract) -> Any:
-        """Что сводка знает о договоре (`summary.Match`) или `None` - сводки нет.
-
-        У юрлица, чьи оплаты ведёт KORT («Сверка → Переход»), оплачено - из
-        разнесённых оплат KORT (`core/switch.kort_paid`), а не из колонки таблицы.
-        """
+        """Что сводка знает о договоре (`summary.Match`) или `None` - сводки нет."""
         index = self.summary
         if index is None:
-            # Сводная не подключена вовсе - оплачено по оплатам KORT: у компании
-            # без таблицы «Оплачено» и «Остаток» иначе были бы пусты всегда.
-            # Подключена, но ещё не прочитана - не знаем: подмена KORT молча
-            # сменила бы числа на время чтения.
-            if self.summary_connected:
-                return None
-            hit = self._summary_matches.get(contract.id)
-            if hit is None:
-                from app.finance.contracts.summary import Match
-                from app.finance.core.views import month_label
-
-                start = contract.billing_from or contract.signed_at
-                hit = Match(
-                    state="found",
-                    paid=self.kort_paid().get(contract.id, Decimal("0")),
-                    months=(month_label(start),) if start else (),
-                    source="kort",
-                )
-                self._summary_matches[contract.id] = hit
-            return hit
+            return None
         hit = self._summary_matches.get(contract.id)
         if hit is None:
             ours, theirs = contract.executor_id, contract.customer_id
@@ -491,36 +407,8 @@ class Registry:
             names = ([party.name] if party is not None else []) + self.aliases(theirs)
             entity = self.own.get(ours) if ours else None
             hit = index.match(contract.number, names, entity.code if entity is not None else "")
-            if ours is not None and ours in self.kort_payments():
-                # Оплаты юрлица ведёт KORT: «Оплачено» - его, а месяцы и строки
-                # таблицы остаются (по ним «Разовые» раскладывают договоры по месяцам).
-                paid = self.kort_paid().get(contract.id, Decimal("0"))
-                hit = replace(hit, state="found", paid=paid, candidates=(), source="kort")
             self._summary_matches[contract.id] = hit
         return hit
-
-    @property
-    def summary_connected(self) -> bool:
-        """Подключена ли сводная таблица компании (прочитана или нет)."""
-        if self._summary_connected is None:
-            from app.finance.contracts import summary as summary_module
-
-            self._summary_connected = summary_module.source_of(self.session, self.workspace.id) is not None
-        return self._summary_connected
-
-    def kort_payments(self) -> set[uuid.UUID]:
-        if self._kort_payments is None:
-            from app.finance.core import switch
-
-            self._kort_payments = switch.kort_entities(self.session, self.workspace.id, "payments")
-        return self._kort_payments
-
-    def kort_paid(self) -> dict[uuid.UUID, Any]:
-        if self._kort_paid is None:
-            from app.finance.core import switch
-
-            self._kort_paid = switch.kort_paid(self.session, self.workspace.id, today=self.paid_on)
-        return self._kort_paid
 
     # - стороны -
 
@@ -543,7 +431,7 @@ class Registry:
 
         Опрос `changes` идёт раз в две секунды из каждой открытой вкладки, и
         при любой чужой правке каждая вкладка собирает ответ. Читать ради
-        двух сторон всех контрагентов компании (на копии прода их тысячи) - значит
+        двух сторон всех контрагентов компании (у BBC их тысячи) - значит
         умножить одну правку на число открытых вкладок.
         """
         wanted = {item for item in ids if item}
@@ -585,27 +473,6 @@ class Registry:
     def is_own(self, party_id: uuid.UUID | None) -> bool:
         return party_id is not None and party_id in self.own
 
-    def _own_without_form(self, text: str) -> Counterparty | None:
-        """Наше юрлицо, названное без формы собственности: «Тумар Офис» - это «ТОО "Тумар Офис"».
-
-        Таблицы отделов пишут свои ТОО коротко, 1С - полностью, и реестр поверх
-        1С заводил второе юрлицо (полигон целиком). Только имя без формы и
-        только среди наших юрлиц, ровно одно совпадение: «ИП Альфа» при нашем
-        «ТОО Альфа» сюда не попадает - у неё своя форма.
-        """
-        from app.finance.core.participants import bare_key, form_of
-
-        if not self.own or form_of(text):
-            return None
-        key = party_key(text)
-        hits = {
-            party_id
-            for party_id, entity in self.own.items()
-            if key in {bare_key(name) for name in (self.parties[party_id].name if party_id in self.parties else "",
-                                                   entity.full_name, entity.code) if name}
-        }
-        return self.parties.get(next(iter(hits))) if len(hits) == 1 else None
-
     def resolve_party(self, raw: Any, *, slot: str, create: bool = True) -> Resolved:
         """Сторона по тексту или идентификатору.
 
@@ -632,9 +499,6 @@ class Registry:
                 if len(own) == 1:
                     return Resolved(self.parties.get(own[0]))
                 return Resolved(None, ambiguous=[self.parties[pid] for pid in ids if pid in self.parties])
-        own = self._own_without_form(text)
-        if own is not None:
-            return Resolved(own)
         if not create:
             return Resolved(None)
         party = Counterparty(
@@ -683,7 +547,7 @@ class Registry:
             return bucket[key]
         if not create:
             return None
-        meaning = subject_meaning(text, packs.industry_of(self.workspace)) if field_key == "subject" else {}
+        meaning = subject_meaning(text) if field_key == "subject" else {}
         top = max((item.position for item in bucket.values()), default=0)
         value = ListValue(
             workspace_id=self.workspace.id,
@@ -1039,7 +903,7 @@ def read_money(raw: Any, *, field: str) -> tuple[Decimal | None, str]:
 
 
 #: Слова вокруг даты, которые её не меняют: «до 15.07.2026», «15.07.2026 г.».
-#: В реестре юротдела «Планируемый срок» так записан в 35 строках из 415.
+#: В реестре BBC «Планируемый срок» так записан в 35 строках из 415.
 _DATE_QUALIFIERS = re.compile(
     r"^\s*(?:до|по|с|от|срок|не\s+позднее)\s+|\s*(?:г\.?|года?)\s*$", re.IGNORECASE
 )
@@ -1143,12 +1007,9 @@ def facts_of(contract: Contract, registry: Registry, people: Sequence[uuid.UUID]
     facts["phase"] = registry.meaning(contract.status_id).get("phase")
     facts["economic"] = registry.meaning(contract.economic_role_id).get("system")
     facts["age_months"] = age_months(contract.signed_at)
-    # «Оплачено/Остаток» - для листов вроде «Остатки»; договор в сводной не
-    # нашёлся - фактов нет, и условие «> 0» не проходит. Без сводной это
-    # оплаты KORT из регистра итогов: их считаем, только если по мере правда
-    # отбирает или красит лист (горячий путь сборки реестра).
-    wanted = registry.summary is not None or bool({"summary_paid", "summary_remaining"} & registry.rule_fields)
-    match = registry.summary_of(contract) if wanted else None
+    # «Оплачено/Остаток (сводка)» - для листов вроде «Остатки»; нет сводки
+    # или договор в ней не нашёлся - фактов нет, и условие «> 0» не проходит.
+    match = registry.summary_of(contract)
     if match is not None and match.state == "found":
         facts["summary_paid"] = match.paid
         if contract.amount is not None:
@@ -1487,11 +1348,13 @@ class Output:
             for item in registry.fields
             if item.key not in self.access.hidden
         ]
-        # Доля отдела вида (вид отдела ЮО - доля ЮО, `shares.py`) - тем, кому
+        # Доля отдела книги («Разовые ЮО» - доля ЮО, `shares.py`) - тем, кому
         # открыта сумма договора. Модуль долей импортирует этот, поэтому здесь.
         from app.finance.contracts.shares import book_shares
 
-        book_departments = [] if "amount" in self.access.hidden else registry.share_departments()
+        book_departments = (
+            [] if "amount" in self.access.hidden else _uuids(views_module.book_departments(registry.views).values())
+        )
         out: list[dict[str, Any]] = []
         for item in contracts:
             if not visible_to(item, registry, self.access, people.get(item.id, [])):
@@ -1516,7 +1379,7 @@ class Output:
                         for issue in issues_of(item, registry, numbers, party_names, mine)
                         if issue["field"] not in self.access.hidden
                     ],
-                    "views": views_module.membership(facts_of(item, registry, mine), registry.views, registry.bases),
+                    "views": views_module.membership(facts_of(item, registry, mine), registry.views),
                     **({"roles": roles} if (roles := registry.roles_of(item)) else {}),
                     # Кто вписал отдел: сотрудник убирает только вписанный им
                     # самим (`_check_departments_kept`). Одно на всех зрителей -
@@ -1921,9 +1784,6 @@ class Mode:
     number: str = ""
     signed_at: date | None = None
     summary: str = ""
-    #: Откуда изменение с даты (`AMENDMENT_ORIGINS`): из API - всегда
-    #: `change`; сверка с книгой ставит `book` сама.
-    origin: str = "change"
 
     @classmethod
     def parse(cls, raw: Any) -> Mode | None:
@@ -2037,19 +1897,6 @@ def _set_field(
         if text and text not in END_KINDS:
             raise FinanceError("Смысл даты окончания: расторжение, исполнение или не ясен")
         contract.end_kind = text
-    elif key == "vat_mode":
-        text = str(raw or "").strip()
-        if text and text not in VAT_MODES:
-            raise FinanceError("НДС: в сумме, сверху или без НДС")
-        contract.vat_mode = text
-    elif key == "period_day":
-        text = str(raw if raw is not None else "").strip().rstrip("-гоеяй").strip()
-        if not text:
-            contract.period_day = None
-        elif not text.isdigit() or not 1 <= int(text) <= 31:
-            raise FinanceError(f"{title}: число от 1 до 31")
-        else:
-            contract.period_day = int(text)
     elif key == "currency":
         contract.currency = (str(raw or "").strip().upper() or "KZT")[:3]
     elif key in TEXT_KEYS:
@@ -2191,7 +2038,7 @@ def _check_departments_kept(
 
 
 def _label(registry: Registry, key: str, value: Any) -> str:
-    """Значение поля словами - для истории: «ТС», «500 000», «01.02.2024»."""
+    """Значение поля словами - для истории: «BBCA», «500 000», «01.02.2024»."""
     if value in (None, "", []):
         return "-"
     try:
@@ -2415,7 +2262,7 @@ def create(
 
 
 #: «Наша сторона - только наши юрлица» относится к той стороне, где стоит
-#: наше юрлицо. В реестре юротдела есть и покупки: в листе «Заказчик ГК» наше ТОО -
+#: наше юрлицо. В реестре BBC есть и покупки: в листе «Заказчик ГК» наше ТОО -
 #: заказчик, а исполнитель - «Халык Актив». Если напротив уже стоит наше
 #: юрлицо, эта сторона может быть чужой: иначе покупку нельзя было бы завести
 #: руками вовсе.
@@ -2436,7 +2283,7 @@ def _other_own(registry: Registry, contract: Contract, key: str, values: dict[st
     if other not in values:
         return registry.is_own(getattr(contract, COLUMN_OF[other]))
     try:
-        # Тем же поиском, что и сама закрытая сторона: «ТС», «тумар».
+        # Тем же поиском, что и сама закрытая сторона: «BBCA», «omar».
         return registry.pick_own(values[other], title=registry.title(other)) is not None
     except NotInList:
         return False
@@ -2568,7 +2415,7 @@ def _probe_changes(
 ) -> list[str]:
     """Какие из присланных полей стороны и суммы правда меняют значение.
 
-    Сравнение без записи: «ТС» в ячейке, где уже стоит ТС, - не изменение,
+    Сравнение без записи: «BBC» в ячейке, где уже стоит BBC, - не изменение,
     и спрашивать «опечатка или с даты» на нём было бы шумом.
     """
     out: list[str] = []
@@ -2623,7 +2470,7 @@ def _amend(
         effective_from=mode.effective_from,
         before={key: before_value},
         after={key: after_value, **({"amount_terms": scratch.amount_terms} if key == "amount" else {})},
-        origin=mode.origin,
+        origin="change",
         position=_next_amendment_position(session, contract.id),
         created_by=actor.user_id,
     )
@@ -2660,9 +2507,6 @@ def _apply_amendment(contract: Contract, amendment: ContractAmendment, registry:
     elif amendment.effect == "end_date":
         value = after.get("end_date")
         contract.end_date = date.fromisoformat(value) if value else None
-    elif amendment.effect == "status":
-        value = after.get("status")
-        contract.status_id = uuid.UUID(value) if value else None
     amendment.applied_at = _now()
 
 
@@ -2830,7 +2674,7 @@ def apply_due(session: Session) -> int:
                 ContractAmendment.applied_at.is_(None),
                 ContractAmendment.effective_from.is_not(None),
                 ContractAmendment.effective_from <= today(),
-                ContractAmendment.effect.in_(("executor", "customer", "amount", "end_date", "status")),
+                ContractAmendment.effect.in_(("executor", "customer", "amount", "end_date")),
             )
             .order_by(ContractAmendment.effective_from, ContractAmendment.position)
             .limit(500)

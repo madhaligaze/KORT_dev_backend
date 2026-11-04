@@ -1,13 +1,13 @@
 """Поля реестра, значения списков со смыслом и засев новой компании.
 
-Засев - из пакета отрасли
-─────────────────────────
+Засев общий, не под BBC
+───────────────────────
 Новая компания получает системные поля, статусы с фазами, виды договоров со
 способом начисления и подписями сторон, хозяйственные смыслы и главный лист
-«Все договоры» - из пакета своей отрасли (`app/finance/packs`, «услуги по
-договорам»). Всё, чем компания отличается (своя колонка, свой статус, свой
-лист), приходит из её собственного Excel при загрузке или заводится в
-настройке. Под одну компанию здесь не пишется ни строки.
+«Все договоры». Всё, чем компания отличается (колонка «Ссылка на Битрикс 24»,
+статус «нужно закрыть по бух», лист «Исполнитель ГК»), приходит из её
+собственного Excel при загрузке или заводится в настройке. Под одну компанию
+здесь не пишется ни строки.
 
 Засев повторяемый: системное поле, добавленное в следующей версии, появится у
 всех компаний при первом обращении к реестру, а не останется только у новых.
@@ -17,7 +17,6 @@ from __future__ import annotations
 import re
 import uuid
 from dataclasses import dataclass, field
-from functools import lru_cache
 from typing import Any, Iterable
 
 import sqlalchemy as sa
@@ -33,15 +32,95 @@ from app.finance.contracts.models import (
     ListValue,
 )
 from app.finance.models import POSITION_STEP, Workspace
-from app.finance import packs
-from app.finance.packs import FieldDef
 
 ENTITY = "contract"
 
 
-#: Системные поля отрасли по умолчанию. Ключи - смыслы ядра; подписи и
-#: написания - пакет отрасли. Засев компании берёт поля её отрасли (`_seed`).
-SYSTEM_FIELDS: tuple[FieldDef, ...] = packs.industry().fields
+@dataclass(frozen=True)
+class FieldDef:
+    """Системное поле: ключ, тип, подпись по умолчанию и написания шапки."""
+
+    key: str
+    type: str
+    title: str
+    names: tuple[str, ...] = ()
+    #: Поле только для чтения везде: «как было в файле».
+    readonly: bool = False
+    #: Спрятано по умолчанию (есть, но в листе и карточке не показывается).
+    hidden: bool = False
+    #: Способ заполнения по умолчанию (`FILLS`); пусто - у типа его нет.
+    fill: str = ""
+
+
+#: Системные поля в порядке «Сводной». Написания - это то, как колонку
+#: подписывают в реестрах; разбор сравнивает по шапке блока, а не по номеру.
+#:
+#: Способ заполнения по умолчанию - из «Настроек реестра» BBC (26.09.2026):
+#: статус, ответственный, исполнитель и отдел - выпадающим списком, вид и
+#: предмет - свой текст с подсказкой справочника. Ячейка листа заводила молча
+#: значение из любого напечатанного: на проде 26.09 в статусах висело «им», в
+#: видах - «Взыскание», оба ни в одном договоре - следы правки ячейки.
+SYSTEM_FIELDS: tuple[FieldDef, ...] = (
+    FieldDef("status", "list", "Текущее состояние",
+             ("текущее состояние", "статус", "состояние", "статус договора"), fill="list"),
+    FieldDef("folder_url", "url", "Папка договора",
+             ("ссылка на битрикс 24", "ссылка на битрикс", "папка договора", "битрикс", "ссылка")),
+    FieldDef("planned_end_at", "date", "Планируемый срок завершения",
+             ("планируемый срок завершения", "план дата завершения", "срок завершения")),
+    FieldDef("people", "person", "Ответственное лицо",
+             ("ответственное лицо (ф.и.о)", "ответственное лицо", "ответственный",
+              "наш сотрудник", "ответ лицо"), fill="list"),
+    FieldDef("executor", "party", "Исполнитель",
+             ("исполнитель bbc", "исполнитель", "продавец", "арендодатель bbc", "арендодатель",
+              "арендадатель bbc", "арендадатель", "займодавец", "наша фирма"), fill="own"),
+    FieldDef("customer", "party", "Заказчик",
+             ("заказчик (клиент)", "заказчик", "покупатель", "арендатор (клиент)", "арендатор",
+              "займополучатель", "заказчик (название фирмы)", "клиент"), fill="hint"),
+    FieldDef("number", "text", "№ Договора",
+             ("№ договора", "номер договора", "договор №")),
+    FieldDef("signed_at", "date", "Дата заключения Договора",
+             ("дата заключения договора", "дата договора", "дата заключения")),
+    FieldDef("department", "department", "Отдел", ("отдел",), fill="list"),
+    FieldDef("type", "list", "Вид услуги", ("вид услуги", "вид договора", "вид"), fill="hint"),
+    FieldDef("subject", "list", "Предмет Договора",
+             ("предмет договора", "предмет", "предмет исполнения"), fill="hint"),
+    FieldDef("amount", "money", "Сумма Договора", ("сумма договора", "сумма")),
+    FieldDef("paid_snapshot", "money", "Оплачено (в файле)",
+             ("оплачено на текущую дату", "оплачено"), readonly=True),
+    FieldDef("remaining_snapshot", "money", "Остаток (в файле)",
+             ("остаток оплаты", "остаток", "сумма остаток"), readonly=True),
+    # Считаются из журнала операций (`payments.py`), в договоре не хранятся.
+    # Написаний шапки нет намеренно: колонку файла «Оплачено» разбор кладёт в
+    # «как было в файле», а не сюда.
+    FieldDef("paid", "money", "Оплачено по выписке", readonly=True),
+    FieldDef("remaining", "money", "Остаток по выписке", readonly=True),
+    # Из книги-сводки компании (`summary.py`): «Сумма Факт Поступ.» строк
+    # договора. В договоре не хранятся, приходят своим запросом. Написаний
+    # шапки нет по той же причине, что у «по выписке».
+    FieldDef("summary_paid", "money", "Оплачено (сводка)", readonly=True),
+    FieldDef("summary_remaining", "money", "Остаток (сводка)", readonly=True),
+    # Полных месяцев от даты договора - «Срок, мес» книги «Разовые»
+    # (`ROUNDDOWN((TODAY()-дата)/30)`). Считается при чтении.
+    FieldDef("age_months", "number", "Срок, мес", readonly=True),
+    FieldDef("amendments_text", "text", "№ Доп. соглашения / дата",
+             ("№ дополнительное соглашение/дата", "№ дополнительное соглашение",
+              "дополнительное соглашение", "доп соглашения", "доп. соглашения")),
+    FieldDef("amendments_summary_text", "text", "Предмет доп. соглашения",
+             ("предмет доп.соглашения", "предмет доп. соглашения", "предмет доп соглашения")),
+    FieldDef("end_date", "date", "Дата расторжения / исполнения",
+             ("дата расторжения договора/дата исполения разового договора",
+              "дата расторжения договора/дата исполнения разового договора",
+              "дата расторжения договора", "дата расторжения", "дата исполнения",
+              "факт дата завершения")),
+    FieldDef("note", "text", "Примечания", ("*примечания", "примечания", "примечание", "комментарий")),
+    # Ниже - поля, которых в файле BBC нет колонкой: они выводятся или
+    # задаются в карточке.
+    FieldDef("billing", "choice", "Начисление"),
+    FieldDef("economic_role", "list", "Хозяйственный смысл", fill="list"),
+    FieldDef("amount_terms", "text", "Условие суммы"),
+    FieldDef("end_kind", "choice", "Смысл даты окончания"),
+    FieldDef("currency", "text", "Валюта", hidden=True),
+)
 SYSTEM_KEYS = frozenset(item.key for item in SYSTEM_FIELDS)
 FIELD_BY_KEY = {item.key: item for item in SYSTEM_FIELDS}
 #: Поля-списки с собственными значениями в `list_values`.
@@ -54,19 +133,18 @@ SNAPSHOT_FIELDS = ("paid_snapshot", "remaining_snapshot")
 #: Поля, которые считаются из журнала операций, - только чтение, в договоре не
 #: хранятся. Видны тому, кому открыт журнал: сумма оплат - это деньги компании.
 LIVE_FIELDS = ("paid", "remaining")
-#: Меры вида (`core/views.MEASURES`): «Оплачено» и «Остаток» - из сводной
-#: таблицы или оплат KORT, «Срок, мес» - из даты договора. Не поля договора:
-#: колонкой и условием листа бывают, в карточке и настройке полей их нет.
+#: Поля из книги-сводки (`summary.py`) - только чтение, в договоре не хранятся.
 SUMMARY_FIELDS = ("summary_paid", "summary_remaining")
+#: Поля, которые выводятся из самого договора при чтении, - только чтение.
 DERIVED_FIELDS = ("age_months",)
-MEASURE_KEYS = frozenset(SUMMARY_FIELDS + DERIVED_FIELDS)
 #: Всё, что только читается и не хранится: правка, загрузка и значение по
 #: умолчанию их не трогают.
 COMPUTED_FIELDS = LIVE_FIELDS + SUMMARY_FIELDS + DERIVED_FIELDS
+#: Книги листов: `""` - реестр (карточки и «Таблица»), `oneoff` - «Разовые».
+BOOKS = ("", "oneoff")
 CHOICES = {
-    "billing": (("month", "В месяц"), ("total", "Вся сумма"), ("terms", "Условие"), ("documents", "По счетам и актам")),
+    "billing": (("month", "В месяц"), ("total", "Вся сумма"), ("terms", "Условие")),
     "end_kind": (("terminated", "Расторжение"), ("fulfilled", "Исполнение"), ("unknown", "Не ясен")),
-    "vat_mode": (("included", "В сумме"), ("on_top", "Сверху"), ("none", "Без НДС")),
 }
 #: Какие способы заполнения есть у типа поля. Первый - умолчание своего поля:
 #: так свои списки вели себя и до настройки (новое значение заводилось само).
@@ -98,17 +176,55 @@ def fill_of(item: Any) -> str:
 
 # ── Засев ────────────────────────────────────────────────────────────────────
 
-#: Статусы, виды договоров, смыслы и подсказки предмета отрасли по умолчанию -
-#: пакет отрасли (`packs/services.py`).
-SEED_STATUSES = packs.industry().statuses
-SEED_TYPES = packs.industry().types
-SEED_ECONOMIC_ROLES = packs.industry().economic_roles
-SUBJECT_HINTS = packs.industry().subject_hints
+#: Статусы. Фаза - системный смысл; подпись компания меняет как хочет.
+SEED_STATUSES: tuple[tuple[str, dict[str, Any]], ...] = (
+    ("Действующий", {"phase": "active"}),
+    ("На исполнении", {"phase": "in_progress"}),
+    ("Приостановлен", {"phase": "suspended"}),
+    ("Исполнен", {"phase": "fulfilled"}),
+    ("Недействующий", {"phase": "terminated"}),
+    ("Не состоялся", {"phase": "failed"}),
+)
+#: Виды договоров: как начислять, какой смысл по умолчанию, как подписаны
+#: стороны. «Иное» - вид без начисления, но со смыслом «вид известен».
+SEED_TYPES: tuple[tuple[str, dict[str, Any]], ...] = (
+    ("Абонентское обслуживание", {"billing": "month", "economic_role": "revenue"}),
+    ("Разовая услуга", {"billing": "total", "economic_role": "revenue"}),
+    ("Аренда", {"billing": "month", "economic_role": "revenue",
+                "roles": {"executor": "Арендодатель", "customer": "Арендатор"}}),
+    ("Агентский", {"billing": "terms"}),
+    ("Заём", {"billing": "total", "economic_role": "financing",
+              "roles": {"executor": "Займодавец", "customer": "Займополучатель"}}),
+    ("Купля-продажа", {"billing": "total",
+                       "roles": {"executor": "Продавец", "customer": "Покупатель"}}),
+    ("Иное", {"kind": "other"}),
+)
+SEED_ECONOMIC_ROLES: tuple[tuple[str, str], ...] = (
+    ("Выручка", "revenue"),
+    ("Расход", "expense"),
+    ("Финансирование", "financing"),
+    ("Внутри группы", "intra_group"),
+)
+
+#: Смысл предмета по словам в названии. Это не угадывание, а подстановка с
+#: пометкой `{ по предмету }`: её видно в карточке, и человек её правит. Без
+#: неё «Финансовая помощь» при виде «Иное» считалась бы выручкой и попала бы в
+#: порог НДС.
+SUBJECT_HINTS: tuple[tuple[re.Pattern[str], dict[str, Any]], ...] = (
+    (re.compile(r"финанс\w*\s+помощ|за[её]м|займ", re.IGNORECASE),
+     {"billing": "total", "economic_role": "financing",
+      "roles": {"executor": "Займодавец", "customer": "Займополучатель"}}),
+    (re.compile(r"агент", re.IGNORECASE), {"billing": "terms"}),
+    (re.compile(r"аренд", re.IGNORECASE),
+     {"billing": "month", "roles": {"executor": "Арендодатель", "customer": "Арендатор"}}),
+    (re.compile(r"купл\w*[-\s]*продаж", re.IGNORECASE),
+     {"billing": "total", "roles": {"executor": "Продавец", "customer": "Покупатель"}}),
+)
 
 
-def subject_meaning(value: str, industry: packs.Industry | None = None) -> dict[str, Any]:
+def subject_meaning(value: str) -> dict[str, Any]:
     """Смысл нового предмета по словам в названии; пусто - смысла нет."""
-    for pattern, meaning in (industry or packs.industry()).subject_hints:
+    for pattern, meaning in SUBJECT_HINTS:
         if pattern.search(value or ""):
             return dict(meaning)
     return {}
@@ -117,7 +233,7 @@ def subject_meaning(value: str, industry: packs.Industry | None = None) -> dict[
 # ── Похожие значения ─────────────────────────────────────────────────────────
 #
 # В «списке или своём» (вид, предмет) новое значение заводится из напечатанного
-# - так задумано «Настройками реестра»: новые услуги появляются постоянно. Цена
+# - так задумано «Настройками реестра»: услуги у BBC появляются постоянно. Цена
 # - двойники: «Абонентское обслуживаниее» рядом с «Абонентское обслуживание»
 # делят отчёт надвое. Здесь их находят, а сводит человек («не угадывать»).
 
@@ -210,13 +326,7 @@ def party_key(name: Any) -> str:
     лица, и склеивать их молча нельзя. Похожие, но не равные по ключу имена
     сводит только человек («Это ТОО «Атриум плюс»?»).
     """
-    return _party_key(str(name or ""))
-
-
-@lru_cache(maxsize=65536)
-def _party_key(text: str) -> str:
-    # Одно имя разносится по тысячам операций и документов 1С: ключ - один раз.
-    text = _QUOTES.sub(" ", text)
+    text = _QUOTES.sub(" ", str(name or ""))
     for pattern, short in _ORG_FORMS:
         text = pattern.sub(short, text)
     return squash(text)
@@ -321,11 +431,7 @@ def ensure_registry(session: Session, workspace: Workspace) -> None:
     уникальном ключе, и экран оставался пустым.
     """
     existing = _field_rows(session, workspace.id)
-    keys = {item.key for item in packs.industry_of(workspace).fields}
-    if keys <= set(existing) and existing and _has_main_view(session, workspace.id):
-        from app.finance.core import views as core_views
-
-        core_views.ensure(session, workspace)
+    if SYSTEM_KEYS <= set(existing) and existing and _has_main_view(session, workspace.id):
         return
     try:
         with session.begin_nested():
@@ -350,8 +456,7 @@ def _seed(session: Session, workspace: Workspace, existing: dict[str, EntityFiel
     first_time = not existing
     previous: EntityField | None = None
     added: list[str] = []
-    industry = packs.industry_of(workspace)
-    for index, item in enumerate(industry.fields):
+    for index, item in enumerate(SYSTEM_FIELDS):
         if item.key in existing:
             previous = existing[item.key]
             continue
@@ -378,12 +483,15 @@ def _seed(session: Session, workspace: Workspace, existing: dict[str, EntityFiel
     if not first_time and set(LIVE_FIELDS) & set(added):
         _add_live_columns(session, workspace.id)
     if first_time:
-        for index, (value, meaning) in enumerate(industry.statuses):
+        for index, (value, meaning) in enumerate(SEED_STATUSES):
             _seed_value(session, workspace.id, "status", value, meaning, index)
-        for index, (value, meaning) in enumerate(industry.types):
+        for index, (value, meaning) in enumerate(SEED_TYPES):
             _seed_value(session, workspace.id, "type", value, meaning, index)
-        for index, (value, system) in enumerate(industry.economic_roles):
+        for index, (value, system) in enumerate(SEED_ECONOMIC_ROLES):
             _seed_value(session, workspace.id, "economic_role", value, {"system": system}, index)
+    if not _has_book(session, workspace.id, "oneoff"):
+        session.flush()
+        _seed_oneoff(session, workspace)
     if not _has_main_view(session, workspace.id):
         session.add(
             EntityView(
@@ -397,12 +505,172 @@ def _seed(session: Session, workspace: Workspace, existing: dict[str, EntityFiel
             )
         )
     session.flush()
-    # Виды компании - «Реестр» и «Долги» (`core/views.py`); «Разовые» - только
-    # видом, сохранённым из шаблона отрасли.
-    from app.finance.core import views as core_views
-
-    core_views.ensure(session, workspace)
     bump(session, workspace.id, "schema")
+
+
+def _has_book(session: Session, workspace_id: uuid.UUID, book: str) -> bool:
+    """Есть ли в книге хоть один лист - и убранный тоже: удалённое не засевается снова."""
+    return (
+        session.scalar(
+            sa.select(sa.func.count())
+            .select_from(EntityView)
+            .where(EntityView.workspace_id == workspace_id, EntityView.book == book)
+        )
+        or 0
+    ) > 0
+
+
+#: Колонки листов «Разовых» - как в книге юротдела BBC «Разовые» (27.09.2026):
+#: «Оплачено» - из сводки, «Остаток» - сумма минус оплачено.
+_ONEOFF_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("row_number", "№"),
+    ("status", "Статус"),
+    ("planned_end_at", "План дата завершения"),
+    ("people", "Ответ. лицо"),
+    ("executor", "Исполнитель"),
+    ("customer", "Заказчик"),
+    ("number", "№ договора"),
+    ("signed_at", "Дата договора"),
+    ("department", "Отдел"),
+    ("type", "Вид услуги"),
+    ("subject", "Предмет исполнения"),
+    ("amount", "Сумма договора"),
+    ("summary_paid", "Оплачено"),
+    ("summary_remaining", "Остаток"),
+    ("end_date", "Факт дата завершения"),
+    ("note", "Примечания"),
+)
+_CLOSED = ["fulfilled", "terminated", "failed"]
+
+
+def _oneoff_columns(with_age: bool) -> list[dict[str, Any]]:
+    columns = [{"key": key, "label": label, "width": None} for key, label in _ONEOFF_COLUMNS]
+    if with_age:
+        columns.append({"key": "age_months", "label": "Срок, мес", "width": None})
+    return columns
+
+
+def oneoff_status_extras(session: Session, workspace_id: uuid.UUID) -> dict[str, Any]:
+    """Статусы «Разовых» - два, как в книге юротдела: «на исполнении» и «исполнен».
+
+    Значения ищутся по смыслу (фаза), а не по написанию: у компании они могут
+    называться по-своему. `choices` - что предлагает выбор, `status` -
+    статус новой строки, `done` - статус, при котором строка подсвечивается.
+    Нет одного из двух - книга остаётся без ограничения и подсветки.
+    """
+    rows = session.scalars(
+        sa.select(ListValue)
+        .where(
+            ListValue.workspace_id == workspace_id,
+            ListValue.field_key == "status",
+            ListValue.archived_at.is_(None),
+        )
+        .order_by(ListValue.position, ListValue.created_at)
+    ).all()
+    first = {}
+    for row in rows:
+        phase = (row.meaning or {}).get("phase")
+        if phase in ("in_progress", "fulfilled") and phase not in first:
+            first[phase] = str(row.id)
+    if len(first) < 2:
+        return {}
+    return {
+        "choices": [first["in_progress"], first["fulfilled"]],
+        "status": first["in_progress"],
+        "done": first["fulfilled"],
+    }
+
+
+def _seed_oneoff(session: Session, workspace: Workspace) -> None:
+    """Книга «Разовые»: те же договоры вида «Разовая услуга», свои листы.
+
+    Повторяет книгу юротдела BBC: весь список, отборы незавершённых по сроку
+    от даты договора («до 2 мес» … «6+ мес», как `техн 2` = месяцы по 30
+    дней) и «Остатки» - работа идёт / завершена, а оплачено не всё. Засев
+    общий: вид «Разовая услуга» засевается каждой компании. Нет его (удалили,
+    переименовали) - книга остаётся пустой, листы заводят в настройке.
+
+    Статус - только два книги юротдела. 30.09.2026 в «Разовых ЮО» стояли
+    десять «Не состоялся», «Недействующий» и «нужно закрыть по бух» -
+    договоры главного реестра, которых в книге юротдела нет. Решение
+    владельца: все договоры видны в реестре, а в «Разовых» (листы и
+    карточки) - только «На исполнении» и «Исполнен», без статуса тоже нет.
+    """
+    value = session.scalar(
+        sa.select(ListValue).where(
+            ListValue.workspace_id == workspace.id,
+            ListValue.field_key == "type",
+            ListValue.normalized == norm("Разовая услуга"),
+            ListValue.archived_at.is_(None),
+        )
+    )
+    if value is None:
+        return
+    oneoff = {"field": "type", "op": "in", "value": [str(value.id)]}
+    open_ = {"field": "phase", "op": "not_in", "value": _CLOSED}
+    defaults = {"type": str(value.id), "own_side": "executor"}
+    extras = oneoff_status_extras(session, workspace.id)
+    if extras.get("status"):
+        defaults["status"] = extras["status"]
+    two = [{"field": "status", "op": "in", "value": list(extras["choices"])}] if extras.get("choices") else []
+
+    def block(title: str, *conditions: dict[str, Any], with_age: bool = True) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "title": title,
+            "filter": {"any": [{"all": [oneoff, *two, *conditions]}]},
+            "roles": {},
+            "columns": _oneoff_columns(with_age),
+            "defaults": dict(defaults),
+        }
+        if extras.get("choices"):
+            out["choices"] = {"status": list(extras["choices"])}
+        if extras.get("done"):
+            out["paint"] = [
+                {
+                    "filter": {"any": [{"all": [{"field": "status", "op": "in", "value": [extras["done"]]}]}]},
+                    "tone": "done",
+                }
+            ]
+        return out
+
+    def age(op: str, months: int) -> dict[str, Any]:
+        return {"field": "age_months", "op": op, "value": months}
+
+    remaining = {"field": "summary_remaining", "op": "gt", "value": 0}
+    sheets: list[tuple[str, str, list[dict[str, Any]]]] = [
+        ("oneoff", "Разовые", [block("", with_age=False)]),
+        ("oneoff_2m", "до 2 мес", [block("", open_, age("lt", 2))]),
+        ("oneoff_3m", "2–3 мес", [block("", open_, age("gte", 2), age("lt", 3))]),
+        ("oneoff_6m", "3–6 мес", [block("", open_, age("gte", 3), age("lt", 6))]),
+        ("oneoff_6p", "6+ мес", [block("", open_, age("gte", 6))]),
+        (
+            "oneoff_rest",
+            "Остатки",
+            [
+                block("Работа идёт - есть остаток", open_, remaining),
+                block("Работа завершена - есть остаток", {"field": "phase", "op": "in", "value": ["fulfilled"]}, remaining),
+            ],
+        ),
+    ]
+    taken = set(
+        session.scalars(sa.select(EntityView.key).where(EntityView.workspace_id == workspace.id))
+    )
+    for index, (key, title, blocks) in enumerate(sheets):
+        if key in taken:
+            key = slug_for(title, taken)
+        taken.add(key)
+        session.add(
+            EntityView(
+                workspace_id=workspace.id,
+                entity=ENTITY,
+                key=key,
+                title=title,
+                main=False,
+                book="oneoff",
+                blocks=blocks,
+                position=(index + 1) * POSITION_STEP,
+            )
+        )
 
 
 def with_live_columns(columns: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -519,8 +787,6 @@ def fields_of(session: Session, workspace_id: uuid.UUID) -> list[EntityField]:
                 EntityField.workspace_id == workspace_id,
                 EntityField.entity == ENTITY,
                 EntityField.archived_at.is_(None),
-                # Меры вида - не поля, даже если строка осталась с прежних версий.
-                EntityField.key.not_in(MEASURE_KEYS),
             )
             .order_by(EntityField.position, EntityField.created_at)
         )
@@ -532,7 +798,7 @@ def slug_for(title: str, taken: set[str]) -> str:
     base = _translit(title) or "pole"
     base = base[:40].strip("_") or "pole"
     candidate, index = base, 2
-    while candidate in taken or candidate in SYSTEM_KEYS or candidate in MEASURE_KEYS:
+    while candidate in taken or candidate in SYSTEM_KEYS:
         candidate = f"{base}_{index}"
         index += 1
     return candidate
@@ -562,9 +828,10 @@ __all__ = [
     "FILL_OPTIONS",
     "FieldDef",
     "FieldView",
+    "BOOKS",
+    "oneoff_status_extras",
     "COMPUTED_FIELDS",
     "DERIVED_FIELDS",
-    "MEASURE_KEYS",
     "LIVE_FIELDS",
     "SUMMARY_FIELDS",
     "MODE_FIELDS",

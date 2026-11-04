@@ -19,7 +19,7 @@ Excel: копии разъехались с «Сводной», и замети�
 с паспортом (`GroupEntity`). Направление выводится: наш исполнитель -
 продажа, наш заказчик - закупка, оба наши - оборот внутри группы. Подписи
 слотов (Продавец, Арендодатель, Займодавец) задаёт вид договора или блок
-листа, а не отдельные поля: у реестра юротдела в одном листе «Заказчик ГК» соседние
+листа, а не отдельные поля: у реестра BBC в одном листе «Заказчик ГК» соседние
 блоки держат стороны в колонках наоборот.
 
 **2. Договор хранит текущие значения, соглашения - историю с датами.** Перевод
@@ -28,7 +28,7 @@ Excel: копии разъехались с «Сводной», и замети�
 новому. Соглашение с датой в будущем текущее значение не меняет; его
 применяет фоновая задача в свой день.
 
-**3. Номер договора не уникален.** В реестре юротдела один номер стоит у разных
+**3. Номер договора не уникален.** В реестре BBC один номер стоит у разных
 клиентов больше десяти раз - это данные, а не ошибка ввода. Уникальность
 сломала бы загрузку; вместо неё - замечание «номер уже есть у другого
 контрагента», которое человек может отметить «так и должно быть».
@@ -51,27 +51,20 @@ from app.finance.models import JSONB, MONEY, _in
 
 #: Как начислять по договору. `terms` - условие текстом («20% по разовым»):
 #: график по такому договору не ставится никогда.
-BILLING_KINDS = ("month", "total", "terms", "documents")
-#: НДС договора у плательщика: в сумме, сверху, без НДС (пусто - в сумме).
-VAT_MODES = ("included", "on_top", "none")
+BILLING_KINDS = ("month", "total", "terms")
 #: Смысл даты окончания. Одна колонка файла «дата расторжения / дата
 #: исполнения разового» держит два смысла; какой - хранится явно.
 END_KINDS = ("terminated", "fulfilled", "unknown")
-#: Откуда сводная таблица компании: лист Google или таблица файлом (`SummarySource.kind`).
-SUMMARY_KINDS = ("google", "file")
 #: Системный смысл значения «хозяйственный смысл» - что договор делает с
 #: нашим юрлицом. Порог НДС считает только `revenue`.
 ECONOMIC_ROLES = ("revenue", "expense", "financing", "intra_group")
 #: Фаза договора - системный смысл значения статуса.
 STATUS_PHASES = ("draft", "active", "in_progress", "suspended", "fulfilled", "terminated", "failed")
 CONTRACT_SOURCES = ("app", "grid", "import", "api")
-#: `status` - статус с даты: приостановка, возобновление (начисления ядра,
-#: `core/terms.py`, смотрят статус на дату периода).
-AMENDMENT_EFFECTS = ("none", "amount", "executor", "customer", "end_date", "other", "status")
+AMENDMENT_EFFECTS = ("none", "amount", "executor", "customer", "end_date", "other")
 #: `change` - «изменение с даты» из листа или карточки; `parsed` - кусок
-#: текста соглашений из файла, подтверждённый человеком; `book` - условие,
-#: взятое из книги-сводки по предложению сверки (`core/shadow.py`).
-AMENDMENT_ORIGINS = ("change", "parsed", "book")
+#: текста соглашений из файла, подтверждённый человеком.
+AMENDMENT_ORIGINS = ("change", "parsed")
 ALIAS_SOURCES = ("registry", "bank", "1c", "manual")
 FIELD_TYPES = (
     "text", "number", "money", "date", "bool", "list", "multi_list",
@@ -106,7 +99,7 @@ class GroupEntity(FinanceBase):
     workspace_id: Mapped[uuid.UUID] = mapped_column(
         sa.Uuid, sa.ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
     )
-    #: Короткое имя, которым юрлицо называют в таблицах: ТС, ТО, ИП.
+    #: Короткое имя, которым юрлицо называют в книгах: BBC, BBCL, EA.
     code: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("''"))
     full_name: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("''"))
     bin: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("''"))
@@ -118,7 +111,7 @@ class GroupEntity(FinanceBase):
 class CounterpartyName(FinanceBase):
     """Другое написание контрагента: «ТОО «Атриум плюс»», «АТРИУМ ПЛЮС».
 
-    Реестр ФО держал колонки имени в банке и в 1С ровно для этого -
+    Реестр ФО держал колонки «По выписке банка» и «По 1С» ровно для этого -
     чтобы свести руками одного клиента, записанного тремя способами. Здесь
     написание, подтверждённое человеком, запоминается, и в следующий раз
     сводит система.
@@ -169,7 +162,7 @@ class Department(FinanceBase):
 class Employee(FinanceBase):
     """Человек компании. Учётка - только у тех, кому дан вход.
 
-    Ответственный в договоре не обязан входить в систему: в реестре юротдела
+    Ответственный в договоре не обязан входить в систему: в реестре BBC
     ответственные - это «Ануар», «Нурболат», и половина из них учёт не ведёт.
     Поэтому человек - отдельная запись, а связь с учёткой необязательна.
     """
@@ -354,12 +347,6 @@ class Contract(FinanceBase):
         sa.CheckConstraint(
             "end_kind = '' OR " + _in("end_kind", END_KINDS), name="contract_end_kind"
         ),
-        sa.CheckConstraint(
-            "period_day IS NULL OR period_day BETWEEN 1 AND 31", name="contract_period_day"
-        ),
-        sa.CheckConstraint(
-            "vat_mode = '' OR " + _in("vat_mode", VAT_MODES), name="contract_vat_mode"
-        ),
         sa.CheckConstraint(_in("source", CONTRACT_SOURCES), name="contract_source"),
         sa.Index("ix_contracts_workspace_seq", "workspace_id", "seq"),
         sa.Index("ix_contracts_workspace_number_key", "workspace_id", "number_key"),
@@ -369,7 +356,7 @@ class Contract(FinanceBase):
     workspace_id: Mapped[uuid.UUID] = mapped_column(
         sa.Uuid, sa.ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
     )
-    #: Как написан в договоре: «№ 17-7-ТС-BUH», «№ЮО/141». Не уникален.
+    #: Как написан в договоре: «№ 17-7-BBC-BUH», «№ЮО/141». Не уникален.
     number: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("''"))
     #: Номер без пробелов, «№» и регистра - только для замечания «номер уже есть
     #: у другого контрагента».
@@ -394,16 +381,6 @@ class Contract(FinanceBase):
         sa.Uuid, sa.ForeignKey("list_values.id", ondelete="SET NULL")
     )
     billing: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("''"))
-    #: День месяца, с которого идёт период начисления («Период с» книги):
-    #: пусто - день даты начала начислений. У договора от 25.06 период с
-    #: 25-го, но бывает и с 1-го у договора, подписанного 25-го.
-    period_day: Mapped[int | None] = mapped_column(sa.SmallInteger)
-    #: С какого дня начислять: пусто - с даты договора.
-    billing_from: Mapped[date | None] = mapped_column(sa.Date)
-    #: Как сумма договора относится к НДС, когда исполнитель - плательщик НДС
-    #: (`core/vat.py`): пусто или `included` - в сумме, `on_top` - сверху,
-    #: `none` - без НДС.
-    vat_mode: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("''"))
     amount: Mapped[Decimal | None] = mapped_column(MONEY)
     #: Условие суммы текстом, когда числа нет: «20% по разовым, 40% по абон.».
     amount_terms: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("''"))
@@ -411,7 +388,7 @@ class Contract(FinanceBase):
     planned_end_at: Mapped[date | None] = mapped_column(sa.Date)
     end_date: Mapped[date | None] = mapped_column(sa.Date)
     end_kind: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("''"))
-    #: Папка договора (ссылка на систему задач компании): открывается кнопкой из карточки.
+    #: Папка договора (у BBC - Битрикс): открывается кнопкой из карточки.
     folder_url: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("''"))
     #: Колонки соглашений файла - как есть. В записи с датой раскладывает
     #: только человек, кнопкой «Разобрать».
@@ -577,16 +554,10 @@ class ContractPayment(FinanceBase):
     старые метки. Хранится только то, чего система решить не может: у клиента
     два договора с одним нашим ТОО, и платёж подходит к обоим. `contract_id`
     пустой - «ни к одному»: платёж не по договору (возврат, ошибка банка).
-
-    Одна оплата за два договора (полигон, О2) - строка на каждый договор с
-    суммой части (`amount`); пусто - вся операция.
     """
 
     __tablename__ = "contract_payments"
-    __table_args__ = (
-        sa.UniqueConstraint("operation_id", "contract_id", name="uq_contract_payments_operation_contract"),
-        sa.Index("ix_contract_payments_operation_id", "operation_id"),
-    )
+    __table_args__ = (sa.UniqueConstraint("operation_id", name="uq_contract_payments_operation"),)
 
     id: Mapped[uuid.UUID] = mapped_column(sa.Uuid, primary_key=True, default=_uuid)
     workspace_id: Mapped[uuid.UUID] = mapped_column(
@@ -598,8 +569,6 @@ class ContractPayment(FinanceBase):
     contract_id: Mapped[uuid.UUID | None] = mapped_column(
         sa.Uuid, sa.ForeignKey("contracts.id", ondelete="CASCADE"), index=True
     )
-    #: Часть операции этому договору; пусто - вся операция.
-    amount: Mapped[Decimal | None] = mapped_column(MONEY)
     created_by: Mapped[uuid.UUID | None] = mapped_column(
         sa.Uuid, sa.ForeignKey("users.id", ondelete="SET NULL")
     )
@@ -609,10 +578,10 @@ class ContractPayment(FinanceBase):
 
 
 class SummarySource(FinanceBase):
-    """Сводная таблица компании (лист Google или файл): из неё «Оплачено (сводка)», «Счета» и сверка ядра.
+    """Книга Google, из которой берётся «Оплачено (сводка)» договоров.
 
-    Это сводная таблица компании, куда сходятся таблицы всех юрлиц: колонка
-    «поступило за месяц» там - факт оплаты. Книга
+    У BBC это «Осн.Общая сводка BBC 2026», лист «Сводка все ЮР лица»: туда
+    сходятся книги всех юрлиц, и «Сумма Факт Поступ.» там - факт оплаты. Книга
     юротдела «Разовые» брала «Оплачено» оттуда формулой (`VLOOKUP` по «Заказчик
     + № договора + код фирмы»); здесь - тем же ключом, но по названиям колонок
     и без угадывания (`summary.py`). Одна книга на компанию; нет записи - нет
@@ -620,23 +589,14 @@ class SummarySource(FinanceBase):
     """
 
     __tablename__ = "contract_summary_sources"
-    __table_args__ = (sa.CheckConstraint(_in("kind", SUMMARY_KINDS), name="summary_source_kind"),)
 
     workspace_id: Mapped[uuid.UUID] = mapped_column(
         sa.Uuid, sa.ForeignKey("workspaces.id", ondelete="CASCADE"), primary_key=True
     )
-    #: `google` - лист Google по расписанию; `file` - таблица файлом, положенная в
-    #: KORT (компания ведёт сводную в Excel): её строки - в `values`, новая версия -
-    #: новой загрузкой (с 30.10.2026, `core/book.sheet`).
-    kind: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("'google'"))
     spreadsheet_id: Mapped[str] = mapped_column(sa.Text)
     worksheet: Mapped[str] = mapped_column(sa.Text)
     #: Название книги на момент подключения - для подписи «откуда цифры».
     title: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("''"))
-    #: Таблица файлом: имя файла, отпечаток строк и сами строки под названиями колонок ядра.
-    file_name: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("''"))
-    digest: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("''"))
-    values: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     updated_by: Mapped[uuid.UUID | None] = mapped_column(
         sa.Uuid, sa.ForeignKey("users.id", ondelete="SET NULL")
     )
@@ -647,15 +607,6 @@ class SummarySource(FinanceBase):
 
 RESTORE_KINDS = (
     "contracts_delete", "contracts_create", "values", "view", "field_add", "order",
-    # Сведение двух участников в одного (ядро, `core/participants.py`).
-    "party_merge",
-    # Перевод клиентов между нашими юрлицами пачкой (ядро, `core/vat.py`).
-    "core_transfer",
-    # Входящее сальдо договоров из книги пачкой (ядро, `core/opening.py`).
-    "core_opening",
-    # Пачка команд «применить» (API модели, `model/apply.py`): шаги - прежние
-    # виды точек и шаги `restore.STEP_KINDS`, обратно - в обратном порядке.
-    "batch",
 )
 
 

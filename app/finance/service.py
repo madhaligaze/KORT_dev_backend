@@ -170,14 +170,12 @@ SEED_NATURES: dict[str, str] = {
 }
 
 
-def create_workspace(session: Session, *, title: str, accounts: bool = True) -> Workspace:
+def create_workspace(session: Session, *, title: str) -> Workspace:
     """Новая компания с начальными справочниками.
 
-    Зовётся из регистрации и из «добавить ещё одну компанию». Статьи заводятся
-    сразу. Счета - кроме регистрации (`accounts=False`): там счёт рождается
-    из выписки с номером, юрлицом и остатком или из первой оплаты руками, а
-    пустые «Банковский счёт» и «Касса» без юрлица только уводили деньги мимо
-    договоров.
+    Зовётся из регистрации и из «добавить ещё одну компанию». Пустая компания
+    без счетов не даёт сделать ни одного действия - ни записать операцию, ни
+    загрузить выписку, - поэтому счета и статьи заводятся сразу.
 
     `slug` собирается из названия и номера: он нужен только как человекочитаемый
     ключ в адресах и логах, уникальность держится счётчиком, а не транслитом.
@@ -195,7 +193,7 @@ def create_workspace(session: Session, *, title: str, accounts: bool = True) -> 
     )
     session.add(workspace)
     session.flush()
-    _seed(session, workspace, accounts=accounts)
+    _seed(session, workspace)
     log.info("finance: создана компания «%s» (%s)", clean, slug)
     return workspace
 
@@ -268,9 +266,9 @@ def ensure_workspace(session: Session, *, slug: str = DEFAULT_SLUG) -> Workspace
     return workspace
 
 
-def _seed(session: Session, workspace: Workspace, *, accounts: bool = True) -> None:
+def _seed(session: Session, workspace: Workspace) -> None:
     """Начальные счета и статьи новой компании."""
-    for position, (name, kind) in enumerate(SEED_ACCOUNTS if accounts else ()):
+    for position, (name, kind) in enumerate(SEED_ACCOUNTS):
         session.add(
             Account(
                 workspace_id=workspace.id,
@@ -324,10 +322,7 @@ def create_account(
     starting_balance: Decimal | float | str = 0,
     excluded_from_reports: bool = False,
     number: str = "",
-    group_entity_id: uuid.UUID | None = None,
 ) -> Account:
-    """Завести счёт. `group_entity_id` - чей он из наших юрлиц: оплата на него -
-    оплата договоров этого юрлица (`contracts/payments.py`); проверяет вызывающий."""
     clean = (name or "").strip()
     if not clean:
         raise FinanceError("У счёта должно быть название")
@@ -348,7 +343,6 @@ def create_account(
         excluded_from_reports=excluded_from_reports,
         number=_check_number(session, workspace.id, number),
         position=_next_position(session, Account, workspace.id),
-        group_entity_id=group_entity_id,
     )
     session.add(account)
     session.flush()
@@ -654,10 +648,6 @@ class OperationInput:
     category_id: uuid.UUID | None = None
     counterparty_id: uuid.UUID | None = None
     comment: str = ""
-    #: Номер договора, как его написал источник (`Operation.contract_ref`).
-    contract_ref: str = ""
-    #: Период словами источника, когда это не месяц (`Operation.period_label`).
-    period_label: str = ""
     projects: Sequence[tuple[uuid.UUID, Decimal]] = ()
     #: Дробление по статьям: один платёж на несколько статей.
     categories: Sequence[tuple[uuid.UUID, Decimal]] = ()
@@ -795,8 +785,6 @@ def create_operation(
         category_id=data.category_id if data.kind != "transfer" else None,
         counterparty_id=data.counterparty_id,
         comment=data.comment or "",
-        contract_ref=(data.contract_ref or "").strip(),
-        period_label=(data.period_label or "").strip(),
         split_state=_split_state(amount, data.projects),
         source=data.source,
         recurrence_id=data.recurrence_id,
@@ -1174,12 +1162,10 @@ def apply_batch(
     )
     known = _known_keys(session, workspace.id)
     remembered = _remember_statement_number(session, workspace, batch, accounts)
-    # БИН участника - колонка `bin` (ядро, 24.10.2026); `details.bin` - то, что
-    # записали прошлые выписки, до того как БИН стал участником.
     by_bin = {
-        str(item.bin or (item.details or {}).get("bin")): item
+        str((item.details or {}).get("bin")): item
         for item in list_counterparties(session, workspace.id)
-        if item.bin or (item.details or {}).get("bin")
+        if (item.details or {}).get("bin")
     }
 
     imported = 0
@@ -1254,8 +1240,6 @@ def apply_batch(
             category_id=category.id if category else None,
             counterparty_id=counterparty.id if counterparty else None,
             comment=values.get("comment") or "",
-            contract_ref=values.get("contract_ref") or "",
-            period_label=values.get("period_label") or "",
             projects=projects,
             tags=tags,
             source="import",
@@ -1274,9 +1258,6 @@ def apply_batch(
         if key:
             known.add(key)
 
-    # Сначала записать строки: без этого счёт отставал на последнюю, и в «Прошлых
-    # загрузках» стояло «завели 2 из 4» при трёх заведённых (проход новичка 31.10).
-    session.flush()
     batch.rows_imported = int(
         session.scalar(
             sa.select(sa.func.count(ImportRow.id)).where(
@@ -1382,7 +1363,7 @@ _FIXABLE = frozenset(
     {
         "paid_at", "accrued_at", "period_start", "period_end", "amount", "kind", "currency",
         "account_from", "account_to", "category", "subcategory", "counterparty", "project",
-        "subproject", "comment", "tags", "contract_ref", "period_label",
+        "subproject", "comment", "tags",
     }
 )
 

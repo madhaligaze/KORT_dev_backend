@@ -14,11 +14,9 @@
 from __future__ import annotations
 
 import io
-import json
 import uuid
 from typing import Any
 
-import openpyxl
 import pytest
 import sqlalchemy as sa
 from fastapi import FastAPI
@@ -28,89 +26,16 @@ from app.finance import audit, auth
 from app.finance.db import finance_session
 from app.finance.models import ACTION_CATEGORIES, ActionLog
 
-import company_layer
-
-
-@pytest.fixture(autouse=True)
-def _company_layer(monkeypatch):
-    """Компания теста - с шапкой таблиц копии прода: её знает словарь компании, а не ядро (п.9 «Пакеты»)."""
-    company_layer.everywhere(monkeypatch)
-
-
 BASE = "/api/v1/finance"
 PASSWORD = "pass-12345"
 AGENT = "pytest-agent"
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-
-
-def _sales_file() -> bytes:
-    """Журнал «Реализация товаров и услуг» 1С, выгруженный списком: одна реализация."""
-    from datetime import datetime
-
-    from openpyxl import Workbook
-
-    book = Workbook()
-    sheet = book.active
-    sheet.title = "Реализации"
-    sheet.append(["Дата", "Номер", "Организация", "Контрагент", "Договор", "Сумма", "Валюта", "Содержание"])
-    sheet.append([datetime(2026, 9, 30, 18), "00000000001", "ТОО BBC", "ТОО Альфа", "Договор № 1 от 01.01.2026", 100000, "KZT",
-                  "Услуги за период с 01.09.2026 по 30.09.2026"])
-    buffer = io.BytesIO()
-    book.save(buffer)
-    return buffer.getvalue()
-
-
-def _listeners_file() -> bytes:
-    """Таблица отдела, которую KORT сам не узнаёт: слушатели курсов."""
-    from openpyxl import Workbook
-
-    book = Workbook()
-    sheet = book.active
-    sheet.title = "Слушатели"
-    sheet.append(["ФИО / Организация", "Курс", "Начало", "Стоимость"])
-    sheet.append(["Касымов Ерлан", "Бухгалтерия с нуля", "15.09.2026", 350000])
-    buffer = io.BytesIO()
-    book.save(buffer)
-    return buffer.getvalue()
-
-
-def _osv_file() -> bytes:
-    """ОСВ по 1210 в форме отчёта 1С: шапка в две строки, контрагент и его договор отступом."""
-    from openpyxl import Workbook
-    from openpyxl.styles import Alignment
-
-    book = Workbook()
-    sheet = book.active
-    sheet.append(["ТОО BBC"])
-    sheet.append(["Оборотно-сальдовая ведомость по счету 1210 за Сентябрь 2026 г."])
-    sheet.append([])
-    sheet.append(["Счет", "Сальдо на начало периода", None, "Обороты за период", None, "Сальдо на конец периода", None])
-    sheet.append([None, "Дебет", "Кредит", "Дебет", "Кредит", "Дебет", "Кредит"])
-    sheet.merge_cells("B4:C4")
-    sheet.merge_cells("D4:E4")
-    sheet.merge_cells("F4:G4")
-    sheet.append(["1210", 100000, None, None, None, 100000, None])
-    sheet.append(["ТОО Альфа", 100000, None, None, None, 100000, None])
-    sheet.cell(sheet.max_row, 1).alignment = Alignment(indent=1)
-    sheet.append(["Договор № 1 от 01.01.2026", 100000, None, None, None, 100000, None])
-    sheet.cell(sheet.max_row, 1).alignment = Alignment(indent=2)
-    sheet.append(["Итого", 100000, None, None, None, 100000, None])
-    buffer = io.BytesIO()
-    book.save(buffer)
-    return buffer.getvalue()
 
 #: Изменяющие маршруты без события - и почему.
 ALLOWED: dict[tuple[str, str], str] = {
     ("POST", "/auth/phone/start"): "шаг входа: только отвечает, какой экран показать, ничего не меняет",
     ("POST", "/contracts/{contract_id}/amendments/parse"): "читает текст соглашений, в базу не пишет",
     ("POST", "/contracts/setup/views/preview"): "считает договоры под правило листа, в базу не пишет",
-    ("POST", "/core/vat/preview"): "считает оборот юрлиц до и после перевода клиентов, в базу не пишет",
-    ("POST", "/core/intake"): "приёмник называет форму каждого листа файла, в базу не пишет",
-    ("POST", "/core/intake/plan"): "предложение и сверка таблицы по разметке, в базу не пишет",
-    ("POST", "/core/intake/compare"): "«сравнить» - таблица «договор за месяц» против KORT, в базу не пишет",
-    ("POST", "/model/compare"): "«сравнить» API модели - таблица против KORT, в базу не пишет",
-    ("POST", "/model/ask"): "«спросить» - вопрос телом, в базу не пишет",
-    ("POST", "/model/propose"): "«предложить» - прогон команд в транзакции, которая откатывается всегда",
     ("POST", "/contracts/imports/{batch_id}/decide"): (
         "решения протокола - черновик разбора; события пишут загрузка файла и заведение"
     ),
@@ -271,7 +196,8 @@ def test_kazhdyy_izmenyayushchiy_marshrut_pishet_sobytie(app: FastAPI, monkeypat
     first_company = me["company"]["id"]
 
     # ── счета и справочники ────────────────────────────────────────────
-    cash = walk.call(owner, "POST", "/accounts", json={"name": "Касса", "kind": "cash"}).json()["id"]
+    accounts = {item["name"]: item["id"] for item in owner.get(f"{BASE}/dictionaries").json()["accounts"]}
+    cash = accounts["Касса"]
     reserve = walk.call(owner, "POST", "/accounts", json={"name": "Резерв"}).json()["id"]
     walk.call(owner, "PATCH", "/accounts/{account_id}", account_id=reserve, json={"starting_balance": "1000"})
     walk.call(owner, "PUT", "/accounts/{account_id}/number", account_id=reserve, json={"number": "KZ86125KZT5004100100"})
@@ -371,39 +297,7 @@ def test_kazhdyy_izmenyayushchiy_marshrut_pishet_sobytie(app: FastAPI, monkeypat
     walk.call(owner, "POST", "/onec/bases/{base_id}/sync", base_id=onec_base)
     loose = owner.get(f"{BASE}/onec/month", params={"month": "2026-09"}).json()["unmatched"][0]["id"]
     walk.call(owner, "POST", "/onec/documents/{document_id}/decide", document_id=loose, json={"action": "none"})
-    # Вход из 1С: ОСВ к базе, наше юрлицо базы и оплаты юрлица из 1С.
-    walk.call(
-        owner, "POST", "/core/onec-start/{base_id}/osv", base_id=onec_base,
-        files={"file": ("ОСВ 1210.xlsx", _osv_file(), XLSX)},
-    )
-    assert owner.post(f"{BASE}/core/onec-start/{onec_base}/entity", json={"answers": {}}).status_code == 200
-    walk.call(owner, "POST", "/core/onec-start/{base_id}/{step}", base_id=onec_base, step="payments", json={"answers": {}})
-    # Сальдо 1210 из 1С по REST: чтение 1С подменено готовой ведомостью.
-    from datetime import date as _date
-    from decimal import Decimal as _Decimal
-
-    from app.finance.onec import balances as onec_balances
-    from app.finance.onec.osv import Line, Osv
-
-    rest = Osv("1С по REST", "", _date(2026, 9, 1), _date(2026, 9, 30), "1210", lines=[
-        Line("ТОО Альфа", "Договор № 1 от 01.01.2026", "1", _date(2026, 1, 1), _Decimal(100000), _Decimal(0), _Decimal(0), _Decimal(0), 1),
-    ], opening_total=_Decimal(100000))
-    monkeypatch.setattr(onec_balances, "read", lambda *args, **kwargs: rest)
-    walk.call(owner, "POST", "/core/onec-start/{base_id}/balances", base_id=onec_base, json={"day": "2026-09-01"})
     walk.call(owner, "DELETE", "/onec/bases/{base_id}", base_id=onec_base)
-    # 1С без интернета: журнал реализаций файлом - база организации из файлов.
-    walk.call(
-        owner, "POST", "/core/onec-files",
-        files=[("files", ("Реализация товаров и услуг.xlsx", _sales_file(), XLSX))],
-    )
-    # Excel любой формы: разметка таблицы отдела запоминается словарём компании.
-    listeners = json.dumps({"sheets": {"Слушатели": {
-        "form": "contract", "columns": {"ФИО / Организация": "customer", "Курс": "subject", "Начало": "billing_from", "Стоимость": "amount"},
-        "billing": "total",
-    }}})
-    owner.post(f"{BASE}/core/intake/plan", files={"file": ("Учебный центр.xlsx", _listeners_file(), XLSX)}, data={"answers": listeners})
-    walk.call(owner, "POST", "/core/intake/apply", files={"file": ("Учебный центр.xlsx", _listeners_file(), XLSX)},
-              data={"answers": listeners})
 
     # ── компании ────────────────────────────────────────────────────────
     second = walk.call(owner, "POST", "/auth/companies", json={"title": "Вторая"}).json()["id"]
@@ -532,7 +426,6 @@ def test_kazhdyy_izmenyayushchiy_marshrut_pishet_sobytie(app: FastAPI, monkeypat
     walk.call(owner, "POST", "/contracts/setup/values/merge", json={"keep": paused, "drop": pause})
     entity = walk.call(owner, "POST", "/contracts/setup/entities", json={"name": "BBCL", "code": "BBCL"}).json()["id"]
     walk.call(owner, "PATCH", "/contracts/setup/entities/{party_id}", party_id=entity, json={"full_name": "ТОО BBC Legal"})
-    walk.call(owner, "PUT", "/accounts/{account_id}/entity", account_id=reserve, json={"group_entity_id": entity})
     parties = {item["name"]: item["id"] for item in owner.get(f"{BASE}/contracts/parties", params={"q": "ТОО"}).json()["parties"]}
     walk.call(owner, "POST", "/contracts/setup/parties/merge", json={"keep": parties["ТОО Альфа"], "drop": parties["ТОО Бета"]})
     registry_department = walk.call(owner, "POST", "/contracts/setup/departments", json={"code": "НО"}).json()["id"]
@@ -544,35 +437,43 @@ def test_kazhdyy_izmenyayushchiy_marshrut_pishet_sobytie(app: FastAPI, monkeypat
                      json={"title": "Юристы", "blocks": [{"filter": rule_filter}]}).json()["id"]
     walk.call(owner, "PATCH", "/contracts/setup/views/{view_id}", view_id=view, json={"title": "Юристы ЮО"})
 
-    # ── сводка оплат и счета: книга Google подменена - сеть в тесте не нужна ────
-    # Читатель таблицы один на сверку, «Оплачено (сводка)» и «Счета» (`core/book._read`).
-    from app.finance.contracts import bill_book
-    from app.finance.core import book as core_book
-    from bill_book_fake import fake_api
+    # ── сводка оплат: книга Google подменена - сеть в тесте не нужна ────
+    from app.finance.contracts import summary as summary_module
 
     monkeypatch.setattr(
-        core_book,
+        summary_module,
         "_read",
-        lambda spreadsheet_id, tab, extra=None: core_book.parse(
-            [
-                ["Наша Фирма", "Заказчик (Название Фирмы)", "№ Договора", "Сумма Факт Поступ.", "Техн. 1", "Счет", "Период с (нач.)"],
-                ["", "ТОО Альфа", "№ 1", "1000", "", "TRUE", ""],
-                ["BBCL", "ТОО KENESARY AGRO", "№ЮО/44", "", "ОКТЯБРЬ 2026", "Сегодня день выставления", "22.10.2026"],
-            ],
+        lambda spreadsheet_id, tab: summary_module.build_index(
+            [["Заказчик (Название Фирмы)", "№ Договора", "Сумма Факт Поступ."], ["ТОО Альфа", "№ 1", "1000"]],
             title="Сводка",
             worksheet=tab,
-            spreadsheet_id=spreadsheet_id,
-            columns=core_book.columns_for(extra),
         ),
     )
     walk.call(owner, "POST", "/contracts/setup/summary",
               json={"link": "https://docs.google.com/spreadsheets/d/abc123/edit", "worksheet": "Сводка"})
 
     # ── карточка счёта пишет в книгу юрлица: книги - в памяти ───────────
+    from app.finance.contracts import bill_book
+    from app.finance.contracts import bills as bills_module
+    from bill_book_fake import fake_api
+
+    monkeypatch.setattr(
+        bills_module,
+        "_read",
+        lambda spreadsheet_id, tab: bills_module.build_board(
+            [
+                ["Наша Фирма", "Заказчик (Название Фирмы)", "№ Договора", "Техн. 1", "Счет", "Период с (нач.)"],
+                ["BBCL", "ТОО KENESARY AGRO", "№ЮО/44", "ОКТЯБРЬ 2026", "Сегодня день выставления", "22.10.2026"],
+            ],
+            title="Сводка",
+            worksheet=tab,
+        ),
+    )
     books = fake_api()
     books.summary_id = "abc123"
     monkeypatch.setattr(bill_book, "_api", books)
     bill_book.forget()
+    bills_module._slots.clear()  # чтение до подмены (без кредов Google) держалось бы минуту
     listed = owner.get(f"{BASE}/bills").json()
     assert len(listed["items"]) == 1, "ошибка: " + str(listed["source"]["error"])
     [bill] = listed["items"]
@@ -580,175 +481,6 @@ def test_kazhdyy_izmenyayushchiy_marshrut_pishet_sobytie(app: FastAPI, monkeypat
     walk.call(owner, "POST", "/bills/{bill_id}", bill_id=bill["id"],
               json={"values": {"bill_no": "312", "bill_date": "2026-10-22"}, "expect": card["book"]["fields"]})
     bill_book.forget()
-
-    # ── ядро: участники, режим наших юрлиц, налоговые годы ──────────────
-
-    def customer_of(name: str, number: str) -> str:
-        created = owner.post(f"{BASE}/contracts", json=contract_values(name, number))
-        assert created.status_code < 400, created.text
-        return created.json()["contract"]["values"]["customer"]
-
-    berg = customer_of("ТОО Бергауф Астана", "ОБО/1")
-    berg_twin = customer_of("Бергауф Астана", "ОБО/2")
-    walk.call(owner, "PUT", "/core/participants/{party_id}/bin", party_id=berg, json={"bin": "260540028486"})
-    walk.call(owner, "PATCH", "/core/participants/{party_id}", party_id=berg, json={"full_name": "ТОО «Бергауф Астана»"})
-    aliases = walk.call(owner, "POST", "/core/participants/{party_id}/aliases", party_id=berg,
-                        json={"name": "BERGAUF ASTANA LLP", "source": "bank"}).json()["aliases"]
-    alias_id = next(item["id"] for item in aliases if item["name"] == "BERGAUF ASTANA LLP")
-    walk.call(owner, "DELETE", "/core/participants/{party_id}/aliases/{alias_id}", party_id=berg, alias_id=alias_id)
-    walk.call(owner, "POST", "/core/participants/{party_id}/bin/reject", party_id=berg_twin, json={"bin": "090540002228"})
-    walk.call(owner, "POST", "/core/participants/distinct",
-              json={"ids": [customer_of("ТОО Гамма", "ОБО/3"), customer_of("ТОО Дельта", "ОБО/4")]})
-    walk.call(owner, "POST", "/core/participants/merge", json={"keep": berg, "drop": berg_twin})
-    company = uuid.UUID(owner.get(f"{BASE}/auth/me").json()["company"]["id"])
-    core_book.put(company, core_book.build_book(
-        [["Наша Фирма", "Заказчик (Название Фирмы)", "По Выписке Банка", "№ Договора"],
-         ["BBC", "ТОО Альфа", "ТОО \"АЛЬФА\" БИН 260540028486", "ЮО/141"]],
-        title="Сводка", worksheet="Сводка",
-    ))
-    assert owner.get(f"{BASE}/core/participants-harvest").json()["matched"] == 1
-    walk.call(owner, "POST", "/core/participants-harvest")
-    core_book.forget()
-    walk.call(owner, "POST", "/core/entities/{entity_id}/tax", entity_id=entity,
-              json={"valid_from": "2026-01-01", "regime": "general", "vat_payer": True})
-    period = owner.get(f"{BASE}/core/participants/{entity}").json()["own"]["tax"][0]["id"]
-    walk.call(owner, "DELETE", "/core/entities/{entity_id}/tax/{period_id}", entity_id=entity, period_id=period)
-    walk.call(owner, "PUT", "/core/tax-years/{year}", year=2027,
-              json={"mrp": "4600", "threshold_mrp": 10000, "vat_rate": "16"})
-
-    # ── виды: шаблон отдела, правка, убрать ─────────────────────────────
-    saved = walk.call(owner, "POST", "/core/views",
-                      json={"template": "oneoff_age", "owner": {"department": department}}).json()
-    walk.call(owner, "PATCH", "/core/views/{view_id}", view_id=saved["id"], json={"pin": "all"})
-    walk.call(owner, "DELETE", "/core/views/{view_id}", view_id=saved["id"])
-
-    # ── ядро: поправка месяца, статус с даты, сверка с книгой ───────────
-    def monthly(customer: str, number: str, signed: str) -> str:
-        created = owner.post(f"{BASE}/contracts", json=contract_values(customer, number, signed_at=signed, billing="month"))
-        assert created.status_code < 400, created.text
-        return created.json()["contract"]["id"]
-
-    omega = monthly("ТОО Омегаком", "ОБО/8", "25.05.2026")
-    sigma = monthly("ТОО Сигмаком", "ОБО/9", "27.05.2026")
-
-    # ── API модели: пачка одной точкой и её возврат ─────────────────────
-    applied = walk.call(owner, "POST", "/model/apply", json={"commands": [
-        {"command": "contract.update", "params": {"id": omega, "values": {"note": "из API модели"}}},
-    ]}).json()
-    walk.call(owner, "POST", "/model/undo", json={"point": applied["point"]["id"]})
-    issued = walk.call(owner, "POST", "/model/keys", json={"title": "Шина клиента", "level": "read"}).json()
-    walk.call(owner, "DELETE", "/model/keys/{key_id}", key_id=issued["id"])
-    assert owner.get(f"{BASE}/core/contracts/{omega}/months").status_code == 200
-    adjustment = walk.call(owner, "POST", "/core/contracts/{contract_id}/adjustments", contract_id=omega,
-                           json={"month": "2026-07", "amount": "5000", "reason": "скидка"}).json()["id"]
-    walk.call(owner, "DELETE", "/core/contracts/{contract_id}/adjustments/{document_id}",
-              contract_id=omega, document_id=adjustment)
-    walk.call(owner, "POST", "/core/contracts/{contract_id}/status-from", contract_id=sigma,
-              json={"status_id": paused, "effective_from": "2026-09-01"})
-    rows = [
-        [str(month), f"{title} 2026", "BBC", customer, "500 000", number, f"01.0{month}.2026", f"{last}.0{month}.2026"]
-        for month, title, last in ((6, "ИЮНЬ", 30), (7, "ИЮЛЬ", 31))
-        for number, customer in (("ОБО/8", "ТОО Омегаком"), ("ОБО/9", "ТОО Сигмаком"))
-    ]
-    rows.append(["7", "ИЮЛЬ 2026", "BBC", "ТОО Новичок", "15 000", "БезДог.07-1", "", ""])
-    core_book.put(company, core_book.build_book(
-        [["Мес", "Техн. 1", "Наша Фирма", "Заказчик (Название Фирмы)", "Сумма Договора", "№ Договора",
-          "Период с (нач.)", "Период по (зав.)"], *rows],
-        title="Сводка", worksheet="Сводка",
-    ))
-    view = owner.get(f"{BASE}/core/shadow").json()
-    first_day = next(item for item in view["proposals"] if item["kind"] == "period_day" and item["contract_id"] == omega)
-    walk.call(owner, "POST", "/core/shadow/apply", json={key: first_day[key] for key in ("contract_id", "kind", "value")})
-    walk.call(owner, "POST", "/core/shadow/apply-all", json={"kind": "period_day"})
-    walk.call(owner, "POST", "/core/shadow/create", json={"key": view["unknown"][0]["key"]})
-    # «Верно у KORT»: у ОБО/9 в июле в таблице другая сумма, у ОБО/8 таблица пропустила 01.07 - 02.07.
-    core_book.put(company, core_book.build_book(
-        [["Мес", "Техн. 1", "Наша Фирма", "Заказчик (Название Фирмы)", "Сумма Договора", "№ Договора",
-          "Период с (нач.)", "Период по (зав.)"],
-         ["6", "ИЮНЬ 2026", "BBC", "ТОО Омегаком", "500 000", "ОБО/8", "01.06.2026", "30.06.2026"],
-         ["7", "ИЮЛЬ 2026", "BBC", "ТОО Омегаком", "500 000", "ОБО/8", "03.07.2026", "31.07.2026"],
-         ["6", "ИЮНЬ 2026", "BBC", "ТОО Сигмаком", "500 000", "ОБО/9", "01.06.2026", "30.06.2026"],
-         ["7", "ИЮЛЬ 2026", "BBC", "ТОО Сигмаком", "400 000", "ОБО/9", "01.07.2026", "31.07.2026"]],
-        title="Сводка", worksheet="Сводка",
-    ))
-
-    def line_of(contract_id: str, month: str) -> dict:
-        lines = owner.get(f"{BASE}/core/shadow").json()["lines"]
-        return next(line for line in lines if line["contract_id"] == contract_id and line["month"] == month)
-
-    assert line_of(sigma, "2026-07")["codes"] == ["amount"]
-    walk.call(owner, "POST", "/core/shadow/verify", json={"contract_id": sigma, "month": "2026-07"})
-    walk.call(owner, "DELETE", "/core/shadow/verify/{document_id}", document_id=line_of(sigma, "2026-07")["verified"]["id"])
-    assert line_of(omega, "2026-07")["slip"] == "gap"
-    slips = walk.call(owner, "POST", "/core/shadow/verify-slips", json={}).json()
-    assert slips["done"] == 1, slips
-    walk.call(owner, "DELETE", "/core/shadow/verify-batch/{batch}", batch=slips["batch"])
-    assert line_of(omega, "2026-07")["verified"] is None
-    # «Верно у KORT» вместо предложения «сумма с даты» у ОБО/9.
-    amount = next(item for item in owner.get(f"{BASE}/core/shadow").json()["proposals"] if item["contract_id"] == sigma)
-    walk.call(owner, "POST", "/core/shadow/verify-proposal", json={"contract_id": sigma, "months": amount["months"]})
-    # Оплаты: начало учёта, входящее сальдо из книги и руками, поступление без договора.
-    walk.call(owner, "PUT", "/core/payments/settings", json={"since": "2026-06-01"})
-    core_book.put(company, core_book.build_book(
-        [["Мес", "Техн. 1", "Наша Фирма", "Заказчик (Название Фирмы)", "Сумма Договора", "№ Договора",
-          "Период с (нач.)", "Период по (зав.)", "Сальдо Начало (без АВР)"],
-         ["6", "ИЮНЬ 2026", "BBC", "ТОО Омегаком", "500 000", "ОБО/8", "01.06.2026", "30.06.2026", "120 000"]],
-        title="Сводка", worksheet="Сводка",
-    ))
-    overview = owner.get(f"{BASE}/core/payments")
-    assert overview.status_code == 200, overview.text
-    assert overview.json()["opening"]["counts"]["new"] == 1
-    walk.call(owner, "POST", "/core/payments/opening")
-    walk.call(owner, "PUT", "/core/contracts/{contract_id}/opening", contract_id=sigma, json={"amount": "50000"})
-    stray = owner.post(f"{BASE}/operations", json={"kind": "income", "paid_at": "2026-06-15", "amount": "7000",
-                                                     "account_to_id": reserve, "comment": "непонятный приход"})
-    assert stray.status_code < 400, stray.text
-    walk.call(owner, "POST", "/core/payments/{operation_id}/decide", operation_id=stray.json()["id"], json={"action": "none"})
-    # Одна оплата за два договора - частями (полигон, О2).
-    both = owner.post(f"{BASE}/operations", json={"kind": "income", "paid_at": "2026-06-20", "amount": "3000",
-                                                    "account_to_id": reserve, "comment": "за два договора"})
-    assert both.status_code < 400, both.text
-    walk.call(owner, "POST", "/core/payments/{operation_id}/split", operation_id=both.json()["id"],
-              json={"parts": [{"contract_id": sigma, "amount": "1000"}, {"contract_id": omega, "amount": "2000"}]})
-    walk.call(owner, "PUT", "/core/payments/ignore", json={"kind": "payers", "name": "Вознаграждение"})
-    # Словарь колонок: «Сумма Договора» компании называется иначе.
-    walk.call(owner, "PUT", "/core/book/columns", json={"key": "amount", "name": "Сумма по договору"})
-    core_book.forget()
-    # Порог НДС: предпросмотр перевода ничего не пишет, перевод - пачка «исполнитель с даты».
-    # Договор уже у BBCL - переводим ко второму нашему юрлицу.
-    other = owner.post(f"{BASE}/contracts/setup/entities", json={"name": "BBC Astana", "code": "BBCAS"})
-    assert other.status_code < 400, other.text
-    move = {"year": 2026, "moves": [{"contract_id": omega, "target": other.json()["id"], "since": "2026-12-01"}]}
-    assert owner.get(f"{BASE}/core/vat", params={"year": 2026}).status_code == 200
-    assert owner.post(f"{BASE}/core/vat/preview", json=move).status_code == 200
-    walk.call(owner, "POST", "/core/vat/transfer", json=move)
-    # Переход: счета BBCL - из KORT, и снова из таблицы.
-    walk.call(owner, "PUT", "/core/switch/{link}/{entity_id}", link="bills", entity_id=entity, json={"source": "kort"})
-    assert owner.get(f"{BASE}/bills").json()["source"]["kort"] == ["BBCL"]
-    back = owner.put(f"{BASE}/core/switch/bills/{entity}", json={"source": "book"})
-    assert back.status_code == 200 and back.json()["sources"]["bills"] == {}, back.text
-    # Слова компании: слово колонки «Счет» со своим смыслом.
-    walk.call(owner, "PUT", "/core/table-words", json={"part": "bill", "word": "Сегодня день выставления", "meaning": "soon"})
-    # Первые шаги: юрлицо по новому коду, договор по строкам таблицы, сальдо на начало учёта.
-    core_book.put(company, core_book.build_book(
-        [["Мес", "Техн. 1", "Наша Фирма", "Заказчик (Название Фирмы)", "Сумма Договора", "№ Договора",
-          "Период с (нач.)", "Период по (зав.)", "Сальдо Начало (без АВР)"],
-         ["6", "ИЮНЬ 2026", "СТАРТ", "ТОО Стартап", "40 000", "СТ/1", "01.06.2026", "30.06.2026", "15 000"]],
-        title="Сводка", worksheet="Сводка",
-    ))
-    assert owner.get(f"{BASE}/core/start").json()["contracts"]["missing"] == 1
-    walk.call(owner, "POST", "/core/start/{step}", step="entities")
-    walk.call(owner, "POST", "/core/start/{step}", step="contracts")
-    walk.call(owner, "POST", "/core/start/{step}", step="since")
-    core_book.forget()
-
-    # Сводная файлом - вместо листа Google: подключение пишет событие настройки.
-    summary_file = openpyxl.Workbook()
-    summary_file.active.append(["Месяц", "Наше ТОО", "Клиент", "№ договора", "Сумма", "Поступило за месяц"])
-    summary_file.active.append(["ОКТЯБРЬ 2026", "BBCL", "ТОО Альфа", "№ 1", 1000, 1000])
-    buffer = io.BytesIO()
-    summary_file.save(buffer)
-    walk.call(owner, "POST", "/core/intake/summary", files={"file": ("сводная.xlsx", buffer.getvalue(), XLSX)})
 
     walk.call(owner, "DELETE", "/contracts/setup/summary")
 

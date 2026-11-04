@@ -1,16 +1,22 @@
-"""HTTP-маршруты учёта KORT.
+"""HTTP-маршруты раздела «Финансы».
 
-Учётки и компания
-─────────────────
-Каждая компания регистрируется сама и ведёт свой учёт; учётки - свои
-(`app.finance.auth`). Компания берётся **из сессии**, а не «по умолчанию»: один
+Своя авторизация, а не общая с дашбордом
+────────────────────────────────────────
+Раньше здесь стояли `require_block_user("finance")` и `require_admin` из
+`app.bbc.deps`, то есть в раздел пускали учётки BBC Dashboard. Это было неверно
+по существу: в «Финансах» каждая компания регистрируется сама и ведёт свой
+учёт, к BBC отношения не имея, - а BBC однажды может сам переехать сюда, и
+тогда зависимость смотрела бы от общего к частному.
+
+Теперь у раздела свои учётки (`app.finance.auth`), и `app.bbc` этот файл не
+импортирует вовсе. Компания берётся **из сессии**, а не «по умолчанию»: один
 человек ведёт несколько компаний, и переключатель в шапке меняет контекст
 сессии.
 
 Обработчики - обычный `def`, а не `async def`: внутри синхронные SQLAlchemy и
 openpyxl, разбор файла на двадцать тысяч строк считается секундами. В
-`async def` это встало бы колом в цикле событий и подвесило заодно остальные
-запросы; обычный `def` FastAPI уводит в пул потоков.
+`async def` это встало бы колом в цикле событий и подвесило заодно дашборд;
+обычный `def` FastAPI уводит в пул потоков.
 """
 from __future__ import annotations
 
@@ -82,7 +88,7 @@ def _guard() -> None:
 
 
 #: Окружения, где `Secure` на cookie означал бы «войти нельзя»: локальный
-#: запуск и тесты ходят по http.
+#: запуск и тесты ходят по http. Тот же список и та же причина, что у дашборда.
 _INSECURE_ENVIRONMENTS = frozenset({"development", "dev", "local", "test", "testing"})
 
 
@@ -180,20 +186,9 @@ def signed_in(request: Request) -> Member:
             ip=client_ip(request),
             user_agent=_agent(request),
         )
-        if member is None and _model_path(request):
-            # Ключ API модели (`auth.resolve_key`) - только для `/finance/model/*`:
-            # кабинет, пароли и права ключом не открываются.
-            header = request.headers.get("authorization") or ""
-            scheme, _, token = header.partition(" ")
-            if scheme.lower() == "bearer" and token.strip():
-                member = auth.resolve_key(session, token.strip(), ip=client_ip(request), user_agent=_agent(request))
     if member is None:
         raise HTTPException(status_code=401, detail="Войдите в KORT")
     return member
-
-
-def _model_path(request: Request) -> bool:
-    return "/finance/model" in request.url.path.split("?", 1)[0]
 
 
 TEMPORARY_PASSWORD = "Сначала смените временный пароль"
@@ -207,8 +202,7 @@ def _enter(member: Member) -> None:
             session_id=member.session_id,
             ip=member.ip,
             user_agent=member.user_agent,
-            # Записанное ключом API подписано ключом: человек видит, что это не он руками.
-            actor=f"{member.login} · ключ «{member.key_title}»" if member.key else member.login,
+            actor=member.login,
         )
     )
 
@@ -350,8 +344,9 @@ def _money(value: Any, *, field: str) -> Decimal:
 
 # ── Учётки и компании ────────────────────────────────────────────────────────
 #
-# Регистрация открыта: компания создаётся вместе с первым пользователем, он её
-# владелец.
+# Раздел живёт сам по себе: регистрация открыта, компания создаётся вместе с
+# первым пользователем, он её владелец. Ни одной проверки прав дашборда здесь
+# нет и не должно появиться.
 
 
 class RegisterIn(BaseModel):
@@ -1033,21 +1028,8 @@ def dictionaries(member: Member = Depends(require_access(access_module.MONEY_RES
     """
     _guard()
     sees_balances = member.rights.can_any(("dictionaries", "reports.summary"))
-    from app.finance.contracts.models import GroupEntity
-    from app.finance.core import tax
-
     with finance_session() as session:
         workspace = _workspace(session, member)
-        accounts = service.list_accounts(session, workspace.id)
-        # Чей счёт - словами: счёт без юрлица оплаты не относит ни к одному договору нашего ТОО.
-        owners = {
-            party_id: name
-            for party_id, name in session.execute(
-                sa.select(Counterparty.id, Counterparty.name).where(
-                    Counterparty.id.in_([item.group_entity_id for item in accounts if item.group_entity_id] or [None])
-                )
-            )
-        }
         return {
             "accounts": [
                 {
@@ -1058,22 +1040,9 @@ def dictionaries(member: Member = Depends(require_access(access_module.MONEY_RES
                     "starting_balance": str(item.starting_balance) if sees_balances else None,
                     "excluded_from_reports": item.excluded_from_reports,
                     "number": item.number or "",
-                    "group_entity_id": str(item.group_entity_id) if item.group_entity_id else None,
-                    "owner": owners.get(item.group_entity_id, "") if item.group_entity_id else "",
                 }
-                for item in accounts
+                for item in service.list_accounts(session, workspace.id)
             ],
-            # Наши юрлица - чей счёт; ставка НДС года - значение по умолчанию формы счёта.
-            "entities": [
-                {"id": str(party_id), "name": name}
-                for party_id, name in session.execute(
-                    sa.select(GroupEntity.counterparty_id, Counterparty.name)
-                    .join(Counterparty, Counterparty.id == GroupEntity.counterparty_id)
-                    .where(GroupEntity.workspace_id == workspace.id, GroupEntity.archived_at.is_(None))
-                    .order_by(GroupEntity.position, Counterparty.name)
-                )
-            ],
-            "vat_rate": format(tax.year_of(session, workspace.id, date.today().year).vat_rate.normalize(), "f"),
             "categories": [
                 {
                     "id": str(item.id),
@@ -1104,20 +1073,13 @@ class AccountIn(BaseModel):
     excluded_from_reports: bool = False
     #: Номер счёта в банке (IBAN). По нему выписка находит свой счёт.
     number: str = ""
-    #: Чей счёт из наших юрлиц (`Account.group_entity_id`); пусто - ничей.
-    group_entity_id: UUID | None = None
 
 
 @router.post("/accounts")
 def create_account(body: AccountIn, member: Member = Depends(require_access("dictionaries", "edit"))) -> dict[str, Any]:
     _guard()
-    from app.finance.contracts.models import GroupEntity
-
     with finance_session() as session:
         workspace = _workspace(session, member)
-        entity = session.get(GroupEntity, body.group_entity_id) if body.group_entity_id else None
-        if body.group_entity_id and (entity is None or entity.workspace_id != workspace.id or entity.archived_at is not None):
-            raise HTTPException(status_code=422, detail="Такого нашего юрлица нет")
         try:
             account = service.create_account(
                 session,
@@ -1128,24 +1090,16 @@ def create_account(body: AccountIn, member: Member = Depends(require_access("dic
                 starting_balance=_money(body.starting_balance, field="starting_balance"),
                 excluded_from_reports=body.excluded_from_reports,
                 number=body.number,
-                group_entity_id=entity.counterparty_id if entity is not None else None,
             )
         except FinanceError as exc:
             raise _fail(exc) from exc
-        owner = session.get(Counterparty, entity.counterparty_id) if entity is not None else None
         history.write(
             session, workspace, kind="account.create", entity="account", entity_id=account.id,
-            title=f"счёт заведён: «{account.name}»" + (f" · юрлицо {owner.name}" if owner is not None else ""),
+            title=f"счёт заведён: «{account.name}»",
             after={"name": account.name, "kind": account.kind, "currency": account.currency,
-                   "starting_balance": str(account.starting_balance), "number": account.number or "",
-                   "group_entity_id": str(account.group_entity_id) if account.group_entity_id else None},
+                   "starting_balance": str(account.starting_balance), "number": account.number or ""},
         )
-        return {
-            "id": str(account.id),
-            "name": account.name,
-            "number": account.number,
-            "group_entity_id": str(account.group_entity_id) if account.group_entity_id else None,
-        }
+        return {"id": str(account.id), "name": account.name, "number": account.number}
 
 
 class EntryIn(BaseModel):
@@ -1199,46 +1153,6 @@ def patch_account_balance(
 
 class AccountNumberIn(BaseModel):
     number: str = ""
-
-
-class AccountEntityIn(BaseModel):
-    #: Наше юрлицо (`Account.group_entity_id`); пусто - счёт ничей.
-    group_entity_id: UUID | None = None
-
-
-@router.put("/accounts/{account_id}/entity")
-def put_account_entity(
-    account_id: UUID,
-    body: AccountEntityIn,
-    member: Member = Depends(require_access("dictionaries", "edit")),
-) -> dict[str, Any]:
-    """Чей счёт: оплата на него находит договоры этого юрлица, «Деньги вперёд» считают его деньгами.
-
-    Без этого экран писал «без юрлица», а поправить было негде.
-    """
-    _guard()
-    from app.finance.contracts.models import GroupEntity
-
-    with finance_session() as session:
-        workspace = _workspace(session, member)
-        account = session.get(Account, account_id)
-        if account is None or account.workspace_id != workspace.id or account.archived_at is not None:
-            raise HTTPException(status_code=404, detail="Такого счёта нет")
-        entity = session.get(GroupEntity, body.group_entity_id) if body.group_entity_id else None
-        if body.group_entity_id and (entity is None or entity.workspace_id != workspace.id or entity.archived_at is not None):
-            raise HTTPException(status_code=422, detail="Такого нашего юрлица нет")
-        before = account.group_entity_id
-        account.group_entity_id = entity.counterparty_id if entity is not None else None
-        session.flush()
-        if before != account.group_entity_id:
-            owner = session.get(Counterparty, account.group_entity_id) if account.group_entity_id else None
-            history.write(
-                session, workspace, kind="account.entity", entity="account", entity_id=account.id,
-                title=f"счёт «{account.name}»: " + (f"юрлицо {owner.name}" if owner is not None else "без юрлица"),
-                before={"group_entity_id": str(before) if before else None},
-                after={"group_entity_id": str(account.group_entity_id) if account.group_entity_id else None},
-            )
-        return {"id": str(account.id), "group_entity_id": str(account.group_entity_id) if account.group_entity_id else None}
 
 
 @router.put("/accounts/{account_id}/number")
@@ -1420,8 +1334,6 @@ def _operation_out(
         "split_state": operation.split_state,
         "tags": [str(tag_id) for tag_id in tags.get(operation.id, [])],
         "comment": operation.comment,
-        "contract_ref": operation.contract_ref or "",
-        "period_label": operation.period_label or "",
         "source": operation.source,
         "import_batch_id": str(operation.import_batch_id) if operation.import_batch_id else None,
     }
@@ -1606,8 +1518,6 @@ class OperationIn(BaseModel):
     category_id: UUID | None = None
     counterparty_id: UUID | None = None
     comment: str = ""
-    #: Номер договора, к которому оплата (подсказка разнесения, `Operation.contract_ref`).
-    contract_ref: str = ""
     projects: list[ProjectSplitIn] = Field(default_factory=list)
     categories: list[CategorySplitIn] = Field(default_factory=list)
     tags: list[UUID] = Field(default_factory=list)
@@ -1636,7 +1546,6 @@ def create_operation(body: OperationIn, member: Member = Depends(require_access(
             category_id=body.category_id,
             counterparty_id=body.counterparty_id,
             comment=body.comment,
-            contract_ref=body.contract_ref,
             projects=[(item.project_id, _money(item.amount, field="projects")) for item in body.projects],
             categories=[
                 (item.category_id, _money(item.amount, field="categories")) for item in body.categories
@@ -1673,7 +1582,6 @@ class OperationPatch(BaseModel):
     category_id: UUID | None = None
     counterparty_id: UUID | None = None
     comment: str | None = None
-    contract_ref: str | None = None
     projects: list[ProjectSplitIn] | None = None
     categories: list[CategorySplitIn] | None = None
     tags: list[UUID] | None = None
@@ -1699,8 +1607,6 @@ def patch_operation(
             changes[key] = value
     if body.comment is not None:
         changes["comment"] = body.comment
-    if body.contract_ref is not None:
-        changes["contract_ref"] = body.contract_ref.strip()
     if body.projects is not None:
         changes["projects"] = [(item.project_id, _money(item.amount, field="projects")) for item in body.projects]
     if body.categories is not None:
@@ -2323,45 +2229,20 @@ def _preview_response(
         title=f"разбор «{preview.file_name}»: {len(preview.rows)} строк",
         after={"file_name": preview.file_name, "rows": len(preview.rows)},
     )
-    # Счета, которых нет, заводятся с юрлицом: по нему оплата на счёт - оплата
-    # договоров этого юрлица. Юрлицо предлагается, только если оно названо в
-    # счёте целиком («Kaspi ТОО "Тумар Офис"»); выбирает человек.
-    entities: list[dict[str, Any]] = []
-    suggested: dict[str, str] = {}
-    if preview.accounts_missing:
-        from app.finance.contracts.models import GroupEntity
-        from app.finance.core import participants
-
-        entities = [
-            {"id": str(party.id), "name": party.name, "code": entity.code}
-            for entity, party in session.execute(
-                sa.select(GroupEntity, Counterparty)
-                .join(Counterparty, Counterparty.id == GroupEntity.counterparty_id)
-                .where(GroupEntity.workspace_id == workspace.id, GroupEntity.archived_at.is_(None))
-                .order_by(GroupEntity.position, Counterparty.name)
-            )
-        ]
-        suggested = {
-            name: str(entity.counterparty_id)
-            for name, entity in participants.entities_of_accounts(session, workspace, preview.accounts_missing).items()
-        }
-    bank = service.reconcile_statement(session, workspace, preview)
     return {
         "batch_id": str(batch.id),
         "file_name": preview.file_name,
         "header_line": preview.header_line,
         "counts": preview.counts,
-        "question": _statement_account(session, workspace, preview.question, bank),
+        "question": preview.question,
         "date_order": preview.date_reading.order,
         "date_evidence": preview.date_reading.evidence,
         "mapping": preview.mapping,
         "unused_columns": preview.unused_columns,
         "accounts_missing": preview.accounts_missing,
-        "accounts_entities": suggested,
-        "entities": entities,
         "accounts_suggested": preview.accounts_suggested,
         # Сверка с остатками, которые напечатал банк, - PDF или таблицей.
-        "bank": bank,
+        "bank": service.reconcile_statement(session, workspace, preview),
         "rules_applied": rule_hits,
         "rows": [
             {
@@ -2373,69 +2254,6 @@ def _preview_response(
             }
             for row in preview.rows
         ],
-    }
-
-
-def _statement_account(session: Any, workspace: Any, question: dict[str, Any] | None, bank: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Новый счёт из шапки выписки - сразу с юрлицом и остатком, которые напечатал банк.
-
-    Счёт без юрлица оплаты на него не относил ни к одному договору нашего
-    ТОО, а «Деньги вперёд» держали его в «без юрлица». Остаток на начало
-    периода экран предлагал мелкой строкой, похожей на подпись, и его не
-    записывали: календарь считал деньги с нуля (проход новичка 31.10:
-    898 500 при банке 1 398 500). Новый счёт рождается этой выпиской, и
-    её остаток на первый день - его начальный остаток, а не догадка.
-    Юрлицо - по БИН владельца из шапки, иначе по имени целиком
-    (`participants.entities_of_accounts`); ни одного или два - решает человек.
-    """
-    create = (question or {}).get("create") if (question or {}).get("kind") == "account" else None
-    if not create or not bank:
-        return question
-    from app.finance.contracts.models import GroupEntity
-    from app.finance.core import participants
-
-    owner_bin = str(bank.get("owner_bin") or "").strip()
-    entity_id: UUID | None = None
-    if owner_bin:
-        hits = {
-            party_id
-            for party_id, entity_bin, party_bin in session.execute(
-                sa.select(GroupEntity.counterparty_id, GroupEntity.bin, Counterparty.bin)
-                .join(Counterparty, Counterparty.id == GroupEntity.counterparty_id)
-                .where(GroupEntity.workspace_id == workspace.id, GroupEntity.archived_at.is_(None))
-            )
-            if owner_bin in (entity_bin, party_bin)
-        }
-        entity_id = next(iter(hits)) if len(hits) == 1 else None
-    if entity_id is None and bank.get("owner"):
-        found = participants.entities_of_accounts(session, workspace, [str(bank["owner"])])
-        entity_id = next(iter(found.values())).counterparty_id if found else None
-    owner = session.get(Counterparty, entity_id) if entity_id is not None else None
-    opening = bank.get("opening_balance") if bank.get("period_start") else None
-    # Выписка назвала свой счёт - пустые ничьи счета (без номера, юрлица, остатка и
-    # операций: засев старых компаний) в выборе не нужны: выбранные, они уводили
-    # выписку на счёт без юрлица мимо договоров.
-    empty = {
-        account.name
-        for account in service.list_accounts(session, workspace.id)
-        if create.get("number") and not account.number and account.group_entity_id is None and not account.starting_balance
-        and session.scalar(
-            sa.select(Operation.id).where(
-                Operation.workspace_id == workspace.id,
-                sa.or_(Operation.account_to_id == account.id, Operation.account_from_id == account.id),
-            ).limit(1)
-        ) is None
-    }
-    return {
-        **question,
-        "options": [option for option in question.get("options") or [] if option.get("value") not in empty],
-        "create": {
-            **create,
-            "group_entity_id": str(entity_id) if entity_id is not None else None,
-            "owner": owner.name if owner is not None else "",
-            "starting_balance": opening,
-            "period_start": bank.get("period_start") if opening is not None else None,
-        },
     }
 
 
@@ -2537,12 +2355,12 @@ def list_bills(member: Member = Depends(require_access("invoices")), refresh: bo
         workspace_id = _workspace(session, member).id
         out = bills_module.board_out(session, workspace_id, force=refresh)
         source = source_of(session, workspace_id)
-        summary = _summary_key(session, workspace_id, source) if source is not None else None
+        summary = (source.spreadsheet_id, source.worksheet) if source is not None else None
     out["channel"] = bills_bot.channel_out(workspace_id) if out["source"] else None
     # Загрузить шаблон Excel и записать из него - право правки; скачать - чтение.
     out["can_edit"] = member.rights.can("invoices", "edit")
     if summary is not None:
-        # Таблицы юрлиц - заранее, в фоне: иначе первая карточка ждёт их все.
+        # Книги юрлиц - заранее, в фоне: иначе первая карточка ждёт все девять.
         bill_book.warm(bill_book.api(), summary)
     return out
 
@@ -2562,47 +2380,21 @@ class BillBookIn(BaseModel):
     defaults: dict[str, str] = Field(default_factory=dict)
 
 
-#: Сводная файлом собрана не из таблиц юрлиц: строки счёта, куда его записать, нет.
-_FILE_BILL = (
-    "Сводная таблица компании - файл: строки счёта в таблице юрлица у неё нет. Отметьте счёт в своей таблице и "
-    "загрузите новую версию или переведите «Счета» юрлица на KORT («Переход»)"
-)
-
-
-def _summary_key(session: Any, workspace_id: UUID, source: Any) -> tuple[Any, ...] | None:
-    """Сводная для таблиц юрлиц: где она и словарь колонок компании - шапку её таблиц знает компания.
-
-    `None` - сводная файлом: таблиц юрлиц за ней нет (`_FILE_BILL`).
-    """
-    from app.finance.contracts import bill_book
-    from app.finance.core import settings as core_settings
-
-    if source.kind == "file":
-        return None
-    return (source.spreadsheet_id, source.worksheet, bill_book.words_key(core_settings.book_columns(session, workspace_id)))
-
-
-def _board_of(session: Any, workspace_id: UUID) -> tuple[Any, tuple[Any, ...] | None]:
+def _board_of(session: Any, workspace_id: UUID) -> tuple[Any, tuple[str, str]]:
     """Прочитанная книга-сводка (с записанным из KORT) - и откуда она."""
     from app.finance.contracts import bills as bills_module
     from app.finance.contracts.summary import source_of
 
     source = source_of(session, workspace_id)
     if source is None:
-        # Без сводной - счета по начислениям KORT: карточка пишет счёт документом ядра.
-        from app.finance.contracts.service import today
-        from app.finance.core import billing as core_billing
-
-        from app.finance.models import Workspace
-
-        return core_billing.kort_board(session, session.get(Workspace, workspace_id), today=today()), None
+        raise HTTPException(status_code=404, detail="Сводная таблица не подключена")
     board, error = bills_module.current(session, workspace_id)
     if board is None:
         raise HTTPException(status_code=503, detail=error or "Сводная таблица ещё читается - попробуйте через минуту")
-    return board, _summary_key(session, workspace_id, source)
+    return board, (source.spreadsheet_id, source.worksheet)
 
 
-def _bill_of(session: Any, workspace_id: UUID, bill_id: str) -> tuple[Any, tuple[Any, ...] | None]:
+def _bill_of(session: Any, workspace_id: UUID, bill_id: str) -> tuple[Any, tuple[str, str]]:
     """Счёт из книги-сводки по адресу карточки - и сама сводка."""
     if not _is_bill_id(bill_id):
         raise HTTPException(status_code=404, detail="Такого счёта нет")
@@ -2654,10 +2446,7 @@ def bills_template(member: Member = Depends(require_access("invoices"))) -> Resp
         if not items:
             raise HTTPException(status_code=409, detail="На сегодня счетов к выставлению нет - в шаблон класть нечего")
         sheets = {bills_bot.RENT: bill_template.RENT_SHEET, bills_bot.ABON: bill_template.ABON_SHEET}
-        from app.finance.core import settings as core_settings
-
-        words = core_settings.book_columns(session, workspace.id)
-        data = bill_template.build(items, kind_of=lambda bill: sheets.get(bills_bot.kind_of(bill)), words=words)
+        data = bill_template.build(items, kind_of=lambda bill: sheets.get(bills_bot.kind_of(bill)))
         history.write(
             session,
             workspace,
@@ -2691,13 +2480,10 @@ def read_bills_template(
     # Не больше потолка и одного байта сверх - как у остальных загрузок.
     data = file.file.read(bill_template.MAX_BYTES + 1)
     with finance_session() as session:
-        from app.finance.core import settings as core_settings
-
         workspace_id = _workspace(session, member).id
         board, _ = _board_of(session, workspace_id)
-        words = core_settings.book_columns(session, workspace_id)
     try:
-        return bill_template.parse(data, board, words)
+        return bill_template.parse(data, board)
     except bill_template.TemplateError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -2711,24 +2497,16 @@ def read_bill(bill_id: str, member: Member = Depends(require_access("invoices"))
     """
     _guard()
     from app.finance.contracts import bill_book
-    from app.finance.core import billing as core_billing
 
     with finance_session() as session:
         workspace_id = _workspace(session, member).id
         bill, summary = _bill_of(session, workspace_id, bill_id)
-        # Счёт юрлица, переведённого на KORT, без строки в таблице юрлица - пишется в KORT.
-        kort = core_billing.kort_card(session, workspace_id, bill) if bill.source == "kort" and (not bill.line or summary is None) else None
     out: dict[str, Any] = {
         "bill": bill.out(),
-        "book": kort,
+        "book": None,
         "problem": "",
         "can_edit": member.rights.can("invoices", "edit"),
     }
-    if kort is not None:
-        return out
-    if summary is None:
-        out["problem"] = _FILE_BILL
-        return out
     try:
         out["book"] = bill_book.card(bill_book.api(), summary, bill.key)
     except bill_book.BookError as exc:
@@ -2751,19 +2529,6 @@ def write_bill(bill_id: str, body: BillBookIn, member: Member = Depends(require_
     with finance_session() as session:
         workspace_id = _workspace(session, member).id
         bill, summary = _bill_of(session, workspace_id, bill_id)
-    if bill.source == "kort" and (not bill.line or summary is None):
-        # Строки в таблице нет - счёт записывается документом KORT, с журналом (`core/billing.py`).
-        from app.finance.core import billing as core_billing
-
-        try:
-            with finance_session() as session:
-                return core_billing.write_kort(
-                    session, _workspace(session, member), bill, body.expect, body.values, body.defaults, actor=_actor(member)
-                )
-        except bill_book.BookError as exc:
-            raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
-    if summary is None:
-        raise HTTPException(status_code=409, detail=_FILE_BILL)
     where = f"{bill.customer} {bill.number}, {bill.month}".strip()
     try:
         saved = bill_book.save(bill_book.api(), summary, bill.key, body.expect, body.values, body.defaults)
@@ -2776,21 +2541,12 @@ def write_bill(bill_id: str, body: BillBookIn, member: Member = Depends(require_
                 kind="bill.book.fail",
                 title=f"запись в таблицу не удалась: {where}",
                 before={},
-                after={"ошибка": str(exc), "поля": [exc.place.book.title_of(name) for name in exc.changed]},
+                after={"ошибка": str(exc), "поля": [bill_book.TITLES[name] for name in exc.changed]},
             )
         raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
     # Книга такая, какой её перечитали, - и тогда, когда писать было нечего:
     # повтор записи, ответ на которую потерялся, тоже должен убрать счёт из списка.
     bills_module.mark(workspace_id, bill.key, saved.after)
-    # Ядро: выставленный отсюда счёт KORT знает сам, документом месяца договора
-    # (`core/billing.py`). В книгу уже записано - сбой здесь запись не отменяет.
-    try:
-        from app.finance.core import billing as core_billing
-
-        with finance_session() as session:
-            core_billing.record(session, _workspace(session, member), bill, saved.after)
-    except Exception:  # noqa: BLE001 - запись в книгу прошла, документ дождётся сверки
-        log.exception("счёт не записан документом ядра: %s", bill.key)
     if saved.changed:
         number, issued_at = saved.after["bill_no"], saved.after["bill_date"]
         if number and not saved.before["bill_no"]:
@@ -2805,8 +2561,8 @@ def write_bill(bill_id: str, body: BillBookIn, member: Member = Depends(require_
             saved.place,
             kind="bill.book",
             title=title,
-            before={saved.place.book.title_of(name): saved.before[name] for name in saved.changed},
-            after={saved.place.book.title_of(name): saved.after[name] for name in saved.changed},
+            before={bill_book.TITLES[name]: saved.before[name] for name in saved.changed},
+            after={bill_book.TITLES[name]: saved.after[name] for name in saved.changed},
         )
     return {
         "book": {"place": saved.place.out(), "fields": saved.after, "state": saved.state, "blocked": {}},

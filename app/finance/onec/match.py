@@ -31,13 +31,13 @@
    нашего юрлица - «договор записан на другое юрлицо»: расхождение реестра и
    1С, решает человек.
 
-«й» и «ё» в ключах сравниваются как «и» и «е»: в реестре юротдела часть имён
+«й» и «ё» в ключах сравниваются как «и» и «е»: в реестре BBC часть имён
 записана с «й», разложенной на «и» и надстрочный знак, ключ стороны знак
 выбрасывает, и «Теплобетонстрой» реестра не совпадал с «Теплобетонстрой» 1С.
 
 Месяц
 ─────
-Месяц услуги, а не дата бумаги: счёт за октябрь на копии прода выставляют 29 сентября.
+Месяц услуги, а не дата бумаги: счёт за октябрь BBC выставляет 29 сентября.
 Счёт - по периоду «за период с … по …» в содержании, иначе по дате; АВР - по
 отчётному периоду; счёт-фактура и ЭСФ - по своей реализации; поступление -
 по счёту, который оно оплачивает, иначе по дате платежа.
@@ -50,7 +50,6 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from decimal import Decimal
-from functools import lru_cache
 from typing import Iterable
 
 import sqlalchemy as sa
@@ -60,7 +59,6 @@ from app.finance.contracts.fields import number_key, party_key
 from app.finance.contracts.models import Contract, CounterpartyName, GroupEntity
 from app.finance.models import Counterparty
 from app.finance.onec.models import OnecBase, OnecDocument
-from app.finance.onec.sync import PURCHASE_KINDS
 
 #: Короче - не ищем одно имя внутри другого: «ТОО А» нашлось бы везде.
 MIN_CONTAINED = 5
@@ -81,9 +79,7 @@ def fold(key: str) -> str:
     return key.translate(_LETTERS)
 
 
-@lru_cache(maxsize=65536)
 def side_key(name: str) -> str:
-    # Одно имя - в сотнях документов и операций: ключ - один раз.
     return fold(party_key(unicodedata.normalize("NFC", name or "")))
 
 
@@ -93,16 +89,6 @@ def loose_key(name: str) -> str:
     return _FORMS.sub("", key).translate(_LOOKALIKE)
 
 
-def visual_key(name: str) -> str:
-    """Ключ стороны, в котором латиница-двойник - кириллица: «ТОО ECO Bazar» = «ТОО ЕСО Bazar».
-
-    Не нечёткое сравнение: это одна и та же строка на глаз, банк просто набрал
-    её другой раскладкой. Форма и всё остальное имя остаются, как в `side_key`.
-    """
-    return side_key(name).translate(_LOOKALIKE)
-
-
-@lru_cache(maxsize=65536)
 def number_loose(number: str) -> str:
     """Номер без разделителей: «ОБОиНО-62» = «ОБОиНО/62»."""
     return _NUMBER_JUNK.sub("", number_key(number))
@@ -186,8 +172,6 @@ class Index:
 
     contracts: dict[uuid.UUID, ContractInfo] = field(default_factory=dict)
     by_executor: dict[uuid.UUID, list[ContractInfo]] = field(default_factory=dict)
-    #: Договоры, где сторона - заказчик: у нашего юрлица это покупки.
-    by_customer: dict[uuid.UUID, list[ContractInfo]] = field(default_factory=dict)
     party_keys: dict[uuid.UUID, set[str]] = field(default_factory=dict)
     #: Ключи для сравнения при совпавшем номере (`loose_key`).
     party_loose: dict[uuid.UUID, set[str]] = field(default_factory=dict)
@@ -203,18 +187,11 @@ def build_index(session: Session, workspace_id: uuid.UUID) -> Index:
             Contract.signed_at, Contract.end_date, Contract.amount,
         ).where(Contract.workspace_id == workspace_id, Contract.deleted_at.is_(None))
     ).all()
-    from app.finance.contracts.payments import former_executors
-
-    # Документы прежнего ТОО - тоже документы договора: клиента перевели на
-    # другое наше юрлицо с даты, а его акты до неё остались в базе прежнего.
-    former = former_executors(session, workspace_id)
     for row in rows:
         info = ContractInfo(*row)
         index.contracts[info.id] = info
-        for owner in {info.executor_id, *former.get(info.id, ())} - {None}:
-            index.by_executor.setdefault(owner, []).append(info)
-        if info.customer_id is not None:
-            index.by_customer.setdefault(info.customer_id, []).append(info)
+        if info.executor_id is not None:
+            index.by_executor.setdefault(info.executor_id, []).append(info)
     party_ids = {info.customer_id for info in index.contracts.values() if info.customer_id} | {
         info.executor_id for info in index.contracts.values() if info.executor_id
     }
@@ -223,8 +200,7 @@ def build_index(session: Session, workspace_id: uuid.UUID) -> Index:
             index.names[party.id] = party.name
             index.party_keys.setdefault(party.id, set()).add(side_key(party.name))
             index.party_loose.setdefault(party.id, set()).add(loose_key(party.name))
-            # БИН - колонка участника (ядро, 24.10.2026); `details.bin` - прежнее место.
-            bin_value = str(party.bin or (party.details or {}).get("bin") or "").strip()
+            bin_value = str((party.details or {}).get("bin") or "").strip()
             if bin_value:
                 index.party_bins.setdefault(party.id, set()).add(bin_value)
         for party_id, normalized, name in session.execute(
@@ -293,15 +269,9 @@ def _elsewhere(doc: OnecDocument, entity_id: uuid.UUID, index: Index) -> list[Co
 
 
 def match_own(doc: OnecDocument, entity_id: uuid.UUID | None, index: Index) -> Match:
-    """Договор по самому документу - номер договора 1С и клиент (пункты 3-5).
-
-    Покупка (акт поставщика, оплата ему): наше юрлицо - заказчик договора, а
-    «клиент» документа - исполнитель.
-    """
+    """Договор по самому документу - номер договора 1С и клиент (пункты 3-5)."""
     if entity_id is None:
         return Match("no_entity")
-    if doc.kind in PURCHASE_KINDS:
-        return _match_purchase(doc, entity_id, index)
     mine = index.by_executor.get(entity_id, [])
     key = number_key(doc.contract_number)
     if key:
@@ -334,20 +304,6 @@ def match_own(doc: OnecDocument, entity_id: uuid.UUID | None, index: Index) -> M
     chosen = _narrow(clients, doc)
     if len(chosen) == 1:
         return Match("ok", chosen[0].id, "client" if len(clients) == 1 else "window")
-    return Match("ambiguous", candidates=tuple(item.id for item in chosen))
-
-
-def _match_purchase(doc: OnecDocument, entity_id: uuid.UUID, index: Index) -> Match:
-    """Договор покупки: у нашего юрлица-заказчика, исполнитель - контрагент документа."""
-    mine = [item for item in index.by_customer.get(entity_id, []) if same_client(doc, item.executor_id, index)]
-    key = number_key(doc.contract_number)
-    if key:
-        mine = [item for item in mine if item.number_key == key or number_loose(item.number) == number_loose(doc.contract_number)]
-    if not mine:
-        return Match("missing")
-    chosen = _narrow(mine, doc)
-    if len(chosen) == 1:
-        return Match("ok", chosen[0].id, "number" if key else "client")
     return Match("ambiguous", candidates=tuple(item.id for item in chosen))
 
 
@@ -405,7 +361,7 @@ def resolve(documents: Iterable[OnecDocument], bases: dict[uuid.UUID, OnecBase],
         if doc.id in out.months:
             return out.months[doc.id]
         value = ""
-        if doc.kind in ("invoice", "sale", "purchase"):
+        if doc.kind in ("invoice", "sale"):
             value = month_key(doc.period_from or doc.doc_date)
         elif depth < 3:
             parent = basis(doc)
@@ -420,4 +376,4 @@ def resolve(documents: Iterable[OnecDocument], bases: dict[uuid.UUID, OnecBase],
     return out
 
 
-__all__ = ["Index", "Match", "Resolved", "build_index", "match_own", "month_key", "resolve", "same_client", "visual_key"]
+__all__ = ["Index", "Match", "Resolved", "build_index", "match_own", "month_key", "resolve", "same_client"]

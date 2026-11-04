@@ -1,26 +1,25 @@
 """Схема `finance` - управленческий учёт внутри приложения.
 
-Отдельная схема: модуль должен сниматься одним `DROP SCHEMA finance CASCADE`,
-не задев ни одну чужую таблицу. Пока раздел обкатывают на финансистах, это не теория: его состав
+Отдельная схема по той же причине, что у `bbc`, `webexcel` и `books`: модуль
+должен сниматься одним `DROP SCHEMA finance CASCADE`, не задев ни одну чужую
+таблицу. Пока раздел обкатывают на финансистах, это не теория: его состав
 поменяется несколько раз, и выкинуть неудачную версию целиком должно быть
 дешевле, чем разбирать, какие из семнадцати таблиц чьи.
 
 Схемой владеет alembic. `create_all` ниже нужен ровно для одного - собрать
 таблицы в чистой временной базе теста, где SQLite схем не знает. Списка
 «колонки, которые надо досоздать руками», здесь нет и не будет: колонка,
-добавленная в модель, попадает в ревизию, другого пути нет: такой список
-ведут руками и забывают.
+добавленная в модель, попадает в ревизию, другого пути нет (урок `bbc/db.py`,
+где такой список ведут руками и забывают).
 """
 from __future__ import annotations
 
 import logging
-import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
 
 from sqlalchemy import MetaData, text
 from sqlalchemy.engine import Engine
-from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.core.database import get_engine
@@ -73,7 +72,6 @@ def init_finance_database() -> None:
     from app.finance import models as _models  # noqa: F401
     from app.finance import support_model as _support  # noqa: F401
     from app.finance.contracts import models as _contracts  # noqa: F401
-    from app.finance.core import models as _core  # noqa: F401
     from app.finance.onec import models as _onec  # noqa: F401
 
     engine = get_engine()
@@ -94,12 +92,8 @@ def get_finance_session_factory() -> sessionmaker[Session]:
         # Номер изменения у каждой записанной операции - для живого режима
         # листа «Таблица» (см. `app/finance/live.py`).
         from app.finance import live
-        from app.finance.core import journal
 
         live.register(_session_factory)
-        # Журнал фактов замечает правки хранилищ и проводит их перед чтением
-        # итогов (`core/journal.py`) - после номеров живого режима.
-        journal.register(_session_factory)
     init_finance_database()
     return _session_factory
 
@@ -118,60 +112,6 @@ def finance_session() -> Iterator[Session]:
         session.close()
 
 
-#: SQLSTATE, после которых Postgres сам откатил транзакцию целиком и её можно
-#: повторить: взаимоблокировка (40P01) и сбой сериализации (40001).
-RETRYABLE = frozenset({"40P01", "40001"})
-#: Сколько раз пробовать транзакцию, которую Postgres выбрал жертвой.
-ATTEMPTS = 3
-
-
-def retryable(exc: BaseException) -> bool:
-    return isinstance(exc, DBAPIError) and getattr(exc.orig, "sqlstate", None) in RETRYABLE
-
-
-def retrying[T](run: Callable[[], T]) -> T:
-    """Повторить транзакцию, которую Postgres выбрал жертвой взаимоблокировки.
-
-    Счётчик компании держит блокировку строки до коммита (номера видны по
-    порядку), а проведение журнала - свой замок (`core/journal._lock`). Запрос,
-    который сначала проводит журнал, а потом пишет договор («предложить»,
-    шаги «Из 1С»), и правка договора, которая потом читает итоги, берут их в
-    разном порядке - и Postgres откатывает одного (найдено 27.10.2026: два
-    шага «Из 1С» разом). Один строгий порядок значил бы общий замок на все
-    записи компании: длинная загрузка держала бы всех. Поэтому жертва
-    повторяется: её транзакция откачена целиком, а вторая попытка идёт уже
-    после коммита победителя. `run` - вся транзакция (открыть сессию,
-    сделать, закоммитить): записи вне базы в ней быть не должно.
-    """
-    for attempt in range(1, ATTEMPTS + 1):
-        try:
-            return run()
-        except DBAPIError as exc:
-            if attempt == ATTEMPTS or not retryable(exc):
-                raise
-            log.warning("finance: транзакция откачена взаимоблокировкой - попытка %s из %s", attempt + 1, ATTEMPTS)
-    raise AssertionError("недостижимо")
-
-
-#: Первое число замка «вход данных - по одному» (у журнала фактов - 4100, у регистров - 4101).
-INTAKE = 4102
-
-
-def one_intake(session: Session, workspace_id: uuid.UUID) -> None:
-    """Вход данных компании - по одному: загрузка реестра, таблица Excel, шаги «Из 1С».
-
-    Каждый такой вход сначала смотрит, что KORT уже знает, и заводит
-    остальное. Два одновременных запроса (двойное нажатие, повтор клиента по
-    таймауту на загрузке в минуты) оба видели «ещё нет» и оба заводили - все
-    договоры дважды. Замок держится до конца транзакции: второй запрос ждёт
-    коммита первого и видит заведённое им. Берётся первым делом, до любой
-    записи. На SQLite (тесты) запись и так одна за раз.
-    """
-    if session.get_bind().dialect.name != "postgresql":
-        return
-    session.execute(text("SELECT pg_advisory_xact_lock(:a, :b)"), {"a": INTAKE, "b": workspace_id.int & 0x7FFFFFFF})
-
-
 __all__ = [
     "FINANCE_SCHEMA",
     "FinanceBase",
@@ -179,7 +119,4 @@ __all__ = [
     "finance_engine",
     "finance_session",
     "init_finance_database",
-    "one_intake",
-    "retryable",
-    "retrying",
 ]

@@ -26,6 +26,48 @@ from sqlalchemy import event
 from sqlalchemy.engine import Engine
 
 
+#: Наборы спящего ядра (`app/finance/core/__init__.py`): они проверяют ядро
+#: вместе с проводкой в старые модули, а её в дереве прода нет. Файлы
+#: остаются, чтобы ядро проснулось со своими проверками (тег `core-1101`).
+collect_ignore = [
+    "test_cash_calendar.py",
+    "test_core_views.py",
+    "test_excel_any_form.py",
+    "test_finance_core_accruals.py",
+    "test_finance_core_acts.py",
+    "test_finance_core_billing.py",
+    "test_finance_core_book_columns.py",
+    "test_finance_core_debts.py",
+    "test_finance_core_journal.py",
+    "test_finance_core_participants.py",
+    "test_finance_core_payments.py",
+    "test_finance_core_registers.py",
+    "test_finance_core_start.py",
+    "test_finance_core_switch.py",
+    "test_finance_core_today.py",
+    "test_finance_core_vat.py",
+    "test_finance_core_verified.py",
+    "test_finance_core_words.py",
+    "test_finance_newcomer.py",
+    "test_finance_retry.py",
+    "test_google_shared_read.py",
+    "test_intake.py",
+    "test_intake_compare.py",
+    "test_migrations.py",
+    "test_model_api.py",
+    "test_model_entry.py",
+    "test_model_formulas.py",
+    "test_model_questions.py",
+    "test_onec_files.py",
+    "test_onec_live_lessons.py",
+    "test_onec_start.py",
+    "test_packs.py",
+    "test_polygon.py",
+    "test_polygon_whole.py",
+    "test_summary_file.py",
+]
+
+
 @event.listens_for(Engine, "connect")
 def _sqlite_without_fsync(dbapi_connection, _record) -> None:
     """Каждый тест заводит свою базу-файл, и `create_all` пишет в неё 63 таблицы.
