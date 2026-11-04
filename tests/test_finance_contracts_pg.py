@@ -10,7 +10,7 @@
 это можно только на Postgres, поэтому набор пропускается без него - как
 `test_migrations.py`.
 
-    TEST_DATABASE_URL=postgresql+psycopg://postgres@127.0.0.1:5434/pdf_converter_dev \\
+    TEST_DATABASE_URL=postgresql+psycopg://postgres@127.0.0.1:5432/kort_test \\
         uv run pytest tests/test_finance_contracts_pg.py
 """
 from __future__ import annotations

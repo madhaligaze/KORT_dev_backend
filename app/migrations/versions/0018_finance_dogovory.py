@@ -12,7 +12,6 @@
 нашла договор» и порог НДС потом переписали бы все таблицы денег.
 
 Revision ID: 0018
-Revises: 0016  (в PDF-CONVERTER между ними стояла 0017 «Таблиц»)
 """
 from __future__ import annotations
 

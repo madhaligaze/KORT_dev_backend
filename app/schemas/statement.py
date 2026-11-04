@@ -313,19 +313,6 @@ class UpdateTemplateRequest(BaseModel):
     layout: dict | None = None
 
 
-class WebExcelSaveRequest(BaseModel):
-    """Save a Web-Excel "образ": infer reusable {field} rules from the grid and
-    persist them (+ presentation layout) as a TransformationTemplate."""
-    session_id: str
-    base_variant_key: str
-    name: str
-    columns: list[dict]                       # ordered [{key, label, kind}]
-    rows: list[dict] = Field(default_factory=list)
-    a1_formulas: dict[str, str] | None = None
-    layout: dict | None = None
-    is_default: bool = True
-
-
 class CorrectionMemoryEntry(BaseModel):
     correction_id: int
     parser_key: str
