@@ -42,6 +42,9 @@ ALLOWED: dict[tuple[str, str], str] = {
     ("PATCH", "/import/batches/{batch_id}/rows/{line}"): (
         "правка черновой строки партии: в учёт не попадает, событие пишет заведение партии"
     ),
+    ("PATCH", "/journal/preview/{batch_id}/rows/{line}"): (
+        "правка строки в окне загрузки до «Принять»: в журнал не попадает, событие пишет принятие"
+    ),
     ("POST", "/sheets/preview"): (
         "нужна книга Google; ответ собирает тот же `_preview_response`, что у /import/preview, "
         "и его событие проверено там"
@@ -220,7 +223,7 @@ def test_kazhdyy_izmenyayushchiy_marshrut_pishet_sobytie(app: FastAPI, monkeypat
     )
     grid_row = walk.call(
         owner, "POST", "/grid/row",
-        json={"cells": {"paid_at": "02.09.2026", "amount": "500", "account_to": "Касса", "comment": "строка листа"}},
+        json={"cells": {"paid_at": "02.09.2026", "income": "500", "account": "Касса", "comment": "строка листа"}},
     ).json()["id"]
     # Правка из листа откатывается, как правка карточки.
     cell_edit = next(
@@ -252,6 +255,34 @@ def test_kazhdyy_izmenyayushchiy_marshrut_pishet_sobytie(app: FastAPI, monkeypat
         owner, "POST", "/import/preview", files={"file": ("выписка.xlsx", _journal_file(), XLSX)}
     ).json()["batch_id"]
     walk.call(owner, "POST", "/import/batches/{batch_id}/apply", batch_id=batch, json={})
+
+    # ── журнал финансистов: запись, дробление, загрузка с предпросмотром ──
+    record = walk.call(
+        owner, "POST", "/journal",
+        json={"fields": {"kind": "expense", "paid_at": "05.09.2026", "amount": "3000", "account": "Касса",
+                         "category": "Хозтовары"}},
+    ).json()["record"]
+    edited = walk.call(
+        owner, "PATCH", "/journal/{operation_id}", operation_id=record["id"],
+        json={"version": record["version"], "fields": {"note": "чек?", "pnl": "Август 2026"}},
+    ).json()["record"]
+    parts = walk.call(
+        owner, "POST", "/journal/{operation_id}/split", operation_id=edited["id"],
+        json={"version": edited["version"], "parts": [{"amount": "1000"}, {"amount": "2 000", "pnl": "Сентябрь 2026"}]},
+    ).json()["records"]
+    walk.call(owner, "POST", "/journal/split/{group}/join", group=parts[0]["split"]["group"])
+    upload = walk.call(
+        owner, "POST", "/journal/preview", files={"file": ("журнал.xlsx", _journal_file(), XLSX)}
+    ).json()
+    fixed = owner.patch(
+        f"{BASE}/journal/preview/{upload['batch_id']}/rows/{upload['rows'][0]['line']}", json={"fields": {"note": "сверить"}}
+    )
+    assert fixed.status_code == 200, fixed.text
+    walk.call(owner, "POST", "/journal/preview/{batch_id}/accept", batch_id=upload["batch_id"], json={})
+    other = walk.call(
+        owner, "POST", "/journal/preview", files={"file": ("другой.xlsx", _journal_file(), XLSX)}
+    ).json()
+    walk.call(owner, "POST", "/journal/preview/{batch_id}/reject", batch_id=other["batch_id"])
 
     # ── счета на оплату, повторения ─────────────────────────────────────
     invoice = walk.call(

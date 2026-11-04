@@ -117,6 +117,16 @@ OPERATION_FIELDS = (
     "category_id",
     "counterparty_id",
     "comment",
+    # Поля журнала финансистов: «Вернуть» правки номера договора или месяца
+    # ОПиУ обязано вернуть и их, иначе оплата осталась бы в чужом договоре.
+    "period_start",
+    "period_end",
+    "contract_ref",
+    "period_label",
+    "details",
+    "note",
+    "split_group",
+    "split_total",
     "deleted_at",
 )
 
@@ -287,13 +297,13 @@ def _restore(operation: Operation, state: dict[str, Any]) -> None:
         if field not in state:
             continue
         value = state[field]
-        if field in ("paid_at", "accrued_at") and isinstance(value, str) and value:
+        if field in ("paid_at", "accrued_at", "period_start", "period_end") and isinstance(value, str) and value:
             value = date.fromisoformat(value[:10])
         elif field == "deleted_at" and isinstance(value, str) and value:
             value = datetime.fromisoformat(value)
-        elif field in ("amount", "rate") and value is not None:
+        elif field in ("amount", "rate", "split_total") and value is not None:
             value = Decimal(str(value))
-        elif field.endswith("_id") and isinstance(value, str) and value:
+        elif (field.endswith("_id") or field == "split_group") and isinstance(value, str) and value:
             value = uuid.UUID(value)
         setattr(operation, field, value)
 

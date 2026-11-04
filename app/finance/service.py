@@ -648,6 +648,13 @@ class OperationInput:
     category_id: uuid.UUID | None = None
     counterparty_id: uuid.UUID | None = None
     comment: str = ""
+    #: Поля журнала финансистов (см. `models.Operation`).
+    contract_ref: str = ""
+    period_label: str = ""
+    details: str = ""
+    note: str = ""
+    split_group: uuid.UUID | None = None
+    split_total: Decimal | None = None
     projects: Sequence[tuple[uuid.UUID, Decimal]] = ()
     #: Дробление по статьям: один платёж на несколько статей.
     categories: Sequence[tuple[uuid.UUID, Decimal]] = ()
@@ -675,8 +682,13 @@ def _validate(session: Session, workspace: Workspace, data: OperationInput) -> N
     check_date(data.paid_at, field="Дата платежа")
     check_date(data.accrued_at, field="Дата начисления")
     if data.kind == "transfer":
-        if not (data.account_from_id and data.account_to_id):
-            raise FinanceError("Для перевода нужны оба счёта")
+        # Перевод с одной известной стороной - законное состояние, а не
+        # пробел: выписка Kaspi показывает «Пэй - Юр счёт», а выписки Pay в
+        # учёте ещё нет. Вторая сторона дописывается, когда придёт её выписка
+        # (`journal.complete_halves`); до тех пор отчёт «Деньги» показывает
+        # такой перевод в контрольной сумме «у каждого перевода оба счёта».
+        if not (data.account_from_id or data.account_to_id):
+            raise FinanceError("Для перевода нужен хотя бы один свой счёт - откуда или куда")
         if data.account_from_id == data.account_to_id:
             raise FinanceError("Перевод на тот же счёт ничего не меняет")
     # У ожидания счёта может не быть, и это не пробел в данных.
@@ -701,13 +713,10 @@ def _validate(session: Session, workspace: Workspace, data: OperationInput) -> N
         category = session.get(Category, data.category_id)
         if category is None or category.workspace_id != workspace.id:
             raise FinanceError("Категория не найдена")
-        if data.kind != "transfer":
-            expected = "income" if data.kind == "income" else "expense"
-            if category.side != expected:
-                raise FinanceError(
-                    f"Категория «{category.name}» относится к другой стороне учёта: "
-                    f"это {'доход' if category.side == 'income' else 'расход'}"
-                )
+        expected = {"income": "income", "expense": "expense"}.get(data.kind, "transfer")
+        if category.side != expected:
+            what = {"income": "доход", "expense": "расход"}.get(category.side, "перемещение между своими счетами")
+            raise FinanceError(f"Статья «{category.name}» относится к другой стороне учёта: это {what}")
 
 
 def _split_state(amount: Decimal, splits: Sequence[tuple[uuid.UUID, Decimal]]) -> str:
@@ -782,9 +791,15 @@ def create_operation(
         rate=rate,
         account_from_id=data.account_from_id,
         account_to_id=data.account_to_id,
-        category_id=data.category_id if data.kind != "transfer" else None,
+        category_id=data.category_id,
         counterparty_id=data.counterparty_id,
         comment=data.comment or "",
+        contract_ref=data.contract_ref or "",
+        period_label=data.period_label or "",
+        details=data.details or "",
+        note=data.note or "",
+        split_group=data.split_group,
+        split_total=data.split_total,
         split_state=_split_state(amount, data.projects),
         source=data.source,
         recurrence_id=data.recurrence_id,

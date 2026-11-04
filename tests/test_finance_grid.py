@@ -1,9 +1,10 @@
 """Табличный вид журнала: поверхностей две, поведение одно.
 
 Главное свойство набора - правка ячейки обязана вести себя ровно так же, как
-форма, и разбирать значения теми же функциями, что импорт. Иначе «1 500,50» в
-таблице однажды станет числом 150050, а в файле останется 1500.50, и объяснить
-расхождение будет нечем.
+карточка записи, и разбирать значения теми же функциями, что загрузка. Иначе
+«1 500,50» в таблице однажды станет числом 150050, а в файле останется
+1500.50, и объяснить расхождение будет нечем. Колонки - журнала финансистов:
+сумма стоит в «Приходе» или в «Расходе», счёт - один.
 """
 from __future__ import annotations
 
@@ -59,10 +60,10 @@ def test_list_pokazyvaet_operatsii_i_spravochniki(one_income):
         operations, _total = service.list_operations(session, space_id, limit=100)
         payload = grid.build_grid(session, space, operations)
 
-    assert [column["key"] for column in payload["columns"]][:3] == ["paid_at", "kind_label", "amount"]
+    assert [column["key"] for column in payload["columns"]][:5] == ["pnl", "paid_at", "account", "income", "expense"]
     row = payload["rows"][0]
-    assert row["cells"]["kind_label"] == "Поступление"
-    assert row["cells"]["account_to"] == "Касса"
+    assert row["cells"]["income"] == "100000.00" and row["cells"]["expense"] == ""
+    assert row["cells"]["account"] == "Касса"
     assert "Касса" in payload["options"]["accounts"]
 
 
@@ -71,7 +72,7 @@ def test_summa_v_yacheike_razbiraetsya_kak_v_faile(one_income):
     space_id, operation_id = one_income
     with finance_session() as session:
         space = service.ensure_workspace(session)
-        operation = grid.apply_cell(session, space, operation_id, "amount", "1 500,50")
+        operation = grid.apply_cell(session, space, operation_id, "income", "1 500,50")
         # Значения снимаются внутри сессии: после выхода из блока объект
         # отвязан от неё, и обращение к полю уже не читается из базы.
         amount, amount_base = operation.amount, operation.amount_base
@@ -94,7 +95,7 @@ def test_neponyatnoe_znachenie_eto_otkaz_a_ne_nol(one_income):
     with finance_session() as session:
         space = service.ensure_workspace(session)
         with pytest.raises(FinanceError) as exc:
-            grid.apply_cell(session, space, operation_id, "amount", "примерно сто тысяч")
+            grid.apply_cell(session, space, operation_id, "income", "примерно сто тысяч")
     assert "Не понял сумму" in str(exc.value)
 
     with finance_session() as session:
@@ -103,44 +104,57 @@ def test_neponyatnoe_znachenie_eto_otkaz_a_ne_nol(one_income):
     assert amount == Decimal("100000")
 
 
-def test_minus_v_yacheike_ne_menyaet_vid_operatsii(one_income):
-    """Смена вида - не правка ячейки: от вида зависят обязательные поля."""
+def test_minus_v_yacheike_otkaz(one_income):
+    """Направление задаёт колонка, а не знак: минус в «Приходе» - не расход."""
     space_id, operation_id = one_income
     with finance_session() as session:
         space = service.ensure_workspace(session)
         with pytest.raises(FinanceError) as exc:
-            grid.apply_cell(session, space, operation_id, "amount", "-5000")
-    assert "вид операции меняется в карточке" in str(exc.value)
+            grid.apply_cell(session, space, operation_id, "income", "-5000")
+    assert "Минус в сумме не нужен" in str(exc.value)
 
 
-def test_vid_operatsii_yacheikoy_ne_pravitsya(one_income):
+def test_summa_v_drugoy_kolonke_menyaet_storonu(one_income):
+    """Сумма, вписанная в «Расход», - запись стала расходом с того же счёта."""
     space_id, operation_id = one_income
     with finance_session() as session:
         space = service.ensure_workspace(session)
-        with pytest.raises(FinanceError):
-            grid.apply_cell(session, space, operation_id, "kind_label", "Списание")
+        operation = grid.apply_cell(session, space, operation_id, "expense", "100 000")
+        cash = next(a for a in service.list_accounts(session, space_id) if a.name == "Касса")
+        assert operation.kind == "expense" and operation.account_from_id == cash.id and operation.account_to_id is None
+        # Статья дохода у расхода не остаётся: другая сторона учёта.
+        assert operation.category_id is None
+
+
+def test_proizvodnye_kolonki_ne_pravyatsya(one_income):
+    space_id, operation_id = one_income
+    with finance_session() as session:
+        space = service.ensure_workspace(session)
+        for key in ("group", "split", "month", "firm", "code"):
+            with pytest.raises(FinanceError):
+                grid.apply_cell(session, space, operation_id, key, "x")
 
 
 def test_neizvestnyy_schet_v_yacheike_otkaz(one_income):
-    """Счёт не создаётся ни импортом, ни таблицей."""
+    """Счёт не создаётся из опечатки в ячейке."""
     space_id, operation_id = one_income
     with finance_session() as session:
         space = service.ensure_workspace(session)
         with pytest.raises(FinanceError) as exc:
-            grid.apply_cell(session, space, operation_id, "account_to", "Kaspi Gold")
+            grid.apply_cell(session, space, operation_id, "account", "Kaspi Gold")
     text = str(exc.value)
     # Отказ называет, что есть, - иначе за названием счёта шли в справочник.
-    assert "Kaspi Gold" in text and "Касса" in text and "Справочник" in text
+    assert "Kaspi Gold" in text and "Касса" in text
 
 
 def test_schet_po_nachalu_nazvaniya_esli_on_odin(one_income):
-    """«Кас» + Enter - это «Касса»: выпадающий список Univer не дополняет набор."""
+    """«Банк» + Enter - это «Банковский счёт»: выпадающий список Univer не дополняет набор."""
     space_id, operation_id = one_income
     with finance_session() as session:
         space = service.ensure_workspace(session)
-        grid.apply_cell(session, space, operation_id, "account_to", "Банк")
+        grid.apply_cell(session, space, operation_id, "account", "Банк")
         row = grid.row_of(session, space, session.get(grid.Operation, operation_id))
-    assert row["cells"]["account_to"] == "Банковский счёт"
+    assert row["cells"]["account"] == "Банковский счёт"
 
 
 def test_neodnoznachnoe_nachalo_scheta_otkaz(one_income):
@@ -150,29 +164,22 @@ def test_neodnoznachnoe_nachalo_scheta_otkaz(one_income):
         space = service.ensure_workspace(session)
         service.create_account(session, space, name="Касса офис")
         with pytest.raises(FinanceError):
-            grid.apply_cell(session, space, operation_id, "account_to", "Кас")
+            grid.apply_cell(session, space, operation_id, "account", "Кас")
 
 
-def test_novaya_stroka_minus_pri_postuplenii_otkaz(one_income):
-    """Минус при счёте в «На счёт» - не повод молча завести поступление."""
+def test_novaya_stroka_s_minusom_otkaz(one_income):
+    """Минус в новой строке - не повод молча выбрать сторону."""
     with finance_session() as session:
         space = service.ensure_workspace(session)
         with pytest.raises(FinanceError) as exc:
-            grid.append_row(
-                session, space,
-                {"paid_at": "05.09.2026", "amount": "-5000", "account_to": "Касса"},
-            )
+            grid.append_row(session, space, {"paid_at": "05.09.2026", "income": "-5000", "account": "Касса"})
     assert "минус" in str(exc.value).lower()
 
 
-def test_novaya_stroka_minus_pri_raskhode_prinyat(one_income):
-    """Минус при счёте в «Со счёта» с видом согласен - это расход на 5 000."""
+def test_novaya_stroka_v_raskhode(one_income):
     with finance_session() as session:
         space = service.ensure_workspace(session)
-        operation = grid.append_row(
-            session, space,
-            {"paid_at": "05.09.2026", "amount": "-5000", "account_from": "Касса"},
-        )
+        operation = grid.append_row(session, space, {"paid_at": "05.09.2026", "expense": "5 000", "account": "Касса"})
         assert operation.kind == "expense"
         assert operation.amount == Decimal("5000")
 
@@ -184,7 +191,7 @@ def test_kategoriya_po_nachalu_ne_plodit_dvoynika(one_income):
         before = len(service.list_categories(session, space.id))
         operation = grid.append_row(
             session, space,
-            {"paid_at": "05.09.2026", "amount": "1000", "account_from": "Касса", "category": "Арен"},
+            {"paid_at": "05.09.2026", "expense": "1000", "account": "Касса", "category": "Арен"},
         )
         category = session.get(grid.Category, operation.category_id)
         assert category.name == "Аренда"
@@ -192,7 +199,7 @@ def test_kategoriya_po_nachalu_ne_plodit_dvoynika(one_income):
 
 
 def test_kategoriya_v_yacheike_zavoditsya_srazu(one_income):
-    """Категория, наоборот, появляется в работе постоянно - создаём на месте."""
+    """Статья, наоборот, появляется в работе постоянно - создаём на месте."""
     space_id, operation_id = one_income
     with finance_session() as session:
         space = service.ensure_workspace(session)
@@ -213,12 +220,8 @@ def test_pravka_po_ustarevshey_versii_otklonyaetsya(one_income):
             grid.apply_cell(session, space, operation_id, "comment", "правка второго", version=1)
 
 
-def test_novaya_stroka_snizu_stanovitsya_operatsiey(finance_db):
-    """Заполнили строку внизу листа - завелась операция.
-
-    Вид определяется по заполненным счетам, как в кассовой книге: сумма в графе
-    «приход» и есть приход.
-    """
+def test_novaya_stroka_snizu_stanovitsya_zapisyu(finance_db):
+    """Заполнили строку внизу листа - завелась запись: сумма в графе «Приход» и есть приход."""
     with finance_session() as session:
         space = service.ensure_workspace(session)
         operation = grid.append_row(
@@ -226,47 +229,40 @@ def test_novaya_stroka_snizu_stanovitsya_operatsiey(finance_db):
             space,
             {
                 "paid_at": "03.09.2026",
-                "amount": "250 000",
-                "account_to": "Касса",
+                "income": "250 000",
+                "account": "Касса",
                 "category": "Выручка",
                 "counterparty": "Клиент Бета",
                 "comment": "продажа",
+                "pnl": "Август 2026",
             },
         )
         kind, amount, source = operation.kind, operation.amount, operation.source
+        period = operation.period_start
     assert kind == "income"
     assert amount == Decimal("250000")
     assert source == "grid"
+    assert period == date(2026, 8, 1)
 
 
-def test_stroka_s_dvumya_schetami_eto_perevod(finance_db):
-    with finance_session() as session:
-        space = service.ensure_workspace(session)
-        operation = grid.append_row(
-            session,
-            space,
-            {"paid_at": "04.09.2026", "amount": "50000", "account_from": "Касса", "account_to": "Банковский счёт"},
-        )
-        kind, category_id = operation.kind, operation.category_id
-    assert kind == "transfer"
-    assert category_id is None
-
-
-def test_stroka_s_datoy_v_budushchem_eto_plan(finance_db):
-    """Платёж с датой вперёд - ожидание, а не факт."""
+def test_zapis_zhurnala_vsegda_fakt(finance_db):
+    """Журнал - движение денег по выписке: дата вперёд не делает строку ожиданием."""
     future = (date.today() + timedelta(days=30)).strftime("%d.%m.%Y")
     with finance_session() as session:
         space = service.ensure_workspace(session)
-        operation = grid.append_row(
-            session, space, {"paid_at": future, "amount": "10000", "account_to": "Касса"}
-        )
+        operation = grid.append_row(session, space, {"paid_at": future, "income": "10000", "account": "Касса"})
         status = operation.status
-    assert status == "plan"
+    assert status == "fact"
 
 
-def test_stroka_bez_scheta_ne_stanovitsya_operatsiey(finance_db):
+def test_stroka_bez_scheta_ili_summy_ne_stanovitsya_zapisyu(finance_db):
     with finance_session() as session:
         space = service.ensure_workspace(session)
         with pytest.raises(FinanceError) as exc:
-            grid.append_row(session, space, {"paid_at": "04.09.2026", "amount": "1000"})
-    assert "приход это или расход" in str(exc.value)
+            grid.append_row(session, space, {"paid_at": "04.09.2026", "income": "1000"})
+    assert "счёт" in str(exc.value)
+    with finance_session() as session:
+        space = service.ensure_workspace(session)
+        with pytest.raises(FinanceError) as exc:
+            grid.append_row(session, space, {"paid_at": "04.09.2026", "account": "Касса"})
+    assert "Без суммы" in str(exc.value)

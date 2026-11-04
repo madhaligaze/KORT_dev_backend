@@ -135,7 +135,7 @@ def changes(session: Session, workspace: Workspace, since: int) -> dict[str, Any
     Номер - до выборки строк: правка, закоммиченная между ними, иначе
     попала бы под курсор и не пришла бы ни здесь, ни следующим опросом.
     """
-    from app.finance import grid as grid_module
+    from app.finance import journal
 
     seq_now = current_seq(session, workspace.id)
     if seq_now <= since:
@@ -157,7 +157,11 @@ def changes(session: Session, workspace: Workspace, since: int) -> dict[str, Any
             )
         )
     )
-    rows = grid_module.build_grid(session, workspace, live)["rows"] if live else []
+    rows = journal.grid_lines(session, workspace, live) if live else []
+    # Строки, которых у записи больше нет: перевод стал приходом, половинка -
+    # целым переводом. Лист снимает их у себя; незнакомые ему - пропускает.
+    # У новой записи (версия 1) других строк не было - снимать нечего.
+    removed.extend(stale for item in live if item.version > 1 for stale in journal.stale_line_ids(item))
     return {"rows": rows, "removed": removed, "seq": seq_now}
 
 

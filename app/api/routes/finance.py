@@ -1670,28 +1670,37 @@ def delete_operation(operation_id: UUID, member: Member = Depends(require_access
 @router.get("/grid")
 def read_grid(
     member: Member = Depends(require_access("table")),
+    month: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}$"),
     date_from: str | None = None,
     date_to: str | None = None,
+    firm: UUID | None = None,
+    accounts: str | None = None,
+    search: str | None = None,
     limit: int | None = None,
 ) -> dict[str, Any]:
-    """Журнал как лист: шапка, строки и значения для выпадающих списков.
+    """Журнал как лист: колонки журнала финансистов, строки выписок по датам, списки значений.
 
     `seq` - номер изменения журнала, с которого лист начинает опрос
     (`/grid/changes`); читается до выборки строк, как у реестра договоров.
     """
+    from app.finance import journal as journal_module
+
     _guard()
     with finance_session() as session:
         workspace = _workspace(session, member)
         seq = live_module.current_seq(session, workspace.id)
-        flt = service.OperationFilter(
+        flt = journal_module.JournalFilter(
+            month=month or "",
             date_from=_parse_date(date_from, field="date_from"),
             date_to=_parse_date(date_to, field="date_to"),
+            firm=firm,
+            account_ids=[UUID(item) for item in (accounts or "").split(",") if item.strip()],
+            search=search or "",
         )
-        operations, total = service.list_operations(
-            session, workspace.id, flt, limit=min(limit or finance_settings.grid_max_rows, finance_settings.grid_max_rows)
+        payload = journal_module.grid_payload(
+            session, workspace, flt, limit=min(limit or finance_settings.grid_max_rows, finance_settings.grid_max_rows)
         )
-        payload = grid_module.build_grid(session, workspace, operations)
-        payload["total"] = total
+        payload["total"] = len({row["operation_id"] for row in payload["rows"]})
         payload["seq"] = seq
         return payload
 
@@ -1710,7 +1719,8 @@ def grid_changes(since: int = Query(0, ge=0), member: Member = Depends(require_a
 
 
 class CellPatch(BaseModel):
-    operation_id: UUID
+    #: Строка листа: id записи, у перевода - со стороной («<id>:in»).
+    operation_id: str
     column: str
     value: Any = None
     version: int | None = None
@@ -1724,7 +1734,11 @@ def patch_cell(body: CellPatch, member: Member = Depends(require_access("table",
         # Правка ячейки - та же правка операции, что из карточки, и пишется в
         # журнал так же: с состоянием до и после и с откатом. Раньше лист
         # менял операцию молча, и «кто поменял сумму» по нему было не узнать.
-        existing = session.get(Operation, body.operation_id)
+        try:
+            operation_id, side = grid_module.split_line_id(body.operation_id)
+        except FinanceError as exc:
+            raise _fail(exc) from exc
+        existing = session.get(Operation, operation_id)
         before = (
             history.snapshot(existing)
             if existing is not None and existing.workspace_id == workspace.id
@@ -1750,7 +1764,8 @@ def patch_cell(body: CellPatch, member: Member = Depends(require_access("table",
         # ячейки по месту, а не перечитывает журнал (см. `grid.row_of`).
         return {
             **_operation_out(operation, names=names, splits=splits, tags=tags),
-            "row": grid_module.row_of(session, workspace, operation),
+            "row": grid_module.row_of(session, workspace, operation, side),
+            "rows": grid_module.rows_of(session, workspace, operation),
         }
 
 

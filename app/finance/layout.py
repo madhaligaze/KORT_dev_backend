@@ -35,6 +35,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
+from functools import cached_property
 from typing import Any, Iterable, Mapping, Sequence
 
 log = logging.getLogger(__name__)
@@ -99,11 +100,22 @@ class Column:
     required: bool = True
     strict: bool = False
 
+    @cached_property
+    def _normed(self) -> frozenset[str]:
+        # Названия колонки - постоянные, а сверяют их с каждой ячейкой каждой
+        # строки-кандидата в шапку: журнал на шесть тысяч строк нормализовал
+        # одни и те же названия миллион раз - половина времени разбора.
+        return frozenset(norm(name) for name in self.names)
+
+    @cached_property
+    def _squashed(self) -> tuple[str, ...]:
+        return tuple(squash(name) for name in self.names)
+
     def matches_exact(self, header: str) -> bool:
-        return any(norm(header) == norm(name) for name in self.names)
+        return norm(header) in self._normed
 
     def matches_squashed(self, header: str) -> bool:
-        return any(squash(header) == squash(name) for name in self.names)
+        return squash(header) in self._squashed
 
     def matches_loose(self, header: str) -> bool:
         """Один заголовок - начало другого. «Сумма Договора» ↔ «Сумма Дог.».
@@ -114,8 +126,7 @@ class Column:
         actual = squash(header)
         if len(actual) < 4:
             return False
-        for name in self.names:
-            wanted = squash(name)
+        for wanted in self._squashed:
             if len(wanted) < 4:
                 continue
             if actual.startswith(wanted) or wanted.startswith(actual):

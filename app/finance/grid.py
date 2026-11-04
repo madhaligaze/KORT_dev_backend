@@ -1,157 +1,91 @@
-"""Табличный вид журнала: операции как лист, правка ячейки как правка операции.
+"""Табличный вид журнала: строки журнала финансистов как лист, правка ячейки - правка записи.
 
 Зачем он нужен
 ──────────────
 Человек, пришедший из Excel, приходит с привычками - выделить диапазон и
 увидеть сумму, потянуть за угол, вставить столбец из буфера, Ctrl+Z. Своя
 решётка не отвечает ни одной из них, поэтому лист рисует Univer, а этот
-модуль отвечает за перевод между листом и операциями.
+модуль отвечает за перевод между листом и записями журнала.
+
+Колонки - колонки журнала BBC (`journal.COLUMNS`): ОПиУ период, Дата, Счёт,
+Приход, Расход, Контрагент, Дробление, №Дог., Подкатегория, ФОТ/Детали,
+Проект, Категория, Комментарии, Вопросы и производные (ДДС месяц, Фирма, Код
+договора). Перевод между своими счетами - две строки, по строке на каждый
+счёт, как в выписках (`journal.lines_of`): правка любой из двух - правка
+одного перевода.
 
 Правило, которое здесь держится
 ───────────────────────────────
-**Поверхностей две, поведение одно.** Ячейка «Сумма» разбирается тем же
-`parse_money`, которым разбирается файл импорта, а дата - тем же `parse_date`.
-Иначе через месяц «1 500,50» в таблице станет числом 150050, а в импорте
-останется 1500.50, и объяснить это будет нечем.
+**Поверхностей две, поведение одно.** Ячейка разбирается тем же
+`parse_money` / `parse_date`, что и файл загрузки, а правка идёт через ту же
+`journal.edit`, что и карточка записи. Иначе «1 500,50» в таблице однажды
+станет числом 150050, а в карточке - 1500.50.
 
-Чего таблица намеренно не умеет
-───────────────────────────────
-Менять вид операции (доход ↔ расход) правкой ячейки. Вид определяет, какие
-поля обязательны и какой знак у денег; смена вида - это переписывание строки, а
-не правка ячейки, и делается в форме. В таблице колонка «Вид» показывается
-только для чтения.
+Сторону записи менять можно: сумма, вписанная в «Приход» строки расхода,
+делает её приходом (счёт остаётся), статья-перемещение - половинкой перевода.
+Так лист позволяет передумать, как в своей таблице, не удаляя строку.
 """
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
-from datetime import date
-from decimal import Decimal
 from typing import Any, Sequence
 
 import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
+from app.finance import journal, service
 from app.finance.layout import norm
-from app.finance import service
-from app.finance.importing import DateReading, parse_date, parse_money
-from app.finance.models import Account, Category, Counterparty, Operation, Project, Workspace
+from app.finance.models import Category, Operation, Workspace
+
+#: Колонки листа - колонки журнала.
+COLUMNS = journal.COLUMNS
 
 
-@dataclass(frozen=True)
-class GridColumn:
-    key: str
-    title: str
-    kind: str  # date | money | text | enum | readonly
-    width: int = 120
-    editable: bool = True
-    #: Для колонок-справочников: откуда брать список значений.
-    source: str = ""
+def split_line_id(line_id: str) -> tuple[uuid.UUID, str | None]:
+    """«<id>:in» → (id, «in»): строка перевода знает свою сторону."""
+    text = str(line_id or "").strip()
+    head, _, side = text.partition(":")
+    try:
+        operation_id = uuid.UUID(head)
+    except ValueError as exc:
+        raise service.FinanceError("Строка листа не найдена") from exc
+    if side not in ("", "in", "out"):
+        raise service.FinanceError("Строка листа не найдена")
+    return operation_id, side or None
 
 
-#: Состав колонок листа. Порядок - тот, в котором читают: сначала когда и
-#: сколько, потом откуда/куда, потом смысл.
-COLUMNS: tuple[GridColumn, ...] = (
-    GridColumn("paid_at", "Дата платежа", "date", 110),
-    GridColumn("kind_label", "Вид", "readonly", 90, editable=False),
-    GridColumn("amount", "Сумма", "money", 130),
-    GridColumn("account_from", "Со счёта", "enum", 175, source="accounts"),
-    GridColumn("account_to", "На счёт", "enum", 175, source="accounts"),
-    GridColumn("category", "Категория", "enum", 180, source="categories"),
-    GridColumn("counterparty", "Контрагент", "enum", 210, source="counterparties"),
-    GridColumn("project", "Проект", "enum", 180, source="projects"),
-    GridColumn("accrued_at", "Дата сделки", "date", 110),
-    GridColumn("comment", "Комментарий", "text", 260),
-    GridColumn("status_label", "Состояние", "readonly", 110, editable=False),
-)
-
-KIND_LABELS = {"income": "Поступление", "expense": "Списание", "transfer": "Перевод"}
-STATUS_LABELS = {"fact": "Факт", "plan": "План"}
-
-#: Дата в ячейке разбирается как «день-месяц-год»: таблицу заполняет человек
-#: руками, а не выгрузка из чужой системы, и порядок здесь известен заранее.
-#: Про файлы - другое дело, там порядок решается по файлу (см. `importing`).
-CELL_DATE_READING = DateReading("dmy", "ручной ввод в таблице")
-
-
-def build_grid(
-    session: Session, workspace: Workspace, operations: Sequence[Operation]
-) -> dict[str, Any]:
-    """Операции → лист: шапка, строки и справочники для выпадающих списков."""
-    accounts = {account.id: account.name for account in service.list_accounts(session, workspace.id)}
-    categories = {item.id: item.name for item in service.list_categories(session, workspace.id)}
-    counterparties = {
-        item.id: item.name for item in service.list_counterparties(session, workspace.id)
-    }
-    projects = {item.id: item.name for item in service.list_projects(session, workspace.id)}
-    splits = service.operation_projects(session, [operation.id for operation in operations])
-
-    rows: list[dict[str, Any]] = []
-    for operation in operations:
-        own_splits = splits.get(operation.id, [])
-        rows.append(
-            {
-                "id": str(operation.id),
-                "version": operation.version,
-                "cells": {
-                    "paid_at": operation.paid_at.isoformat(),
-                    "kind_label": KIND_LABELS.get(operation.kind, operation.kind),
-                    "amount": str(operation.amount),
-                    "account_from": accounts.get(operation.account_from_id, ""),
-                    "account_to": accounts.get(operation.account_to_id, ""),
-                    "category": categories.get(operation.category_id, ""),
-                    "counterparty": counterparties.get(operation.counterparty_id, ""),
-                    # Разнесение на несколько проектов в одну ячейку не влезает:
-                    # показываем первый и помечаем, что их больше. Правка такой
-                    # ячейки затрагивает только разнесение целиком - см. ниже.
-                    "project": (
-                        projects.get(own_splits[0].project_id, "")
-                        + (f" +{len(own_splits) - 1}" if len(own_splits) > 1 else "")
-                        if own_splits
-                        else ""
-                    ),
-                    "accrued_at": operation.accrued_at.isoformat() if operation.accrued_at else "",
-                    "comment": operation.comment or "",
-                    "status_label": STATUS_LABELS.get(operation.status, operation.status),
-                },
-                "kind": operation.kind,
-                "status": operation.status,
-                "split_count": len(own_splits),
-            }
-        )
-
+def build_grid(session: Session, workspace: Workspace, operations: Sequence[Operation]) -> dict[str, Any]:
+    """Записи → лист: шапка, строки и справочники для выпадающих списков."""
+    book = journal.Book.load(session, workspace.id)
     return {
-        "columns": [
-            {
-                "key": column.key,
-                "title": column.title,
-                "kind": column.kind,
-                "width": column.width,
-                "editable": column.editable,
-                "source": column.source,
-            }
-            for column in COLUMNS
-        ],
-        "rows": rows,
-        "options": {
-            "accounts": sorted(accounts.values()),
-            "categories": sorted(categories.values()),
-            "counterparties": sorted(counterparties.values()),
-            "projects": sorted(projects.values()),
-        },
+        "columns": journal.grid_columns(),
+        "rows": journal.grid_lines(session, workspace, operations, book),
+        "options": journal.grid_options(session, workspace, book),
     }
 
 
-def row_of(session: Session, workspace: Workspace, operation: Operation) -> dict[str, Any]:
-    """Одна строка листа - ровно в том виде, в каком её отдаёт `build_grid`.
+def rows_of(session: Session, workspace: Workspace, operation: Operation) -> list[dict[str, Any]]:
+    """Строки одной записи - ровно в том виде, в каком их отдаёт `build_grid`."""
+    return journal.grid_lines(session, workspace, [operation])
 
-    Лист после правки записывает эту строку обратно в свои ячейки. Без неё
-    ему оставалось перечитывать журнал целиком, а перечитанный журнал
-    отсортирован заново: операция с исправленной датой уезжала на другое
-    место, строки на экране оставались прежними, и следующая правка уходила в
-    соседнюю операцию.
+
+def row_of(session: Session, workspace: Workspace, operation: Operation, side: str | None = None) -> dict[str, Any] | None:
+    """Строка листа после правки - та сторона записи, которую правили.
+
+    Лист после правки записывает её обратно в свои ячейки. Без неё ему
+    оставалось перечитывать журнал целиком, а перечитанный журнал
+    отсортирован заново: запись с исправленной датой уезжала на другое место,
+    строки на экране оставались прежними, и следующая правка уходила в
+    соседнюю запись.
     """
-    return build_grid(session, workspace, [operation])["rows"][0]
+    rows = rows_of(session, workspace, operation)
+    if not rows:
+        return None
+    if side:
+        for row in rows:
+            if row["side"] == side:
+                return row
+    return rows[0]
 
 
 def _resolve(session: Session, workspace: Workspace, model, name: str, **extra):
@@ -188,189 +122,47 @@ def _resolve(session: Session, workspace: Workspace, model, name: str, **extra):
     return candidates[0] if len(candidates) == 1 else None
 
 
-def _account(session: Session, workspace: Workspace, text: str) -> Account | None:
-    """Счёт по тексту ячейки - или отказ со списком того, что есть.
-
-    Счёт из таблицы не создаётся: место, где лежат деньги, не должно
-    появляться из опечатки. Но и отказ «такого нет» без списка заставлял идти
-    в справочник, чтобы узнать, как счёт называется.
-    """
-    account = _resolve(session, workspace, Account, text)
-    if text.strip() and account is None:
-        names = [item.name for item in service.list_accounts(session, workspace.id)]
-        raise service.FinanceError(
-            f"Счёта «{text.strip()}» нет. Есть: {', '.join(names)}. "
-            "Новый счёт заводится в «Справочниках»"
-        )
-    return account
-
-
 def apply_cell(
     session: Session,
     workspace: Workspace,
-    operation_id: uuid.UUID,
+    line_id: str | uuid.UUID,
     column_key: str,
     raw_value: Any,
     *,
     version: int | None = None,
     actor: str = "",
 ) -> Operation:
-    """Правка одной ячейки листа.
-
-    Значение разбирается теми же функциями, что и файл импорта. Нераспознанное
-    значение - это отказ с объяснением, а не запись нуля: ноль в денежной
-    колонке выглядит как «столько и было».
-    """
-    column = next((item for item in COLUMNS if item.key == column_key), None)
+    """Правка одной ячейки листа - правка записи журнала по смыслу колонки."""
+    column = journal.COLUMN_BY_KEY.get(column_key)
     if column is None:
-        raise service.FinanceError(f"В таблице нет колонки «{column_key}»")
+        raise service.FinanceError(f"В журнале нет колонки «{column_key}»")
     if not column.editable:
         raise service.FinanceError(
-            f"«{column.title}» правится в карточке операции, а не в ячейке: "
-            "от этого поля зависит, какие другие поля обязательны"
+            f"«{column.title}» считается сам: "
+            + {
+                "split": "дробление правится в записи - «Разделить» и «Собрать»",
+                "group": "категория - группа подкатегории",
+            }.get(column_key, "его не печатают")
         )
-
-    operation = session.get(Operation, operation_id)
-    if operation is None or operation.workspace_id != workspace.id:
-        raise service.FinanceError("Операция не найдена")
-
-    changes: dict[str, Any] = {}
+    operation_id, side = split_line_id(str(line_id))
     text = "" if raw_value is None else str(raw_value).strip()
-
-    if column.kind == "date":
+    if column_key in ("income", "expense"):
+        operation = session.get(Operation, operation_id)
+        if operation is None or operation.workspace_id != workspace.id:
+            raise service.FinanceError("Запись не найдена")
         if not text:
-            if column_key == "paid_at":
-                raise service.FinanceError("Дата платежа не может быть пустой")
-            changes[column_key] = None
-        else:
-            parsed = parse_date(raw_value, CELL_DATE_READING)
-            if parsed is None:
-                raise service.FinanceError(f"Не понял дату «{text}». Пример: 03.09.2026")
-            changes[column_key] = parsed
-    elif column.kind == "money":
-        money = parse_money(raw_value)
-        if money is None:
-            raise service.FinanceError(f"Не понял сумму «{text}»")
-        if money.negative:
-            raise service.FinanceError(
-                "Минус в сумме не задаёт расход: вид операции меняется в карточке"
-            )
-        changes["amount"] = money.value
-    elif column.kind == "text":
-        changes[column_key] = text
-    elif column.kind == "enum":
-        if column_key in ("account_from", "account_to"):
-            account = _account(session, workspace, text)
-            changes[f"{column_key}_id"] = account.id if account else None
-        elif column_key == "category":
-            side = "income" if operation.kind == "income" else "expense"
-            category = _resolve(session, workspace, Category, text, side=side)
-            if text and category is None:
-                category = service.ensure_category(session, workspace.id, side, text)
-            changes["category_id"] = category.id if category else None
-        elif column_key == "counterparty":
-            role = "client" if operation.kind == "income" else "supplier"
-            counterparty = _resolve(session, workspace, Counterparty, text, role=role)
-            if text and counterparty is None:
-                counterparty = service.ensure_counterparty(session, workspace.id, text, role=role)
-            changes["counterparty_id"] = counterparty.id if counterparty else None
-        elif column_key == "project":
-            if not text:
-                changes["projects"] = []
-            else:
-                project = _resolve(session, workspace, Project, text)
-                if project is None:
-                    project = service.ensure_project(session, workspace.id, text)
-                changes["projects"] = [(project.id, Decimal(str(operation.amount)))]
-
-    return service.update_operation(
-        session, workspace, operation_id, changes, version=version, actor=actor
-    )
-
-
-def append_row(
-    session: Session, workspace: Workspace, cells: dict[str, Any], *, actor: str = ""
-) -> Operation:
-    """Новая операция из строки, набранной внизу листа.
-
-    Вид операции определяется по заполненным счетам - так же, как в импорте:
-    оба счёта → перевод, только «На счёт» → поступление, только «Со счёта» →
-    списание. Это избавляет от лишней колонки и повторяет привычку кассовой
-    книги, где приход и расход различаются тем, в какую графу поставили сумму.
-    """
-    account_from = _account(session, workspace, str(cells.get("account_from") or ""))
-    account_to = _account(session, workspace, str(cells.get("account_to") or ""))
-
-    if account_from and account_to:
-        kind = "transfer"
-    elif account_to:
-        kind = "income"
-    elif account_from:
-        kind = "expense"
+            # Сумму стёрли в своей колонке: если она стоит в соседней - это
+            # не правка, а очистка соседней ячейки при переносе суммы.
+            raise service.FinanceError("Сумма не может быть пустой: запись без суммы удаляется в журнале, а не обнуляется")
+        patch = {column_key: raw_value}
     else:
-        raise service.FinanceError(
-            "Не понял, приход это или расход: заполните «Со счёта» или «На счёт»"
-        )
-
-    paid_at = parse_date(cells.get("paid_at"), CELL_DATE_READING)
-    if paid_at is None:
-        raise service.FinanceError("Без даты платежа строка не станет операцией")
-    money = parse_money(cells.get("amount"))
-    if money is None or not money.value:
-        raise service.FinanceError("Без суммы строка не станет операцией")
-    # Минус в сумме не выбрасываем молча. Человек из кассовой книги пишет
-    # расход с минусом - и если счёт стоит в «Со счёта», минус с ним согласен.
-    # Но минус при счёте в «На счёт» означал бы «пришло минус пять тысяч»:
-    # взять модуль и завести поступление - ровно та тихая смена знака, за
-    # которую разбор импорта критикует соседей по рынку.
-    if money.negative and kind != "expense":
-        raise service.FinanceError(
-            "Сумма с минусом, а счёт указан в «На счёт» - это было бы поступление. "
-            "Для расхода поставьте счёт в «Со счёта»"
-            if kind == "income"
-            else "У перевода сумма без минуса: направление задают «Со счёта» и «На счёт»"
-        )
-
-    side = "income" if kind == "income" else "expense"
-    # Справочники кроме счетов по-прежнему пополняются из таблицы, но сначала
-    # ищется существующая запись - в том числе по началу названия, иначе
-    # «Арен» заводило бы вторую статью рядом с «Арендой» и делило отчёт.
-    category = None
-    if str(cells.get("category") or "").strip() and kind != "transfer":
-        text = str(cells["category"])
-        category = _resolve(session, workspace, Category, text, side=side) or service.ensure_category(
-            session, workspace.id, side, text
-        )
-    counterparty = None
-    if str(cells.get("counterparty") or "").strip():
-        role = "client" if kind == "income" else "supplier"
-        text = str(cells["counterparty"])
-        counterparty = _resolve(session, workspace, Counterparty, text, role=role) or service.ensure_counterparty(
-            session, workspace.id, text, role=role
-        )
-    projects: list[tuple[uuid.UUID, Decimal]] = []
-    if str(cells.get("project") or "").strip():
-        text = str(cells["project"])
-        project = _resolve(session, workspace, Project, text) or service.ensure_project(session, workspace.id, text)
-        if project is not None:
-            projects.append((project.id, money.value))
-
-    accrued = parse_date(cells.get("accrued_at"), CELL_DATE_READING)
-    data = service.OperationInput(
-        kind=kind,
-        status="plan" if paid_at > date.today() else "fact",
-        paid_at=paid_at,
-        accrued_at=accrued,
-        amount=money.value,
-        account_from_id=account_from.id if account_from else None,
-        account_to_id=account_to.id if account_to else None,
-        category_id=category.id if category else None,
-        counterparty_id=counterparty.id if counterparty else None,
-        comment=str(cells.get("comment") or ""),
-        projects=projects,
-        source="grid",
-    )
-    return service.create_operation(session, workspace, data, actor=actor)
+        patch = {column_key: raw_value}
+    return journal.edit(session, workspace, operation_id, patch, version=version, side=side, actor=actor)
 
 
-__all__ = ["COLUMNS", "GridColumn", "KIND_LABELS", "append_row", "apply_cell", "build_grid", "row_of"]
+def append_row(session: Session, workspace: Workspace, cells: dict[str, Any], *, actor: str = "") -> Operation:
+    """Новая запись из строки, напечатанной внизу листа."""
+    return journal.append_line(session, workspace, cells, actor=actor)
+
+
+__all__ = ["COLUMNS", "Category", "append_row", "apply_cell", "build_grid", "row_of", "rows_of", "split_line_id"]

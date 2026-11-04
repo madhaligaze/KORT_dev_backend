@@ -89,6 +89,11 @@ OPERATION_STATUSES = ("fact", "plan")
 OPERATION_SOURCES = ("app", "grid", "import", "api", "invoice", "recurrence", "integration")
 ACCOUNT_KINDS = ("bank", "cash", "card", "safe", "crypto", "other")
 CATEGORY_SIDES = ("income", "expense")
+#: Сторона статьи. Кроме дохода и расхода - перемещение между своими счетами:
+#: у перевода в журнале финансистов своя статья («Текущий счёт - Депозит»,
+#: «Пэй - Юр счёт»), и по ней видно, что это за движение. В плане статья
+#: перемещения не участвует - плану хватает `CATEGORY_SIDES`.
+CATEGORY_KINDS = ("income", "expense", "transfer")
 #: Роль контрагента. Список повторяет тот, что сложился в отрасли: он определяет,
 #: в какую часть баланса попадёт долг - в дебиторку или в кредиторку.
 COUNTERPARTY_ROLES = ("client", "supplier", "staff", "owner", "creditor", "borrower", "tax")
@@ -216,7 +221,7 @@ class Category(FinanceBase):
 
     __tablename__ = "categories"
     __table_args__ = (
-        sa.CheckConstraint(_in("side", CATEGORY_SIDES), name="category_side"),
+        sa.CheckConstraint(_in("side", CATEGORY_KINDS), name="category_side"),
         sa.UniqueConstraint(
             "workspace_id", "side", "parent_id", "normalized_name", name="uq_categories_name"
         ),
@@ -346,6 +351,7 @@ class Operation(FinanceBase):
         sa.Index("ix_operations_workspace_id_accrued_at", "workspace_id", "accrued_at"),
         sa.Index("ix_operations_workspace_id_status", "workspace_id", "status"),
         sa.Index("ix_operations_workspace_id_seq", "workspace_id", "seq"),
+        sa.Index("ix_operations_workspace_id_split_group", "workspace_id", "split_group"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(sa.Uuid, primary_key=True, default=_uuid)
@@ -388,6 +394,25 @@ class Operation(FinanceBase):
     )
 
     comment: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("''"))
+    #: Номер договора, как его написал источник или финансист («№ЮО/84» в
+    #: журнале). По нему оплата ложится в договор реестра
+    #: (`contracts/payments.py`): платит нередко не сам клиент - через Kaspi
+    #: Pay от физлица, через другое ТОО, - и по плательщику её не отнести.
+    contract_ref: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("''"))
+    #: «За какой период» словами, когда это не месяц и не год («Старые (до
+    #: Май/Июня 2026)»): оплата не за месяцы учёта. Месяц или год лежит в
+    #: периоде операции (`period_start`/`period_end`) - см. `journal.py`.
+    period_label: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("''"))
+    #: «ФОТ/Детали» журнала: кому зарплата, за что именно.
+    details: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("''"))
+    #: Вопрос к строке («сверка с ОП», «не нашёл в таблице»). Непустой -
+    #: строка ждёт ответа, журнал показывает её среди требующих внимания.
+    note: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("''"))
+    #: Дробление одной суммы выписки: части - отдельные операции с общей
+    #: группой, `split_total` - сумма строки выписки. Части обязаны сходиться
+    #: с ней; не сходятся - это видно у каждой части, а не в отчёте.
+    split_group: Mapped[uuid.UUID | None] = mapped_column(sa.Uuid)
+    split_total: Mapped[Decimal | None] = mapped_column(MONEY)
     split_state: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("'none'"))
 
     source: Mapped[str] = mapped_column(sa.Text, server_default=sa.text("'app'"))
@@ -942,6 +967,7 @@ __all__ = [
     "ACCOUNT_KINDS",
     "Account",
     "CATEGORY_SIDES",
+    "CATEGORY_KINDS",
     "COUNTERPARTY_ROLES",
     "Category",
     "Counterparty",

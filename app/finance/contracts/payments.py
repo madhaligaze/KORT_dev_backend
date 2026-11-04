@@ -22,6 +22,14 @@
 * **наше юрлицо**: счёт операции привязан к юрлицу договора («Наши юрлица» →
   счета). Счёт без юрлица не мешает - тогда решает сторона.
 
+**Номер договора из журнала** («№Дог.», `operations.contract_ref`) решает
+раньше стороны: финансист записал номер - оплата этого договора, даже если
+платил не сам клиент (Kaspi Pay от физлица, другое ТОО). Так в реестре BBC
+«Факт оплата» и считался - суммой журнала по номеру договора. Номер решает,
+только если такой договор у юрлица счёта один (`journal.ref_key` сводит
+«NºHO/40» и «№НО/40»); иначе - как раньше, по стороне. Расход с номером
+договора продажи - возврат клиенту: он уменьшает «Оплачено».
+
 Подходит один договор - оплата его. Несколько (у клиента старый и новый
 договор с тем же ТОО) - берётся тот, чей срок содержит дату платежа: от даты
 договора без месяца (предоплата) до окончания плюс два месяца (последний
@@ -81,6 +89,8 @@ class Side:
     end: date | None
     #: Сумма договора (у абонентского - месячная): платёж ровно на неё - довод.
     amount: Decimal | None = None
+    #: Номер договора - для «№Дог.» журнала.
+    number: str = ""
 
     def holds(self, day: date) -> bool:
         if self.start is not None and day < self.start - WINDOW_BEFORE:
@@ -109,16 +119,24 @@ def _sides(contracts: Iterable[Contract], registry: Registry) -> list[Side]:
             ours, theirs, kind = contract.customer_id, contract.executor_id, "expense"
         else:
             continue
-        out.append(Side(contract.id, ours, theirs, kind, contract.signed_at, contract.end_date, contract.amount))
+        out.append(
+            Side(contract.id, ours, theirs, kind, contract.signed_at, contract.end_date, contract.amount, contract.number or "")
+        )
     return out
 
 
 def allocate(session: Session, workspace: Workspace, registry: Registry, contracts: Iterable[Contract]) -> Allocation:
     """Разнести операции журнала по договорам (см. описание модуля)."""
+    from app.finance.journal import ref_key
+
     result = Allocation()
     sides = _sides(contracts, registry)
     if not sides:
         return result
+    by_ref: dict[str, list[Side]] = {}
+    for side in sides:
+        if side.number:
+            by_ref.setdefault(ref_key(side.number), []).append(side)
     theirs_ids = {side.theirs for side in sides}
     by_side: dict[tuple[uuid.UUID, str], list[Side]] = {}
     for side in sides:
@@ -152,18 +170,17 @@ def allocate(session: Session, workspace: Workspace, registry: Registry, contrac
                 Operation.deleted_at.is_(None),
                 Operation.status == "fact",
                 Operation.kind.in_(("income", "expense")),
-                Operation.counterparty_id.is_not(None),
+                sa.or_(Operation.counterparty_id.is_not(None), Operation.contract_ref != ""),
             )
         )
     )
     if not operations:
         return result
+    party_ids = {operation.counterparty_id for operation in operations} - {None}
     payers = {
         party.id: party
-        for party in session.scalars(
-            sa.select(Counterparty).where(
-                Counterparty.id.in_({operation.counterparty_id for operation in operations})
-            )
+        for party in (
+            session.scalars(sa.select(Counterparty).where(Counterparty.id.in_(party_ids))) if party_ids else []
         )
     }
     manual = dict(
@@ -181,7 +198,23 @@ def allocate(session: Session, workspace: Workspace, registry: Registry, contrac
             if chosen in known:
                 result.paid.setdefault(chosen, []).append((operation, "manual"))
             continue
-        payer = payers.get(operation.counterparty_id)
+        if operation.contract_ref:
+            account = operation.account_to_id if operation.kind == "income" else operation.account_from_id
+            entity = entity_of_account.get(account) if account else None
+            hits = [
+                side
+                for side in by_ref.get(ref_key(operation.contract_ref), [])
+                if entity is None or side.ours == entity
+            ]
+            if len(hits) == 1:
+                side = hits[0]
+                if operation.kind == side.kind:
+                    result.paid.setdefault(side.contract_id, []).append((operation, "number"))
+                    continue
+                if operation.kind == "expense" and side.kind == "income":
+                    result.paid.setdefault(side.contract_id, []).append((operation, "refund"))
+                    continue
+        payer = payers.get(operation.counterparty_id) if operation.counterparty_id else None
         if payer is None:
             continue
         if payer.id in theirs_ids:
@@ -234,7 +267,11 @@ def summary_of(contract: Contract, found: list[tuple[Operation, str]], open_coun
     пустая ячейка честнее нуля, если выписка этого счёта ещё не загружена."""
     if not found and not open_count:
         return None
-    paid = sum((operation.amount_base for operation, _how in found), Decimal("0"))
+    # Возврат клиенту (расход с номером договора продажи) уменьшает оплату.
+    paid = sum(
+        (-operation.amount_base if how == "refund" else operation.amount_base for operation, how in found),
+        Decimal("0"),
+    )
     remaining = None
     if found and contract.billing == "total" and contract.amount is not None:
         remaining = contract.amount - paid
