@@ -13,19 +13,23 @@
   шага), которую сделали книгой отдела (в каждой группе каждого блока -
   «отдел - …», у BBC - «Разовые ЮО»), - вид договоров с тем же ключом.
   Условия, которые стоят в каждой группе каждого блока её листов (вид
-  договора, два статуса, отдел), уходят в отбор вида - договоры в листах те
-  же: блок без своих условий у вида с отбором - весь вид. Отдел из отбора -
+  договора, два статуса, отдел), копируются в отбор вида. Отдел из отбора -
   владелец вида и доля («Разовые ЮО» - доля ЮО). Название - первый лист и код
   отдела: «Разовые ЮО». Меры - те, что стоят колонками и условиями листов;
-  «По сотрудникам» - как было. Нетронутый засев (без отдела - так у всех
-  компаний, кроме BBC) уходит в корзину: новая и чужая компания не держат
-  листов юротдела BBC;
-* «Оплачено (сводка)», «Остаток (сводка)», «Срок, мес» - больше не поля
-  договора, а меры вида: их строки полей удаляются (листы, личный вид и права
-  держат прежние ключи);
+  «По сотрудникам» - как было;
 * написания шапок, которые были в коде под одну компанию («исполнитель bbc»,
   «ссылка на битрикс 24»), дописываются в поля существующих компаний: у них
   разбор узнаёт те же шапки, а новая компания чужих слов не получает.
+
+Листы, корзина и поля договора не трогаются (18.11.2026). Ядро спит, и код,
+который работает на базе, читает условия «Разовых» из блоков листов, а
+«Оплачено (сводка)», «Остаток (сводка)», «Срок, мес» - из полей договора.
+Прежняя редакция этой ревизии переносила условия из листов в отбор вида,
+отправляла в корзину нетронутый засев «Разовых» и удаляла строки этих трёх
+полей - так она прошла по тестовой базе 28.10, и после отката к коду без
+ядра листы «Разовые ЮО» там показывали договоры всех видов, отделов и
+статусов, а сумма шла целиком, а не долей ЮО. Это делается ревизией, которая
+будит ядро, вместе с кодом, который читает отбор вида.
 
 Revision ID: 0041
 Revises: 0040
@@ -67,7 +71,10 @@ def _canon(condition: dict[str, Any]) -> str:
 
 
 def _adopt(bind: Any, workspace_id: Any, sheets: list[tuple[Any, str, int, Any, Any]], position: int) -> None:
-    """Книга `oneoff` компании - вид договоров: общие условия в отбор вида, отдел - владелец."""
+    """Книга `oneoff` компании - вид договоров: копия общих условий в отбор вида, отдел - владелец.
+
+    Листы книги остаются как были: их читает код, который работает на базе.
+    """
     live = [sheet for sheet in sheets if sheet[4] is None]
     groups_all: list[list[dict[str, Any]]] = []
     for _id, _title, _position, blocks, _archived in live:
@@ -80,7 +87,6 @@ def _adopt(bind: Any, workspace_id: Any, sheets: list[tuple[Any, str, int, Any, 
         shared = set.intersection(*keys)
         common = [item for item in groups_all[0] if _canon(item) in shared]
     base = {"any": [{"all": common}]} if common else {}
-    hoisted = {_canon(item) for item in common}
     department = next(
         (
             item["value"][0]
@@ -100,44 +106,19 @@ def _adopt(bind: Any, workspace_id: Any, sheets: list[tuple[Any, str, int, Any, 
         if not code:
             department = None
     if department is None:
-        # Засев, которого не касались: листы - в корзину, вида нет.
-        bind.execute(
-            sa.text(
-                f"""update {SCHEMA}.entity_views set archived_at = now()
-                where workspace_id = :ws and book = :book and archived_at is null"""
-            ),
-            {"ws": workspace_id, "book": LEGACY_BOOK},
-        )
+        # Засев, которого не касались: вида нет, листы остаются.
         return
     used: set[str] = set()
-    for sheet_id, _title, _position, blocks, _archived in sheets:
-        changed = []
+    for _id, _title, _position, blocks, _archived in sheets:
         for block in blocks or []:
-            block = dict(block or {})
+            block = block or {}
             for column in block.get("columns") or []:
                 if (column or {}).get("key") in MEASURE_KEYS:
                     used.add(column["key"])
-            rule = block.get("filter") or {}
-            groups = []
-            whole = False
-            for group in rule.get("any") or []:
-                rest = [item for item in group.get("all") or [] if _canon(item) not in hoisted]
-                for item in rest:
+            for group in (block.get("filter") or {}).get("any") or []:
+                for item in group.get("all") or []:
                     if item.get("field") in MEASURE_KEYS:
                         used.add(item["field"])
-                if not rest:
-                    whole = True
-                groups.append({"all": rest})
-            if hoisted and (whole or not groups):
-                block["filter"] = {"any": []}
-            elif hoisted:
-                block["filter"] = {"any": groups}
-            changed.append(block)
-        if hoisted:
-            bind.execute(
-                sa.text(f"update {SCHEMA}.entity_views set blocks = cast(:blocks as jsonb) where id = :id"),
-                {"blocks": _json(changed), "id": sheet_id},
-            )
     first = sorted(live or sheets, key=lambda sheet: sheet[2])[0]
     title = f"{first[1]} {code}".strip() if department is not None else first[1]
     measures = (["share"] if department is not None else []) + [key for key in MEASURE_KEYS if key in used]
@@ -222,12 +203,6 @@ def upgrade() -> None:
         if sheets:
             _adopt(bind, workspace_id, sheets, 30)
 
-    bind.execute(
-        sa.text(f"delete from {SCHEMA}.entity_fields where entity = 'contract' and key in :keys").bindparams(
-            sa.bindparam("keys", expanding=True)
-        ),
-        {"keys": list(MEASURE_KEYS)},
-    )
     for key, names in COMPANY_NAMES.items():
         for row_id, stored in bind.execute(
             sa.text(f"select id, names from {SCHEMA}.entity_fields where entity = 'contract' and key = :key"), {"key": key}
@@ -245,27 +220,7 @@ def downgrade() -> None:
     bind = op.get_bind()
     if bind.dialect.name == "sqlite":
         return
-    # Строки полей мер досеет прежний код сам (`ensure_registry`); отбор вида,
-    # поднятый из блоков «Разовых», возвращается в каждый блок.
-    for workspace_id, base in bind.execute(
-        sa.text(f"select workspace_id, filter from {SCHEMA}.views where key = :book"), {"book": LEGACY_BOOK}
-    ).all():
-        common = [item for group in (base or {}).get("any") or [] for item in group.get("all") or []]
-        if not common:
-            continue
-        for sheet_id, blocks in bind.execute(
-            sa.text(f"select id, blocks from {SCHEMA}.entity_views where workspace_id = :ws and book = :book"),
-            {"ws": workspace_id, "book": LEGACY_BOOK},
-        ).all():
-            out = []
-            for block in blocks or []:
-                block = dict(block or {})
-                groups = ((block.get("filter") or {}).get("any")) or [{"all": []}]
-                block["filter"] = {"any": [{"all": common + list(group.get("all") or [])} for group in groups]}
-                out.append(block)
-            bind.execute(
-                sa.text(f"update {SCHEMA}.entity_views set blocks = cast(:blocks as jsonb) where id = :id"),
-                {"blocks": _json(out), "id": sheet_id},
-            )
+    # Листы и поля ревизия не меняла - возвращать в них нечего. Дописанные
+    # написания шапок остаются: прежний код знает те же слова сам.
     op.drop_index("ix_views_workspace_id", table_name="views", schema=SCHEMA)
     op.drop_table("views", schema=SCHEMA)

@@ -8,8 +8,13 @@
 
 * `contract_payments.amount` - сумма части; пусто - вся операция (прежние
   решения не меняются).
-* Уникальность - операция и договор, а не операция: у разделённой оплаты
-  строк столько, сколько частей.
+
+Уникальность остаётся прежней - одна строка на операцию (18.11.2026). Ядро
+спит, а код, который работает на базе, решение по операции ищет и заводит
+сам (`contracts/payments.py`), и только запрет базы не даёт двум разом
+нажатым «отнести к договору» отнести одну оплату к двум договорам. Прежняя
+редакция ревизии меняла его на «операция и договор»; это делается ревизией,
+которая будит ядро, вместе с кодом, который делит оплату на части.
 
 Revision ID: 0044
 Revises: 0043
@@ -35,23 +40,10 @@ def upgrade() -> None:
         # На SQLite схему заводит `create_all` (тесты); миграции - для Postgres.
         return
     op.add_column("contract_payments", sa.Column("amount", sa.Numeric(18, 2), nullable=True), schema=SCHEMA)
-    op.drop_constraint("uq_contract_payments_operation", "contract_payments", schema=SCHEMA, type_="unique")
-    op.create_unique_constraint(
-        "uq_contract_payments_operation_contract", "contract_payments", ["operation_id", "contract_id"], schema=SCHEMA
-    )
-    op.create_index("ix_contract_payments_operation_id", "contract_payments", ["operation_id"], schema=SCHEMA)
 
 
 def downgrade() -> None:
     bind = op.get_bind()
     if bind.dialect.name == "sqlite":
         return
-    # Разделённая оплата прежней схеме не по силам: остаётся решение первой частью.
-    op.execute(sa.text(
-        f"DELETE FROM {SCHEMA}.contract_payments a USING {SCHEMA}.contract_payments b "
-        "WHERE a.operation_id = b.operation_id AND a.id > b.id"
-    ))
-    op.drop_index("ix_contract_payments_operation_id", table_name="contract_payments", schema=SCHEMA)
-    op.drop_constraint("uq_contract_payments_operation_contract", "contract_payments", schema=SCHEMA, type_="unique")
-    op.create_unique_constraint("uq_contract_payments_operation", "contract_payments", ["operation_id"], schema=SCHEMA)
     op.drop_column("contract_payments", "amount", schema=SCHEMA)
